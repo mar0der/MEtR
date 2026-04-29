@@ -1701,8 +1701,8 @@ fn query_top_projects(conn: &Connection) -> Result<Vec<ProjectSummary>, String> 
               COALESCE(SUM(u.input_tokens),0), COALESCE(SUM(u.output_tokens),0), COALESCE(SUM(u.cached_input_tokens),0),
               COALESCE(SUM(u.cache_write_tokens),0), COALESCE(SUM(u.cache_read_tokens),0), COALESCE(SUM(u.reasoning_tokens),0),
               COALESCE(SUM(u.tool_tokens),0), COALESCE(SUM(u.unknown_tokens),0), COALESCE(SUM(u.official_api_cost_usd),0),
-              MAX(u.timestamp)
              MIN(u.timestamp), MAX(u.timestamp)
+              MIN(u.timestamp), MAX(u.timestamp)
              FROM projects pr JOIN usage_events u ON u.project_id = pr.id
              GROUP BY pr.id ORDER BY COALESCE(SUM(u.official_api_cost_usd),0) DESC, MAX(u.timestamp) DESC LIMIT 20",
         )
