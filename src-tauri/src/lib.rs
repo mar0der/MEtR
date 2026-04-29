@@ -176,7 +176,7 @@ pub fn run() {
             let conn = Connection::open(db_path.join("metr.db"))?;
             migrate(&conn)?;
             seed_defaults(&conn)?;
-            reprice_usage_events(&conn)?;
+            cleanup_known_bad_imports(&conn)?;
             app.manage(AppState {
                 db: Mutex::new(conn),
             });
@@ -195,12 +195,7 @@ pub fn run() {
             create_subscription,
             delete_subscription,
             list_pricing_catalog,
-            login_sync,
-            logout_sync,
-            get_sync_status,
-            configure_sync_server,
-            sync_now,
-            full_resync
+            clear_parsed_data
         ])
         .run(tauri::generate_context!())
         .expect("error while running MEtR");
@@ -297,6 +292,25 @@ fn remove_source(state: State<AppState>, source_id: String) -> Result<(), String
     let conn = state.db.lock().map_err(to_string)?;
     conn.execute("DELETE FROM log_sources WHERE id = ?1", params![source_id])
         .map_err(to_string)?;
+    Ok(())
+}
+
+#[tauri::command]
+fn clear_parsed_data(state: State<AppState>) -> Result<(), String> {
+    let conn = state.db.lock().map_err(to_string)?;
+    conn.execute_batch(
+        "
+        DELETE FROM usage_events;
+        DELETE FROM conversations;
+        DELETE FROM projects;
+        UPDATE log_sources
+        SET last_scan_started_at = NULL,
+            last_scan_finished_at = NULL,
+            last_scan_status = NULL,
+            last_scan_message = 'Parsed data cleared. Run Rescan to rebuild.';
+        ",
+    )
+    .map_err(to_string)?;
     Ok(())
 }
 
@@ -405,12 +419,23 @@ fn create_subscription(
         ],
     )
     .map_err(to_string)?;
-    drop(conn);
-    let subscriptions = list_subscriptions(state)?;
-    subscriptions
-        .into_iter()
-        .find(|s| s.id == id)
-        .ok_or_else(|| "Subscription was created but could not be loaded.".to_string())
+    conn.query_row(
+        "SELECT id, provider_id, product_name, monthly_amount, currency, billing_anchor_day, enabled
+         FROM subscriptions WHERE id = ?1",
+        params![id],
+        |r| {
+            Ok(Subscription {
+                id: r.get(0)?,
+                provider_id: r.get(1)?,
+                product_name: r.get(2)?,
+                monthly_amount: r.get(3)?,
+                currency: r.get(4)?,
+                billing_anchor_day: r.get(5)?,
+                enabled: r.get::<_, i64>(6)? == 1,
+            })
+        },
+    )
+    .map_err(to_string)
 }
 
 #[tauri::command]
@@ -448,520 +473,6 @@ fn list_pricing_catalog(state: State<AppState>) -> Result<Vec<Value>, String> {
         })
         .map_err(to_string)?;
     rows.collect::<Result<Vec<_>, _>>().map_err(to_string)
-}
-
-// ---------------------------------------------------------------------------
-// Sync commands
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Deserialize)]
-struct LoginInput {
-    login: String,
-    password: String,
-    server_url: String,
-}
-
-#[derive(Debug, Serialize)]
-struct SyncStatus {
-    configured: bool,
-    server_url: String,
-    logged_in: bool,
-    username: Option<String>,
-    device_name: Option<String>,
-    last_sync_at: Option<String>,
-    pending_events: i64,
-    sync_enabled: bool,
-}
-
-#[derive(Debug, Serialize)]
-struct SyncResult {
-    uploaded: usize,
-    batches: usize,
-    subscriptions_uploaded: usize,
-    errors: Vec<String>,
-}
-
-fn ensure_sync_config(conn: &Connection) -> Result<(), String> {
-    let exists: bool = conn
-        .query_row("SELECT 1 FROM sync_config WHERE id = 1", [], |_| Ok(true))
-        .unwrap_or(false);
-    if !exists {
-        let now = now();
-        conn.execute(
-            "INSERT INTO sync_config (id, server_url, created_at, updated_at)
-             VALUES (1, 'https://metr.petarpetkov.com', ?1, ?1)",
-            params![now],
-        )
-        .map_err(to_string)?;
-    }
-    Ok(())
-}
-
-fn get_sync_config(conn: &Connection) -> Result<SyncStatus, String> {
-    ensure_sync_config(conn)?;
-    let row = conn
-        .query_row(
-            "SELECT server_url, auth_token, device_name, username, last_sync_at, sync_enabled
-             FROM sync_config WHERE id = 1",
-            [],
-            |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, Option<String>>(1)?,
-                    r.get::<_, Option<String>>(2)?,
-                    r.get::<_, Option<String>>(3)?,
-                    r.get::<_, Option<String>>(4)?,
-                    r.get::<_, i64>(5)? == 1,
-                ))
-            },
-        )
-        .map_err(to_string)?;
-
-    let pending: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM usage_events WHERE synced_at IS NULL",
-            [],
-            |r| r.get(0),
-        )
-        .unwrap_or(0);
-
-    Ok(SyncStatus {
-        configured: true,
-        server_url: row.0,
-        logged_in: row.1.is_some(),
-        username: row.3,
-        device_name: row.2,
-        last_sync_at: row.4,
-        pending_events: pending,
-        sync_enabled: row.5,
-    })
-}
-
-#[tauri::command]
-fn configure_sync_server(state: State<AppState>, server_url: String) -> Result<SyncStatus, String> {
-    let conn = state.db.lock().map_err(to_string)?;
-    ensure_sync_config(&conn)?;
-    let now = now();
-    conn.execute(
-        "UPDATE sync_config SET server_url = ?1, updated_at = ?2 WHERE id = 1",
-        params![server_url, now],
-    )
-    .map_err(to_string)?;
-    get_sync_config(&conn)
-}
-
-#[tauri::command]
-fn login_sync(state: State<AppState>, input: LoginInput) -> Result<SyncStatus, String> {
-    let conn = state.db.lock().map_err(to_string)?;
-    ensure_sync_config(&conn)?;
-
-    let device_name = format!(
-        "{}-{}",
-        std::env::consts::OS,
-        whoami::fallible::hostname().unwrap_or_else(|_| "unknown".to_string())
-    );
-
-    let client = reqwest::blocking::Client::new();
-    let url = format!(
-        "{}/api/v1/auth/login",
-        input.server_url.trim_end_matches('/')
-    );
-    let resp = client
-        .post(&url)
-        .json(&serde_json::json!({
-            "login": input.login,
-            "password": input.password,
-            "device_name": device_name,
-        }))
-        .send()
-        .map_err(|e| format!("Login request failed: {}", e))?;
-
-    if !resp.status().is_success() {
-        let body = resp.text().unwrap_or_default();
-        return Err(format!("Login failed: {}", body));
-    }
-
-    let data: Value = resp
-        .json()
-        .map_err(|e| format!("Invalid login response: {}", e))?;
-    let token = data
-        .get("token")
-        .and_then(|t| t.as_str())
-        .ok_or("No token in login response")?;
-    let username = data
-        .get("user")
-        .and_then(|u| u.get("username"))
-        .and_then(|u| u.as_str())
-        .unwrap_or(&input.login)
-        .to_string();
-
-    let now = now();
-    conn.execute(
-        "UPDATE sync_config SET server_url = ?1, auth_token = ?2, username = ?3, device_name = ?4, sync_enabled = 1, updated_at = ?5 WHERE id = 1",
-        params![input.server_url, token, username, device_name, now],
-    )
-    .map_err(to_string)?;
-
-    get_sync_config(&conn)
-}
-
-#[tauri::command]
-fn logout_sync(state: State<AppState>) -> Result<SyncStatus, String> {
-    let conn = state.db.lock().map_err(to_string)?;
-    ensure_sync_config(&conn)?;
-
-    // Optionally notify server, but ignore errors
-    if let Ok((Some(token), server_url)) = conn.query_row(
-        "SELECT auth_token, server_url FROM sync_config WHERE id = 1",
-        [],
-        |r| Ok((r.get::<_, Option<String>>(0)?, r.get::<_, String>(1)?)),
-    ) {
-        let _ = reqwest::blocking::Client::new()
-            .post(format!(
-                "{}/api/v1/auth/logout",
-                server_url.trim_end_matches('/')
-            ))
-            .header("Authorization", format!("Bearer {}", token))
-            .header("Accept", "application/json")
-            .send();
-    }
-
-    let now = now();
-    conn.execute(
-        "UPDATE sync_config SET auth_token = NULL, username = NULL, user_id = NULL, last_sync_at = NULL, sync_enabled = 0, updated_at = ?1 WHERE id = 1",
-        params![now],
-    )
-    .map_err(to_string)?;
-
-    get_sync_config(&conn)
-}
-
-#[tauri::command]
-fn get_sync_status(state: State<AppState>) -> Result<SyncStatus, String> {
-    let conn = state.db.lock().map_err(to_string)?;
-    get_sync_config(&conn)
-}
-
-#[tauri::command]
-fn sync_now(state: State<AppState>) -> Result<SyncResult, String> {
-    let conn = state.db.lock().map_err(to_string)?;
-    perform_sync(&conn, false)
-}
-
-#[tauri::command]
-fn full_resync(state: State<AppState>) -> Result<SyncResult, String> {
-    let conn = state.db.lock().map_err(to_string)?;
-    perform_sync(&conn, true)
-}
-
-fn perform_sync(conn: &Connection, force_all: bool) -> Result<SyncResult, String> {
-    ensure_sync_config(conn)?;
-
-    let (token, server_url, device_uuid): (String, String, Option<String>) = conn
-        .query_row(
-            "SELECT auth_token, server_url, device_uuid FROM sync_config WHERE id = 1",
-            [],
-            |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, Option<String>>(2)?,
-                ))
-            },
-        )
-        .map_err(|_| "Not logged in. Please log in first.".to_string())?;
-
-    let device_uuid = match device_uuid {
-        Some(uuid) => uuid,
-        None => {
-            let uuid = Uuid::new_v4().to_string();
-            conn.execute(
-                "UPDATE sync_config SET device_uuid = ?1, updated_at = ?2 WHERE id = 1",
-                params![uuid, now()],
-            )
-            .map_err(to_string)?;
-            uuid
-        }
-    };
-
-    let base_url = server_url.trim_end_matches('/');
-    let client = reqwest::blocking::Client::new();
-    let auth_header = format!("Bearer {}", token);
-
-    // Register device
-    let device_name = conn
-        .query_row(
-            "SELECT device_name FROM sync_config WHERE id = 1",
-            [],
-            |r| r.get::<_, String>(0),
-        )
-        .unwrap_or_else(|_| format!("{}-unknown", std::env::consts::OS));
-
-    let reg_resp = client
-        .post(format!("{}/api/v1/devices/register", base_url))
-        .header("Authorization", &auth_header)
-        .header("Accept", "application/json")
-        .json(&serde_json::json!({
-            "device_uuid": device_uuid,
-            "display_name": device_name,
-            "platform": std::env::consts::OS,
-            "hostname_hash": hash(&whoami::fallible::hostname().unwrap_or_else(|_| "unknown".to_string())),
-            "os_version": whoami::distro(),
-            "app_version": env!("CARGO_PKG_VERSION"),
-        }))
-        .send()
-        .map_err(|e| format!("Device registration failed: {}", e))?;
-
-    if !reg_resp.status().is_success() {
-        let body = reg_resp.text().unwrap_or_default();
-        return Err(format!("Device registration failed: {}", body));
-    }
-
-    let mut errors = Vec::new();
-    let subscriptions_uploaded = match sync_subscriptions(conn, &client, base_url, &auth_header) {
-        Ok(count) => count,
-        Err(error) => {
-            errors.push(format!("Subscription sync failed: {error}"));
-            0
-        }
-    };
-
-    if force_all {
-        conn.execute(
-            "UPDATE usage_events
-             SET synced_at = NULL, sync_batch_id = NULL, sync_error = NULL, updated_at = ?1",
-            params![now()],
-        )
-        .map_err(to_string)?;
-    }
-
-    // Query unsynced events in batches
-    let mut total_uploaded = 0usize;
-    let mut batch_count = 0usize;
-
-    loop {
-        let mut stmt = conn
-            .prepare(
-                "SELECT u.id, u.provider_id, u.timestamp, u.model,
-                 u.input_tokens, u.output_tokens, u.cached_input_tokens,
-                 u.cache_write_tokens, u.cache_read_tokens,
-                 u.reasoning_tokens, u.tool_tokens, u.unknown_tokens,
-                 u.source_hash, u.raw_record_hash, u.source_file_path, u.source_offset,
-                 u.official_api_cost_usd, u.pricing_match_confidence, u.warnings_json,
-                 p.path, p.display_name,
-                 c.external_conversation_id, c.display_name,
-                 u.created_at, u.updated_at
-                 FROM usage_events u
-                 LEFT JOIN projects p ON p.id = u.project_id
-                 LEFT JOIN conversations c ON c.id = u.conversation_id
-                 WHERE u.synced_at IS NULL
-                 ORDER BY u.timestamp ASC
-                 LIMIT 500",
-            )
-            .map_err(to_string)?;
-
-        let events: Vec<Value> = stmt
-            .query_map([], |r| {
-                let project_path: Option<String> = r.get(19)?;
-                let project_display: Option<String> = r.get(20)?;
-                let conversation_external: Option<String> = r.get(21)?;
-                let conversation_display: Option<String> = r.get(22)?;
-                let cost: Option<f64> = r.get(16)?;
-                let pricing_match_confidence: String = r.get(17)?;
-                let warnings_json: String = r.get(18)?;
-                let warnings = serde_json::from_str::<Value>(&warnings_json)
-                    .unwrap_or_else(|_| Value::Array(vec![]));
-                Ok(serde_json::json!({
-                    "source_event_id": r.get::<_, String>(0)?,
-                    "source_event_hash": r.get::<_, String>(13)?,
-                    "source_file_hash": r.get::<_, String>(12)?,
-                    "source_offset": r.get::<_, Option<i64>>(15)?,
-                    "provider_id": r.get::<_, String>(1)?,
-                    "timestamp": r.get::<_, String>(2)?,
-                    "model": r.get::<_, Option<String>>(3)?,
-                    "project": project_path.map(|root_path| serde_json::json!({
-                        "root_path": root_path,
-                        "display_name": project_display,
-                    })),
-                    "conversation": conversation_external.map(|external_conversation_id| serde_json::json!({
-                        "external_conversation_id": external_conversation_id,
-                        "display_name": conversation_display,
-                    })),
-                    "tokens": {
-                        "input": r.get::<_, i64>(4)?,
-                        "output": r.get::<_, i64>(5)?,
-                        "cached_input": r.get::<_, i64>(6)?,
-                        "cache_write": r.get::<_, i64>(7)?,
-                        "cache_read": r.get::<_, i64>(8)?,
-                        "reasoning": r.get::<_, i64>(9)?,
-                        "tool": r.get::<_, i64>(10)?,
-                        "unknown": r.get::<_, i64>(11)?,
-                    },
-                    "client_cost": cost.map(|official_api_cost_usd| serde_json::json!({
-                        "official_api_cost_usd": official_api_cost_usd,
-                        "pricing_match_confidence": pricing_match_confidence,
-                    })),
-                    "warnings": warnings,
-                    "client_created_at": r.get::<_, String>(23)?,
-                    "client_updated_at": r.get::<_, String>(24)?,
-                }))
-            })
-            .map_err(to_string)?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(to_string)?;
-
-        if events.is_empty() {
-            break;
-        }
-
-        let client_batch_id = format!("{}-{}", device_uuid, Uuid::new_v4());
-        let resp = client
-            .post(format!("{}/api/v1/sync/events", base_url))
-            .header("Authorization", &auth_header)
-            .header("Accept", "application/json")
-            .json(&serde_json::json!({
-                "device_uuid": device_uuid,
-                "client_batch_id": client_batch_id,
-                "events": events,
-            }))
-            .send()
-            .map_err(|e| format!("Sync request failed: {}", e))?;
-
-        if resp.status().is_success() {
-            let now = now();
-            let event_ids: Vec<String> = events
-                .iter()
-                .filter_map(|e| {
-                    e.get("source_event_id")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string())
-                })
-                .collect();
-
-            for id in event_ids {
-                conn.execute(
-                    "UPDATE usage_events
-                     SET synced_at = ?1, sync_batch_id = ?2, sync_error = NULL, updated_at = ?1
-                     WHERE id = ?3",
-                    params![now, client_batch_id, id],
-                )
-                .map_err(to_string)?;
-            }
-
-            total_uploaded += events.len();
-            batch_count += 1;
-        } else {
-            let body = resp.text().unwrap_or_default();
-            errors.push(format!("Batch {} failed: {}", batch_count + 1, body));
-            let failed_at = now();
-            for event in &events {
-                if let Some(id) = event.get("source_event_id").and_then(|v| v.as_str()) {
-                    conn.execute(
-                        "UPDATE usage_events SET sync_error = ?1, updated_at = ?2 WHERE id = ?3",
-                        params![errors.last().cloned().unwrap_or_default(), failed_at, id],
-                    )
-                    .map_err(to_string)?;
-                }
-            }
-            break;
-        }
-    }
-
-    let now = now();
-    conn.execute(
-        "UPDATE sync_config SET last_sync_at = ?1, updated_at = ?1 WHERE id = 1",
-        params![now],
-    )
-    .map_err(to_string)?;
-
-    Ok(SyncResult {
-        uploaded: total_uploaded,
-        batches: batch_count,
-        subscriptions_uploaded,
-        errors,
-    })
-}
-
-fn sync_subscriptions(
-    conn: &Connection,
-    client: &reqwest::blocking::Client,
-    base_url: &str,
-    auth_header: &str,
-) -> Result<usize, String> {
-    let mut stmt = conn
-        .prepare(
-            "SELECT id, provider_id, product_name, monthly_amount, currency,
-             billing_anchor_day, enabled, notes
-             FROM subscriptions
-             ORDER BY provider_id, product_name",
-        )
-        .map_err(to_string)?;
-
-    let subscriptions: Vec<Value> = stmt
-        .query_map([], |r| {
-            let enabled: i64 = r.get(6)?;
-            Ok(serde_json::json!({
-                "source_subscription_id": r.get::<_, String>(0)?,
-                "provider_id": r.get::<_, String>(1)?,
-                "product_name": r.get::<_, String>(2)?,
-                "monthly_amount": r.get::<_, f64>(3)?,
-                "currency": r.get::<_, String>(4)?,
-                "billing_anchor_day": r.get::<_, i64>(5)?,
-                "enabled": enabled == 1,
-                "notes": r.get::<_, Option<String>>(7)?,
-            }))
-        })
-        .map_err(to_string)?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(to_string)?;
-
-    if subscriptions.is_empty() {
-        return Ok(0);
-    }
-
-    let subscription_count = subscriptions.len();
-    let resp = client
-        .post(format!("{}/api/v1/sync/subscriptions", base_url))
-        .header("Authorization", auth_header)
-        .header("Accept", "application/json")
-        .json(&serde_json::json!({
-            "subscriptions": subscriptions,
-        }))
-        .send()
-        .map_err(|e| format!("Subscription sync request failed: {}", e))?;
-
-    let status = resp.status();
-    if !status.is_success() {
-        let body = resp.text().unwrap_or_default();
-        return Err(format!("{status}: {body}"));
-    }
-
-    let data: Value = resp
-        .json()
-        .map_err(|e| format!("Invalid subscription sync response: {}", e))?;
-
-    Ok(data
-        .get("synced")
-        .and_then(|value| value.as_u64())
-        .unwrap_or(subscription_count as u64) as usize)
-}
-
-fn add_column_if_missing(
-    conn: &Connection,
-    table: &str,
-    column: &str,
-    def: &str,
-) -> rusqlite::Result<()> {
-    let sql = format!("ALTER TABLE {} ADD COLUMN {} {}", table, column, def);
-    match conn.execute(&sql, []) {
-        Ok(_) => Ok(()),
-        Err(rusqlite::Error::SqliteFailure(code, Some(msg)))
-            if code.extended_code == 1 && msg.contains("duplicate column name") =>
-        {
-            Ok(())
-        }
-        Err(e) => Err(e),
-    }
 }
 
 fn migrate(conn: &Connection) -> rusqlite::Result<()> {
@@ -1045,22 +556,6 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
           raw_record_hash TEXT NOT NULL,
           confidence TEXT NOT NULL,
           warnings_json TEXT NOT NULL DEFAULT '[]',
-          synced_at TEXT,
-          sync_batch_id TEXT,
-          sync_error TEXT,
-          created_at TEXT NOT NULL,
-          updated_at TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS sync_config (
-          id INTEGER PRIMARY KEY CHECK (id = 1),
-          server_url TEXT NOT NULL DEFAULT 'https://metr.petarpetkov.com',
-          auth_token TEXT,
-          device_uuid TEXT,
-          device_name TEXT,
-          user_id TEXT,
-          username TEXT,
-          last_sync_at TEXT,
-          sync_enabled INTEGER NOT NULL DEFAULT 0,
           created_at TEXT NOT NULL,
           updated_at TEXT NOT NULL
         );
@@ -1107,11 +602,7 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         CREATE UNIQUE INDEX IF NOT EXISTS idx_usage_events_dedupe ON usage_events(id);
         CREATE INDEX IF NOT EXISTS idx_pricing_provider_model ON pricing_catalogs(provider_id, model);
         ",
-    )?;
-    add_column_if_missing(conn, "usage_events", "synced_at", "TEXT")?;
-    add_column_if_missing(conn, "usage_events", "sync_batch_id", "TEXT")?;
-    add_column_if_missing(conn, "usage_events", "sync_error", "TEXT")?;
-    Ok(())
+    )
 }
 
 fn seed_defaults(conn: &Connection) -> rusqlite::Result<()> {
@@ -1123,10 +614,6 @@ fn seed_defaults(conn: &Connection) -> rusqlite::Result<()> {
         ("cline", "Cline / Roo Code"),
         ("continue", "Continue"),
         ("aider", "Aider"),
-        ("lmstudio", "LM Studio"),
-        ("ollama", "Ollama"),
-        ("cloudflare", "Cloudflare Workers AI"),
-        ("kimi", "Kimi / Moonshot"),
         ("generic", "Generic JSONL"),
     ] {
         ensure_provider(conn, id, name)?;
@@ -1140,58 +627,6 @@ fn seed_defaults(conn: &Connection) -> rusqlite::Result<()> {
         Some(1.25),
         Some(10.0),
         Some(0.125),
-        None,
-        None,
-        "https://openai.com/api/pricing/",
-    )?;
-    seed_price(
-        conn,
-        "openai:gpt-5.5",
-        "openai",
-        "gpt-5.5",
-        &[],
-        Some(5.0),
-        Some(30.0),
-        Some(0.50),
-        None,
-        None,
-        "https://openai.com/api/pricing/",
-    )?;
-    seed_price(
-        conn,
-        "openai:gpt-5.4",
-        "openai",
-        "gpt-5.4",
-        &[],
-        Some(2.50),
-        Some(15.0),
-        Some(0.25),
-        None,
-        None,
-        "https://openai.com/api/pricing/",
-    )?;
-    seed_price(
-        conn,
-        "openai:gpt-5.3-codex",
-        "openai",
-        "gpt-5.3-codex",
-        &[],
-        Some(1.75),
-        Some(14.0),
-        Some(0.175),
-        None,
-        None,
-        "https://developers.openai.com/api/docs/models/gpt-5.3-codex",
-    )?;
-    seed_price(
-        conn,
-        "openai:gpt-5.4-mini",
-        "openai",
-        "gpt-5.4-mini",
-        &[],
-        Some(0.75),
-        Some(4.50),
-        Some(0.075),
         None,
         None,
         "https://openai.com/api/pricing/",
@@ -1218,97 +653,9 @@ fn seed_defaults(conn: &Connection) -> rusqlite::Result<()> {
         Some(3.0),
         Some(15.0),
         None,
-        Some(6.0),
+        Some(3.75),
         Some(0.30),
         "https://docs.anthropic.com/en/docs/about-claude/pricing",
-    )?;
-    seed_price(
-        conn,
-        "anthropic:claude-sonnet-4-5-20250929",
-        "anthropic",
-        "claude-sonnet-4-5-20250929",
-        &["claude-sonnet-4-5", "claude-sonnet-4.5"],
-        Some(3.0),
-        Some(15.0),
-        None,
-        Some(6.0),
-        Some(0.30),
-        "https://docs.anthropic.com/en/docs/about-claude/pricing",
-    )?;
-    seed_price(
-        conn,
-        "anthropic:claude-sonnet-4-6",
-        "anthropic",
-        "claude-sonnet-4-6",
-        &["claude-sonnet-4.6"],
-        Some(3.0),
-        Some(15.0),
-        None,
-        Some(6.0),
-        Some(0.30),
-        "https://docs.anthropic.com/en/docs/about-claude/pricing",
-    )?;
-    seed_price(
-        conn,
-        "anthropic:claude-haiku-4-5-20251001",
-        "anthropic",
-        "claude-haiku-4-5-20251001",
-        &["claude-haiku-4-5", "claude-haiku-4.5", "haiku"],
-        Some(1.0),
-        Some(5.0),
-        None,
-        Some(2.0),
-        Some(0.10),
-        "https://docs.anthropic.com/en/docs/about-claude/pricing",
-    )?;
-    for (id, model, aliases) in [
-        (
-            "anthropic:claude-opus-4-5-20251101",
-            "claude-opus-4-5-20251101",
-            &["claude-opus-4-5", "claude-opus-4.5"][..],
-        ),
-        (
-            "anthropic:claude-opus-4-6",
-            "claude-opus-4-6",
-            &["claude-opus-4.6"][..],
-        ),
-        (
-            "anthropic:claude-opus-4-7",
-            "claude-opus-4-7",
-            &["claude-opus-4.7"][..],
-        ),
-    ] {
-        seed_price(
-            conn,
-            id,
-            "anthropic",
-            model,
-            aliases,
-            Some(5.0),
-            Some(25.0),
-            None,
-            Some(10.0),
-            Some(0.50),
-            "https://docs.anthropic.com/en/docs/about-claude/pricing",
-        )?;
-    }
-    seed_price(
-        conn,
-        "kimi:kimi-k2.6",
-        "kimi",
-        "kimi-k2.6",
-        &[
-            "kimi-k2.6:cloud",
-            "kimi-for-coding",
-            "kimi-code/kimi-for-coding",
-            "Kimi-k2.6",
-        ],
-        Some(0.95),
-        Some(4.0),
-        Some(0.16),
-        Some(0.95),
-        Some(0.16),
-        "https://www.kimi.com/resources/kimi-k2-6-pricing",
     )?;
     seed_price(
         conn,
@@ -1324,6 +671,27 @@ fn seed_defaults(conn: &Connection) -> rusqlite::Result<()> {
         "https://ai.google.dev/gemini-api/docs/pricing",
     )?;
     Ok(())
+}
+
+fn cleanup_known_bad_imports(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch(
+        "
+        DELETE FROM usage_events
+        WHERE replace(lower(source_file_path), '/', '\\') LIKE '%\\.codex\\tmp\\%'
+           OR replace(lower(source_file_path), '/', '\\') LIKE '%\\.codex\\plugins\\%'
+           OR replace(lower(source_file_path), '/', '\\') LIKE '%\\plugin-eval\\%';
+
+        DELETE FROM conversations
+        WHERE id NOT IN (
+          SELECT DISTINCT conversation_id FROM usage_events WHERE conversation_id IS NOT NULL
+        );
+
+        DELETE FROM projects
+        WHERE id NOT IN (
+          SELECT DISTINCT project_id FROM usage_events WHERE project_id IS NOT NULL
+        );
+        ",
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1342,30 +710,11 @@ fn seed_price(
 ) -> rusqlite::Result<()> {
     let now = now();
     conn.execute(
-        "INSERT INTO pricing_catalogs
+        "INSERT OR IGNORE INTO pricing_catalogs
          (id, provider_id, model, aliases_json, source_url, catalog_version, effective_from,
           input_per_1m, output_per_1m, cached_input_per_1m, cache_write_per_1m, cache_read_per_1m,
           created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, 'seed-2026-05-08', '2026-05-08', ?6, ?7, ?8, ?9, ?10, ?11, ?11)
-         ON CONFLICT(id) DO UPDATE SET
-          provider_id = excluded.provider_id,
-          model = excluded.model,
-          aliases_json = excluded.aliases_json,
-          source_url = excluded.source_url,
-          catalog_version = excluded.catalog_version,
-          effective_from = excluded.effective_from,
-          currency = 'USD',
-          input_per_1m = excluded.input_per_1m,
-          output_per_1m = excluded.output_per_1m,
-          cached_input_per_1m = excluded.cached_input_per_1m,
-          cache_write_per_1m = excluded.cache_write_per_1m,
-          cache_read_per_1m = excluded.cache_read_per_1m,
-          user_override = 0,
-          notes = NULL,
-          updated_at = excluded.updated_at
-         WHERE pricing_catalogs.user_override = 0
-            OR pricing_catalogs.notes LIKE 'Detected locally%'
-            OR pricing_catalogs.notes LIKE 'Available in local Codex model cache%'",
+         VALUES (?1, ?2, ?3, ?4, ?5, 'seed-2026-04-29', '2026-04-29', ?6, ?7, ?8, ?9, ?10, ?11, ?11)",
         params![
             id,
             provider_id,
@@ -1427,24 +776,6 @@ fn candidate_sources() -> Vec<CandidateSource> {
                 display_name: "Continue",
                 path: home.join(".continue"),
             },
-            CandidateSource {
-                provider_id: "lmstudio",
-                parser_id: "generic_json",
-                display_name: "LM Studio",
-                path: home.join(".lmstudio"),
-            },
-            CandidateSource {
-                provider_id: "ollama",
-                parser_id: "generic_jsonl",
-                display_name: "Ollama",
-                path: home.join(".ollama"),
-            },
-            CandidateSource {
-                provider_id: "kimi",
-                parser_id: "kimi",
-                display_name: "Kimi Code",
-                path: home.join(".kimi"),
-            },
         ]);
     }
     if let Some(data) = dirs::data_dir() {
@@ -1494,6 +825,10 @@ fn is_skipped_dir(path: &Path) -> bool {
         name.to_ascii_lowercase().as_str(),
         "node_modules"
             | ".git"
+            | ".tmp"
+            | "tmp"
+            | "temp"
+            | "plugins"
             | "target"
             | "dist"
             | "build"
@@ -1517,8 +852,6 @@ fn infer_source(path: &Path) -> (String, String, String) {
         ("google".into(), "gemini".into(), "Gemini".into())
     } else if text.contains(".continue") {
         ("continue".into(), "generic_jsonl".into(), "Continue".into())
-    } else if text.contains(".kimi") || text.contains("kimi-desktop") {
-        ("kimi".into(), "kimi".into(), "Kimi Code".into())
     } else {
         (
             "generic".into(),
@@ -1666,9 +999,7 @@ fn scan_source(conn: &Connection, source: &Source) -> Result<usize, String> {
 fn parse_content(source: &Source, path: &Path, content: &str) -> Vec<ParsedEvent> {
     let mut events = Vec::new();
     let mut offset = 0i64;
-    let mut context_model: Option<String> = None;
-    let mut context_cwd: Option<String> = None;
-    let mut context_session: Option<String> = None;
+    let mut codex_context = CodexParseContext::default();
     for line in content.lines() {
         let trimmed = line.trim();
         if trimmed.is_empty() {
@@ -1676,23 +1007,13 @@ fn parse_content(source: &Source, path: &Path, content: &str) -> Vec<ParsedEvent
             continue;
         }
         if let Ok(value) = serde_json::from_str::<Value>(trimmed) {
-            update_record_context(
-                source,
-                &value,
-                &mut context_model,
-                &mut context_cwd,
-                &mut context_session,
-            );
-            if let Some(event) = parse_value(
-                source,
-                path,
-                &value,
-                Some(offset),
-                trimmed,
-                context_model.as_deref(),
-                context_cwd.as_deref(),
-                context_session.as_deref(),
-            ) {
+            update_codex_context(&mut codex_context, &value);
+            let parsed = if source.parser_id == "codex" {
+                parse_codex_value(source, path, &value, Some(offset), trimmed, &codex_context)
+            } else {
+                parse_value(source, path, &value, Some(offset), trimmed)
+            };
+            if let Some(event) = parsed {
                 events.push(event);
             }
         }
@@ -1706,17 +1027,89 @@ fn parse_content(source: &Source, path: &Path, content: &str) -> Vec<ParsedEvent
     events
 }
 
+#[derive(Default)]
+struct CodexParseContext {
+    cwd: Option<String>,
+    session_id: Option<String>,
+    model: Option<String>,
+}
+
+fn update_codex_context(context: &mut CodexParseContext, value: &Value) {
+    if let Some(cwd) = value.pointer("/payload/cwd").and_then(Value::as_str) {
+        context.cwd = Some(cwd.to_string());
+    }
+    if let Some(id) = value.pointer("/payload/id").and_then(Value::as_str) {
+        context.session_id = Some(id.to_string());
+    }
+    if let Some(cwd) = value
+        .pointer("/payload/turn_context/cwd")
+        .and_then(Value::as_str)
+    {
+        context.cwd = Some(cwd.to_string());
+    }
+    if let Some(model) = value.pointer("/payload/model").and_then(Value::as_str) {
+        context.model = Some(model.to_string());
+    }
+    if let Some(model) = value
+        .pointer("/payload/turn_context/model")
+        .and_then(Value::as_str)
+    {
+        context.model = Some(model.to_string());
+    }
+}
+
+fn parse_codex_value(
+    source: &Source,
+    path: &Path,
+    value: &Value,
+    source_offset: Option<i64>,
+    raw: &str,
+    context: &CodexParseContext,
+) -> Option<ParsedEvent> {
+    let usage = value.pointer("/payload/info/last_token_usage")?;
+    let input = int_field(usage, &["input_tokens"]);
+    let output = int_field(usage, &["output_tokens"]);
+    let cached = int_field(usage, &["cached_input_tokens"]);
+    let reasoning = int_field(usage, &["reasoning_output_tokens", "reasoning_tokens"]);
+    let total = int_field(usage, &["total_tokens"]);
+    let known = input + output + cached + reasoning;
+    let unknown = if known == 0 { total } else { 0 };
+    if known == 0 && unknown == 0 {
+        return None;
+    }
+    Some(ParsedEvent {
+        provider_id: source.provider_id.clone(),
+        product_id: None,
+        timestamp: str_field(value, &["timestamp"]).unwrap_or_else(now),
+        project_path: context
+            .cwd
+            .clone()
+            .or_else(|| infer_project_from_path(path)),
+        conversation_id: context.session_id.clone(),
+        message_id: str_field(value, &["id"]),
+        request_id: None,
+        model: context.model.clone(),
+        input_tokens: input,
+        output_tokens: output,
+        cached_input_tokens: cached,
+        cache_write_tokens: 0,
+        cache_read_tokens: 0,
+        reasoning_tokens: reasoning,
+        tool_tokens: 0,
+        unknown_tokens: unknown,
+        source_offset,
+        raw_record_hash: hash(raw),
+        confidence: if unknown > 0 { "low" } else { "high" }.to_string(),
+        warnings: if unknown > 0 {
+            vec!["Only total tokens were available.".to_string()]
+        } else {
+            vec![]
+        },
+    })
+}
+
 fn collect_json_events(source: &Source, path: &Path, value: &Value, events: &mut Vec<ParsedEvent>) {
-    if let Some(event) = parse_value(
-        source,
-        path,
-        value,
-        None,
-        &value.to_string(),
-        None,
-        None,
-        None,
-    ) {
+    if let Some(event) = parse_value(source, path, value, None, &value.to_string()) {
         events.push(event);
     }
     match value {
@@ -1736,93 +1129,14 @@ fn collect_json_events(source: &Source, path: &Path, value: &Value, events: &mut
     }
 }
 
-fn update_record_context(
-    source: &Source,
-    value: &Value,
-    model: &mut Option<String>,
-    cwd: &mut Option<String>,
-    session: &mut Option<String>,
-) {
-    if let Some(payload) = value.get("payload") {
-        if let Some(next_model) = str_field(payload, &["model"]) {
-            *model = Some(next_model);
-        }
-        if let Some(next_cwd) = str_field(payload, &["cwd"]) {
-            *cwd = Some(next_cwd);
-        }
-        if let Some(next_session) = str_field(payload, &["id", "session_id", "sessionId"]) {
-            *session = Some(next_session);
-        }
-    }
-    if let Some(next_model) = str_field(value, &["model", "model_name", "modelName"]) {
-        *model = Some(next_model);
-    }
-    if let Some(next_cwd) = str_field(value, &["cwd", "working_directory", "workingDirectory"]) {
-        *cwd = Some(next_cwd);
-    }
-    if source.provider_id == "kimi" {
-        if let Some(next_cwd) = infer_project_from_value(value) {
-            *cwd = Some(next_cwd);
-        }
-    }
-    if let Some(next_session) = str_field(
-        value,
-        &[
-            "session_id",
-            "sessionId",
-            "conversation_id",
-            "conversationId",
-        ],
-    ) {
-        *session = Some(next_session);
-    }
-}
-
-fn usage_value(value: &Value) -> &Value {
-    value
-        .get("usage")
-        .or_else(|| {
-            value
-                .get("message")
-                .and_then(|message| message.get("usage"))
-        })
-        .or_else(|| {
-            value
-                .get("payload")
-                .and_then(|payload| payload.get("info"))
-                .and_then(|info| info.get("last_token_usage"))
-        })
-        .or_else(|| {
-            value
-                .get("payload")
-                .and_then(|payload| payload.get("info"))
-                .and_then(|info| info.get("total_token_usage"))
-        })
-        .or_else(|| {
-            value
-                .get("message")
-                .and_then(|message| message.get("payload"))
-                .and_then(|payload| payload.get("token_usage"))
-        })
-        .or_else(|| {
-            value
-                .get("payload")
-                .and_then(|payload| payload.get("token_usage"))
-        })
-        .unwrap_or(value)
-}
-
 fn parse_value(
     source: &Source,
     path: &Path,
     value: &Value,
     source_offset: Option<i64>,
     raw: &str,
-    context_model: Option<&str>,
-    context_cwd: Option<&str>,
-    context_session: Option<&str>,
 ) -> Option<ParsedEvent> {
-    let usage = usage_value(value);
+    let usage = value.get("usage").unwrap_or(value);
     let input = int_field(
         usage,
         &[
@@ -1830,10 +1144,6 @@ fn parse_value(
             "prompt_tokens",
             "inputTokens",
             "promptTokens",
-            "input_other",
-            "prompt_eval_count",
-            "prompt_eval_tokens",
-            "num_prompt_tokens",
         ],
     );
     let output = int_field(
@@ -1843,10 +1153,6 @@ fn parse_value(
             "completion_tokens",
             "outputTokens",
             "completionTokens",
-            "output",
-            "eval_count",
-            "eval_tokens",
-            "num_completion_tokens",
         ],
     );
     let cached = int_field(
@@ -1859,7 +1165,6 @@ fn parse_value(
             "cache_creation_input_tokens",
             "cache_write_tokens",
             "cacheWriteTokens",
-            "input_cache_creation",
         ],
     );
     let cache_read = int_field(
@@ -1868,12 +1173,9 @@ fn parse_value(
             "cache_read_input_tokens",
             "cache_read_tokens",
             "cacheReadTokens",
-            "input_cache_read",
         ],
     );
     let reasoning = int_field(usage, &["reasoning_tokens", "reasoningTokens"]);
-    let reasoning =
-        reasoning + int_field(usage, &["reasoning_output_tokens", "reasoningOutputTokens"]);
     let tool = int_field(usage, &["tool_tokens", "toolTokens"]);
     let total = int_field(usage, &["total_tokens", "totalTokens"]);
     let known = input + output + cached + cache_write + cache_read + reasoning + tool;
@@ -1881,18 +1183,14 @@ fn parse_value(
     if known == 0 && unknown == 0 {
         return None;
     }
-    let timestamp = timestamp_field(
+    let timestamp = str_field(
         value,
         &["timestamp", "created_at", "createdAt", "time", "date"],
     )
-    .or_else(|| timestamp_field(usage, &["timestamp", "created_at"]))
+    .or_else(|| str_field(usage, &["timestamp", "created_at"]))
     .unwrap_or_else(now);
     let model = str_field(value, &["model", "model_name", "modelName"])
-        .or_else(|| str_field(usage, &["model"]))
-        .or_else(|| str_field(value.get("message").unwrap_or(&Value::Null), &["model"]))
-        .or_else(|| str_field(value.get("payload").unwrap_or(&Value::Null), &["model"]))
-        .or_else(|| context_model.map(str::to_string))
-        .or_else(|| default_model_for_source(source, value, usage));
+        .or_else(|| str_field(usage, &["model"]));
     let project_path = str_field(
         value,
         &[
@@ -1903,15 +1201,6 @@ fn parse_value(
             "projectPath",
         ],
     )
-    .or_else(|| str_field(value.get("payload").unwrap_or(&Value::Null), &["cwd"]))
-    .or_else(|| {
-        if source.provider_id == "kimi" {
-            infer_project_from_value(value)
-        } else {
-            None
-        }
-    })
-    .or_else(|| context_cwd.map(str::to_string))
     .or_else(|| infer_project_from_path(path));
     Some(ParsedEvent {
         provider_id: source.provider_id.clone(),
@@ -1927,14 +1216,7 @@ fn parse_value(
                 "sessionId",
                 "chat_id",
             ],
-        )
-        .or_else(|| {
-            str_field(
-                value.get("payload").unwrap_or(&Value::Null),
-                &["id", "session_id", "sessionId"],
-            )
-        })
-        .or_else(|| context_session.map(str::to_string)),
+        ),
         message_id: str_field(value, &["message_id", "messageId", "id"]),
         request_id: str_field(value, &["request_id", "requestId"]),
         model,
@@ -1975,7 +1257,16 @@ fn insert_event(
         None => None,
     };
     let conversation_id = upsert_conversation(conn, &event, project_id.as_deref())?;
-    let (cost, pricing_id, pricing_match) = price_event(conn, &event)?;
+    let pricing = find_pricing(conn, &event.provider_id, event.model.as_deref())?;
+    let (cost, pricing_id, pricing_match) = if let Some(p) = pricing {
+        (
+            Some(calculate_cost(&event, &p)),
+            Some(p.id),
+            "exact".to_string(),
+        )
+    } else {
+        (None, None, "missing".to_string())
+    };
     let id = hash(&format!(
         "{}|{}|{:?}|{:?}|{:?}|{}",
         source.provider_id,
@@ -2031,149 +1322,6 @@ fn insert_event(
         )
         .map_err(to_string)?;
     Ok(changed > 0)
-}
-
-fn price_event(
-    conn: &Connection,
-    event: &ParsedEvent,
-) -> Result<(Option<f64>, Option<String>, String), String> {
-    let pricing = find_pricing(conn, &event.provider_id, event.model.as_deref())?;
-    if let Some(p) = pricing {
-        if pricing_covers_event(event, &p) {
-            Ok((
-                Some(calculate_cost(event, &p)),
-                Some(p.id),
-                "exact".to_string(),
-            ))
-        } else {
-            Ok((None, Some(p.id), "missing_price".to_string()))
-        }
-    } else {
-        Ok((None, None, "missing".to_string()))
-    }
-}
-
-fn pricing_covers_event(event: &ParsedEvent, pricing: &Pricing) -> bool {
-    if event.unknown_tokens > 0 {
-        return false;
-    }
-    if event.input_tokens > 0 && pricing.input_per_1m.is_none() {
-        return false;
-    }
-    if event.output_tokens > 0 && pricing.output_per_1m.is_none() {
-        return false;
-    }
-    if event.cached_input_tokens > 0
-        && pricing
-            .cached_input_per_1m
-            .or(pricing.input_per_1m)
-            .is_none()
-    {
-        return false;
-    }
-    if event.cache_write_tokens > 0
-        && pricing
-            .cache_write_per_1m
-            .or(pricing.input_per_1m)
-            .is_none()
-    {
-        return false;
-    }
-    if event.cache_read_tokens > 0
-        && pricing
-            .cache_read_per_1m
-            .or(pricing.cached_input_per_1m)
-            .is_none()
-    {
-        return false;
-    }
-    if event.reasoning_tokens > 0 && pricing.reasoning_per_1m.or(pricing.output_per_1m).is_none() {
-        return false;
-    }
-    if event.tool_tokens > 0 && pricing.tool_per_1m.or(pricing.input_per_1m).is_none() {
-        return false;
-    }
-    true
-}
-
-fn reprice_usage_events(conn: &Connection) -> rusqlite::Result<()> {
-    #[derive(Clone)]
-    struct EventForPricing {
-        id: String,
-        provider_id: String,
-        model: Option<String>,
-        input_tokens: i64,
-        output_tokens: i64,
-        cached_input_tokens: i64,
-        cache_write_tokens: i64,
-        cache_read_tokens: i64,
-        reasoning_tokens: i64,
-        tool_tokens: i64,
-        unknown_tokens: i64,
-    }
-
-    let events = {
-        let mut stmt = conn.prepare(
-            "SELECT id, provider_id, model, input_tokens, output_tokens, cached_input_tokens,
-             cache_write_tokens, cache_read_tokens, reasoning_tokens, tool_tokens, unknown_tokens
-             FROM usage_events",
-        )?;
-        let rows = stmt.query_map([], |r| {
-            Ok(EventForPricing {
-                id: r.get(0)?,
-                provider_id: r.get(1)?,
-                model: r.get(2)?,
-                input_tokens: r.get(3)?,
-                output_tokens: r.get(4)?,
-                cached_input_tokens: r.get(5)?,
-                cache_write_tokens: r.get(6)?,
-                cache_read_tokens: r.get(7)?,
-                reasoning_tokens: r.get(8)?,
-                tool_tokens: r.get(9)?,
-                unknown_tokens: r.get(10)?,
-            })
-        })?;
-        rows.collect::<Result<Vec<_>, _>>()?
-    };
-
-    let updated_at = now();
-    for event in events {
-        let parsed = ParsedEvent {
-            provider_id: event.provider_id,
-            product_id: None,
-            timestamp: updated_at.clone(),
-            project_path: None,
-            conversation_id: None,
-            message_id: None,
-            request_id: None,
-            model: event.model,
-            input_tokens: event.input_tokens,
-            output_tokens: event.output_tokens,
-            cached_input_tokens: event.cached_input_tokens,
-            cache_write_tokens: event.cache_write_tokens,
-            cache_read_tokens: event.cache_read_tokens,
-            reasoning_tokens: event.reasoning_tokens,
-            tool_tokens: event.tool_tokens,
-            unknown_tokens: event.unknown_tokens,
-            source_offset: None,
-            raw_record_hash: String::new(),
-            confidence: String::new(),
-            warnings: vec![],
-        };
-        let (cost, pricing_id, pricing_match) = price_event(conn, &parsed).map_err(|e| {
-            rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                e,
-            )))
-        })?;
-        conn.execute(
-            "UPDATE usage_events
-             SET official_api_cost_usd = ?1, pricing_catalog_id = ?2, pricing_match_confidence = ?3, updated_at = ?4
-             WHERE id = ?5",
-            params![cost, pricing_id, pricing_match, updated_at, event.id],
-        )?;
-    }
-    Ok(())
 }
 
 fn upsert_project(
@@ -2465,43 +1613,6 @@ fn int_field(value: &Value, names: &[&str]) -> i64 {
     0
 }
 
-fn timestamp_field(value: &Value, names: &[&str]) -> Option<String> {
-    for name in names {
-        let Some(field) = value.get(*name) else {
-            continue;
-        };
-        if let Some(text) = field.as_str() {
-            return Some(text.to_string());
-        }
-        if let Some(seconds) = field.as_i64() {
-            return unix_timestamp_to_rfc3339(seconds as f64);
-        }
-        if let Some(seconds) = field.as_u64() {
-            return unix_timestamp_to_rfc3339(seconds as f64);
-        }
-        if let Some(seconds) = field.as_f64() {
-            return unix_timestamp_to_rfc3339(seconds);
-        }
-    }
-    None
-}
-
-fn unix_timestamp_to_rfc3339(value: f64) -> Option<String> {
-    if !value.is_finite() || value <= 0.0 {
-        return None;
-    }
-    let seconds = if value > 10_000_000_000.0 {
-        value / 1000.0
-    } else {
-        value
-    };
-    let whole = seconds.trunc() as i64;
-    let nanos = ((seconds.fract() * 1_000_000_000.0).round() as u32).min(999_999_999);
-    Utc.timestamp_opt(whole, nanos)
-        .single()
-        .map(|dt| dt.to_rfc3339())
-}
-
 fn str_field(value: &Value, names: &[&str]) -> Option<String> {
     for name in names {
         if let Some(text) = value.get(*name).and_then(|v| v.as_str()) {
@@ -2511,77 +1622,7 @@ fn str_field(value: &Value, names: &[&str]) -> Option<String> {
     None
 }
 
-fn default_model_for_source(source: &Source, _value: &Value, _usage: &Value) -> Option<String> {
-    match source.provider_id.as_str() {
-        "kimi" => Some("kimi-for-coding".to_string()),
-        _ => None,
-    }
-}
-
-fn infer_project_from_value(value: &Value) -> Option<String> {
-    let mut candidates = Vec::new();
-    collect_project_candidates(value, &mut candidates);
-    candidates.into_iter().next()
-}
-
-fn collect_project_candidates(value: &Value, candidates: &mut Vec<String>) {
-    match value {
-        Value::String(text) => {
-            for path in absolute_paths_in_text(text) {
-                if let Some(project) = project_root_from_path(Path::new(&path)) {
-                    if !candidates.iter().any(|c| c == &project) {
-                        candidates.push(project);
-                    }
-                }
-            }
-        }
-        Value::Array(items) => {
-            for item in items {
-                collect_project_candidates(item, candidates);
-            }
-        }
-        Value::Object(map) => {
-            for item in map.values() {
-                collect_project_candidates(item, candidates);
-            }
-        }
-        _ => {}
-    }
-}
-
-fn absolute_paths_in_text(text: &str) -> Vec<String> {
-    let mut paths = Vec::new();
-    let mut start = 0;
-    while let Some(relative) = text[start..].find("/Users/") {
-        let absolute_start = start + relative;
-        let mut absolute_end = text.len();
-        for (index, ch) in text[absolute_start..].char_indices() {
-            if matches!(
-                ch,
-                '"' | '\'' | '\n' | '\r' | '\t' | '<' | '>' | '[' | ']' | '{' | '}'
-            ) {
-                absolute_end = absolute_start + index;
-                break;
-            }
-        }
-        let path = text[absolute_start..absolute_end]
-            .trim_end_matches(|c: char| matches!(c, ',' | ':' | ';' | ')' | '.'))
-            .to_string();
-        if !path.is_empty() {
-            paths.push(path);
-        }
-        start = absolute_end.saturating_add(1);
-        if start >= text.len() {
-            break;
-        }
-    }
-    paths
-}
-
 fn infer_project_from_path(path: &Path) -> Option<String> {
-    if let Some(project) = project_root_from_path(path) {
-        return Some(project);
-    }
     let parts: Vec<_> = path
         .components()
         .map(|c| c.as_os_str().to_string_lossy().to_string())
@@ -2598,49 +1639,6 @@ fn infer_project_from_path(path: &Path) -> Option<String> {
         .map(|s| s.to_string())
 }
 
-fn project_root_from_path(path: &Path) -> Option<String> {
-    let parts: Vec<_> = path
-        .components()
-        .map(|c| c.as_os_str().to_string_lossy().to_string())
-        .collect();
-    if parts.iter().any(|p| {
-        p.eq_ignore_ascii_case(".kimi")
-            || p.eq_ignore_ascii_case(".codex")
-            || p.eq_ignore_ascii_case(".claude")
-    }) {
-        return None;
-    }
-    for marker in [
-        "Developer",
-        "iDeveloper",
-        "projects",
-        "project",
-        "workspaces",
-        "workspace",
-    ] {
-        if let Some(index) = parts.iter().position(|p| p.eq_ignore_ascii_case(marker)) {
-            if parts.get(index + 1).is_some() {
-                return Some(join_path_parts(&parts[..=index + 1]));
-            }
-        }
-    }
-    if parts.len() >= 4 && parts[1] == "Users" {
-        let first = &parts[3];
-        if !first.starts_with('.') && first != "Library" && first != "Downloads" {
-            return Some(join_path_parts(&parts[..=3]));
-        }
-    }
-    None
-}
-
-fn join_path_parts(parts: &[String]) -> String {
-    if parts.first().is_some_and(|p| p == "/") {
-        format!("/{}", parts[1..].join("/"))
-    } else {
-        parts.join("/")
-    }
-}
-
 fn provider_display_name(provider_id: &str) -> &str {
     match provider_id {
         "openai" => "OpenAI / Codex",
@@ -2650,10 +1648,6 @@ fn provider_display_name(provider_id: &str) -> &str {
         "cline" => "Cline / Roo Code",
         "continue" => "Continue",
         "aider" => "Aider",
-        "lmstudio" => "LM Studio",
-        "ollama" => "Ollama",
-        "cloudflare" => "Cloudflare Workers AI",
-        "kimi" => "Kimi / Moonshot",
         _ => "Generic JSONL",
     }
 }
