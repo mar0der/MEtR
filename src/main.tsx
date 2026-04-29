@@ -6,6 +6,7 @@ import {
   Cloud,
   Database,
   FolderPlus,
+  FolderOpen,
   RefreshCw,
   Settings,
   ShieldCheck,
@@ -44,6 +45,7 @@ type ProjectSummary = {
   path: string | null;
   totals: UsageTotals;
   api_equivalent_cost: number;
+  first_seen: string | null;
   last_seen: string | null;
 };
 
@@ -205,6 +207,24 @@ function App() {
 
   useEffect(() => {
     refresh();
+  }, []);
+
+  useEffect(() => {
+    const refreshId = window.setInterval(() => {
+      void refresh();
+    }, 30_000);
+    const rescanId = window.setInterval(async () => {
+      try {
+        await api("rescan_all");
+        await refresh();
+      } catch {
+        // Keep background polling quiet in the UI; manual controls still show status.
+      }
+    }, 300_000);
+    return () => {
+      window.clearInterval(refreshId);
+      window.clearInterval(rescanId);
+    };
   }, []);
 
   const providerTabs = useMemo(() => {
@@ -525,10 +545,11 @@ function DashboardView({
           <thead>
             <tr>
               <th>Project</th>
-              <th>Provider</th>
               <th>Tokens</th>
+              <th>Mix</th>
               <th>API Cost</th>
-              <th>Last Active</th>
+              <th>Indexed Span</th>
+              <th></th>
             </tr>
           </thead>
           <tbody>
@@ -536,15 +557,26 @@ function DashboardView({
               <tr key={project.id}>
                 <td>
                   <strong>{project.display_name}</strong>
-                  <span title={project.path ?? ""}>{project.path ?? "Unknown path"}</span>
+                  <span>{provider ? folderHint(project.path) : providerLabel(project.provider_id)}</span>
                 </td>
-                <td>{project.provider_id}</td>
                 <td>{compact(project.totals.total_tokens)}</td>
+                <td>{tokenMix(project.totals)}</td>
                 <td>{money(project.api_equivalent_cost)}</td>
-                <td>{date(project.last_seen)}</td>
+                <td>{durationLabel(project.first_seen, project.last_seen)}</td>
+                <td>
+                  {project.path ? (
+                    <button
+                      className="icon-button"
+                      title="Open project folder"
+                      onClick={() => void api("open_project_path", { path: project.path })}
+                    >
+                      <FolderOpen size={15} />
+                    </button>
+                  ) : null}
+                </td>
               </tr>
             ))}
-            {projects.length === 0 && <EmptyRow colSpan={5} text="No project-level usage found yet." />}
+            {projects.length === 0 && <EmptyRow colSpan={6} text="No project-level usage found yet." />}
           </tbody>
         </table>
       </section>
@@ -875,6 +907,48 @@ function percent(value: number) {
 function date(value: string | null) {
   if (!value) return "Never";
   return new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(new Date(value));
+}
+
+function providerLabel(providerId: string) {
+  switch (providerId) {
+    case "openai":
+      return "OpenAI / Codex";
+    case "anthropic":
+      return "Claude";
+    case "google":
+      return "Gemini";
+    case "cline":
+      return "Cline / Roo Code";
+    case "continue":
+      return "Continue";
+    default:
+      return providerId;
+  }
+}
+
+function folderHint(path: string | null) {
+  if (!path) return "Folder unavailable";
+  const parts = path.split(/[\\/]/).filter(Boolean);
+  if (parts.length <= 1) return path;
+  return parts.slice(-2).join(" / ");
+}
+
+function tokenMix(totals: UsageTotals) {
+  const cached = totals.cached_input_tokens + totals.cache_read_tokens + totals.cache_write_tokens;
+  return `In ${compact(totals.input_tokens)}  Out ${compact(totals.output_tokens)}  Cached ${compact(cached)}`;
+}
+
+function durationLabel(firstSeen: string | null, lastSeen: string | null) {
+  if (!firstSeen || !lastSeen) return "Unknown";
+  const start = new Date(firstSeen).getTime();
+  const end = new Date(lastSeen).getTime();
+  const diff = Math.max(0, end - start);
+  const days = Math.floor(diff / 86_400_000);
+  if (days >= 1) return `${days + 1} days`;
+  const hours = Math.floor(diff / 3_600_000);
+  if (hours >= 1) return `${hours + 1} hours`;
+  const mins = Math.floor(diff / 60_000);
+  return `${Math.max(1, mins + 1)} min`;
 }
 
 function message(error: unknown) {

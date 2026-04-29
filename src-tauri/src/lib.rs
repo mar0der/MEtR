@@ -5,6 +5,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::Mutex;
 use tauri::{Manager, State};
 use uuid::Uuid;
@@ -114,6 +115,7 @@ struct ProjectSummary {
     path: Option<String>,
     totals: UsageTotals,
     api_equivalent_cost: f64,
+    first_seen: Option<String>,
     last_seen: Option<String>,
 }
 
@@ -196,7 +198,8 @@ pub fn run() {
             create_subscription,
             delete_subscription,
             list_pricing_catalog,
-            clear_parsed_data
+            clear_parsed_data,
+            open_project_path
         ])
         .run(tauri::generate_context!())
         .expect("error while running MEtR");
@@ -313,6 +316,33 @@ fn clear_parsed_data(state: State<AppState>) -> Result<(), String> {
     )
     .map_err(to_string)?;
     Ok(())
+}
+
+#[tauri::command]
+fn open_project_path(path: String) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        Command::new("explorer")
+            .arg(path)
+            .spawn()
+            .map_err(to_string)?;
+        return Ok(());
+    }
+    #[cfg(target_os = "macos")]
+    {
+        Command::new("open").arg(path).spawn().map_err(to_string)?;
+        return Ok(());
+    }
+    #[cfg(target_os = "linux")]
+    {
+        Command::new("xdg-open")
+            .arg(path)
+            .spawn()
+            .map_err(to_string)?;
+        return Ok(());
+    }
+    #[allow(unreachable_code)]
+    Err("Opening folders is not supported on this platform.".to_string())
 }
 
 #[tauri::command]
@@ -1672,6 +1702,7 @@ fn query_top_projects(conn: &Connection) -> Result<Vec<ProjectSummary>, String> 
               COALESCE(SUM(u.cache_write_tokens),0), COALESCE(SUM(u.cache_read_tokens),0), COALESCE(SUM(u.reasoning_tokens),0),
               COALESCE(SUM(u.tool_tokens),0), COALESCE(SUM(u.unknown_tokens),0), COALESCE(SUM(u.official_api_cost_usd),0),
               MAX(u.timestamp)
+             MIN(u.timestamp), MAX(u.timestamp)
              FROM projects pr JOIN usage_events u ON u.project_id = pr.id
              GROUP BY pr.id ORDER BY COALESCE(SUM(u.official_api_cost_usd),0) DESC, MAX(u.timestamp) DESC LIMIT 20",
         )
@@ -1696,7 +1727,8 @@ fn query_top_projects(conn: &Connection) -> Result<Vec<ProjectSummary>, String> 
                 }
                 .with_total(),
                 api_equivalent_cost: r.get(12)?,
-                last_seen: r.get(13)?,
+                first_seen: r.get(13)?,
+                last_seen: r.get(14)?,
             })
         })
         .map_err(to_string)?;
