@@ -639,10 +639,64 @@ fn seed_defaults(conn: &Connection) -> rusqlite::Result<()> {
     )?;
     seed_price(
         conn,
+        "openai:gpt-5.4",
+        "openai",
+        "gpt-5.4",
+        &[
+            "gpt-5.4-codex",
+            "gpt-5.4-high",
+            "gpt-5.4-medium",
+            "gpt-5.4-low",
+        ],
+        Some(2.5),
+        Some(15.0),
+        Some(0.25),
+        None,
+        None,
+        "https://openai.com/api/pricing/",
+    )?;
+    seed_price(
+        conn,
+        "openai:gpt-5.4-mini",
+        "openai",
+        "gpt-5.4-mini",
+        &[
+            "gpt-5.4-mini-codex",
+            "gpt-5.4-mini-high",
+            "gpt-5.4-mini-medium",
+            "gpt-5.4-mini-low",
+        ],
+        Some(0.75),
+        Some(4.5),
+        Some(0.075),
+        None,
+        None,
+        "https://openai.com/api/pricing/",
+    )?;
+    seed_price(
+        conn,
+        "openai:gpt-5.4-nano",
+        "openai",
+        "gpt-5.4-nano",
+        &[
+            "gpt-5.4-nano-codex",
+            "gpt-5.4-nano-high",
+            "gpt-5.4-nano-medium",
+            "gpt-5.4-nano-low",
+        ],
+        Some(0.20),
+        Some(1.25),
+        Some(0.02),
+        None,
+        None,
+        "https://openai.com/api/pricing/",
+    )?;
+    seed_price(
+        conn,
         "openai:gpt-5.1",
         "openai",
         "gpt-5.1",
-        &["gpt-5.1-codex", "gpt-5.1-high", "codex"],
+        &["gpt-5.1-codex", "gpt-5.1-high"],
         Some(1.25),
         Some(10.0),
         Some(0.125),
@@ -1143,12 +1197,6 @@ fn update_codex_context(context: &mut CodexParseContext, value: &Value) {
     }
     if let Some(model) = value
         .pointer("/payload/turn_context/model")
-        .and_then(Value::as_str)
-    {
-        context.model = Some(model.to_string());
-    }
-    if let Some(model) = value
-        .pointer("/payload/rate_limits/limit_id")
         .and_then(Value::as_str)
     {
         context.model = Some(model.to_string());
