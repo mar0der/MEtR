@@ -621,6 +621,24 @@ fn seed_defaults(conn: &Connection) -> rusqlite::Result<()> {
     }
     seed_price(
         conn,
+        "openai:gpt-5.5",
+        "openai",
+        "gpt-5.5",
+        &[
+            "gpt-5.5-codex",
+            "gpt-5.5-high",
+            "gpt-5.5-medium",
+            "gpt-5.5-low",
+        ],
+        Some(5.0),
+        Some(30.0),
+        Some(0.5),
+        None,
+        None,
+        "https://openai.com/api/pricing/",
+    )?;
+    seed_price(
+        conn,
         "openai:gpt-5.1",
         "openai",
         "gpt-5.1",
@@ -773,11 +791,21 @@ fn seed_price(
 ) -> rusqlite::Result<()> {
     let now = now();
     conn.execute(
-        "INSERT OR IGNORE INTO pricing_catalogs
+        "INSERT INTO pricing_catalogs
          (id, provider_id, model, aliases_json, source_url, catalog_version, effective_from,
           input_per_1m, output_per_1m, cached_input_per_1m, cache_write_per_1m, cache_read_per_1m,
           created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, 'seed-2026-04-29', '2026-04-29', ?6, ?7, ?8, ?9, ?10, ?11, ?11)",
+         VALUES (?1, ?2, ?3, ?4, ?5, 'seed-2026-04-29', '2026-04-29', ?6, ?7, ?8, ?9, ?10, ?11, ?11)
+         ON CONFLICT(id) DO UPDATE SET
+           aliases_json = CASE WHEN pricing_catalogs.user_override = 0 THEN excluded.aliases_json ELSE pricing_catalogs.aliases_json END,
+           source_url = CASE WHEN pricing_catalogs.user_override = 0 THEN excluded.source_url ELSE pricing_catalogs.source_url END,
+           input_per_1m = CASE WHEN pricing_catalogs.user_override = 0 THEN excluded.input_per_1m ELSE pricing_catalogs.input_per_1m END,
+           output_per_1m = CASE WHEN pricing_catalogs.user_override = 0 THEN excluded.output_per_1m ELSE pricing_catalogs.output_per_1m END,
+           cached_input_per_1m = CASE WHEN pricing_catalogs.user_override = 0 THEN excluded.cached_input_per_1m ELSE pricing_catalogs.cached_input_per_1m END,
+           cache_write_per_1m = CASE WHEN pricing_catalogs.user_override = 0 THEN excluded.cache_write_per_1m ELSE pricing_catalogs.cache_write_per_1m END,
+           cache_read_per_1m = CASE WHEN pricing_catalogs.user_override = 0 THEN excluded.cache_read_per_1m ELSE pricing_catalogs.cache_read_per_1m END,
+           catalog_version = CASE WHEN pricing_catalogs.user_override = 0 THEN excluded.catalog_version ELSE pricing_catalogs.catalog_version END,
+           updated_at = excluded.updated_at",
         params![
             id,
             provider_id,
