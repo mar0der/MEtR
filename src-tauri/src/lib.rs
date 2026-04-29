@@ -10,6 +10,9 @@ use tauri::{Manager, State};
 use uuid::Uuid;
 use walkdir::WalkDir;
 
+const MAX_SCAN_FILES_PER_SOURCE: usize = 2_000;
+const MAX_FILE_BYTES: u64 = 20 * 1024 * 1024;
+
 struct AppState {
     db: Mutex<Connection>,
 }
@@ -1483,6 +1486,27 @@ fn is_candidate_file(path: &Path) -> bool {
     )
 }
 
+fn is_skipped_dir(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+        return false;
+    };
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "node_modules"
+            | ".git"
+            | "target"
+            | "dist"
+            | "build"
+            | ".next"
+            | "vendor"
+            | "cache"
+            | "caches"
+            | "blob_storage"
+            | "gpu_cache"
+            | "code cache"
+    )
+}
+
 fn infer_source(path: &Path) -> (String, String, String) {
     let text = path.to_string_lossy().to_ascii_lowercase();
     if text.contains(".claude") {
@@ -1568,25 +1592,46 @@ fn scan_source(conn: &Connection, source: &Source) -> Result<usize, String> {
         return Ok(0);
     }
     let mut imported = 0usize;
+    let mut scanned_files = 0usize;
+    let mut skipped_large = 0usize;
+    let mut skipped_after_limit = false;
     for entry in WalkDir::new(&root)
         .max_depth(8)
         .into_iter()
+        .filter_entry(|e| !e.file_type().is_dir() || !is_skipped_dir(e.path()))
         .filter_map(Result::ok)
     {
         if !entry.file_type().is_file() || !is_candidate_file(entry.path()) {
             continue;
         }
+        if scanned_files >= MAX_SCAN_FILES_PER_SOURCE {
+            skipped_after_limit = true;
+            break;
+        }
+        let metadata = match entry.metadata() {
+            Ok(metadata) => metadata,
+            Err(_) => continue,
+        };
+        if metadata.len() > MAX_FILE_BYTES {
+            skipped_large += 1;
+            continue;
+        }
+        scanned_files += 1;
+        let modified = metadata
+            .modified()
+            .ok()
+            .map(|t| chrono::DateTime::<Utc>::from(t).to_rfc3339())
+            .unwrap_or_else(now);
+        let source_hash = hash(&format!(
+            "{}|{}|{}",
+            entry.path().to_string_lossy(),
+            metadata.len(),
+            modified
+        ));
         let content = match fs::read_to_string(entry.path()) {
             Ok(content) => content,
             Err(_) => continue,
         };
-        let modified = entry
-            .metadata()
-            .ok()
-            .and_then(|m| m.modified().ok())
-            .map(|t| chrono::DateTime::<Utc>::from(t).to_rfc3339())
-            .unwrap_or_else(now);
-        let source_hash = hash(&content);
         let events = parse_content(source, entry.path(), &content);
         for event in events {
             if insert_event(conn, source, entry.path(), &modified, &source_hash, event)? {
@@ -1596,7 +1641,23 @@ fn scan_source(conn: &Connection, source: &Source) -> Result<usize, String> {
     }
     conn.execute(
         "UPDATE log_sources SET last_scan_finished_at = ?1, last_scan_status = 'ok', last_scan_message = ?2 WHERE id = ?3",
-        params![now(), format!("Imported {imported} new events."), source.id],
+        params![
+            now(),
+            format!(
+                "Scanned {scanned_files} files, imported {imported} new events{}{}.",
+                if skipped_large > 0 {
+                    format!(", skipped {skipped_large} files over 20 MB")
+                } else {
+                    String::new()
+                },
+                if skipped_after_limit {
+                    format!(", stopped at the {MAX_SCAN_FILES_PER_SOURCE} file safety limit")
+                } else {
+                    String::new()
+                }
+            ),
+            source.id
+        ],
     )
     .map_err(to_string)?;
     Ok(imported)
