@@ -14,6 +14,7 @@ use walkdir::WalkDir;
 
 const MAX_SCAN_FILES_PER_SOURCE: usize = 2_000;
 const MAX_FILE_BYTES: u64 = 20 * 1024 * 1024;
+const PARSER_VERSION: &str = "0.1.0";
 
 struct AppState {
     db: Mutex<Connection>,
@@ -193,6 +194,7 @@ pub fn run() {
             add_source,
             remove_source,
             rescan_all,
+            rescan_all_full,
             rescan_source,
             get_dashboard_summary,
             list_subscriptions,
@@ -308,6 +310,7 @@ fn clear_parsed_data(state: State<AppState>) -> Result<(), String> {
         DELETE FROM usage_events;
         DELETE FROM conversations;
         DELETE FROM projects;
+        DELETE FROM indexed_files;
         UPDATE log_sources
         SET last_scan_started_at = NULL,
             last_scan_finished_at = NULL,
@@ -352,7 +355,18 @@ fn rescan_all(state: State<AppState>) -> Result<Value, String> {
     let sources = query_sources(&conn)?;
     let mut imported = 0usize;
     for source in sources.into_iter().filter(|s| s.enabled) {
-        imported += scan_source(&conn, &source)?;
+        imported += scan_source(&conn, &source, false)?;
+    }
+    Ok(serde_json::json!({ "imported": imported }))
+}
+
+#[tauri::command]
+fn rescan_all_full(state: State<AppState>) -> Result<Value, String> {
+    let conn = state.db.lock().map_err(to_string)?;
+    let sources = query_sources(&conn)?;
+    let mut imported = 0usize;
+    for source in sources.into_iter().filter(|s| s.enabled) {
+        imported += scan_source(&conn, &source, true)?;
     }
     Ok(serde_json::json!({ "imported": imported }))
 }
@@ -361,7 +375,7 @@ fn rescan_all(state: State<AppState>) -> Result<Value, String> {
 fn rescan_source(state: State<AppState>, source_id: String) -> Result<Value, String> {
     let conn = state.db.lock().map_err(to_string)?;
     let source = query_source(&conn, &source_id)?;
-    let imported = scan_source(&conn, &source)?;
+    let imported = scan_source(&conn, &source, false)?;
     Ok(serde_json::json!({ "imported": imported }))
 }
 
@@ -591,6 +605,19 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
           created_at TEXT NOT NULL,
           updated_at TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS indexed_files (
+          id TEXT PRIMARY KEY,
+          source_id TEXT NOT NULL,
+          path TEXT NOT NULL,
+          size_bytes INTEGER NOT NULL,
+          modified_at TEXT NOT NULL,
+          parser_id TEXT NOT NULL,
+          parser_version TEXT NOT NULL,
+          last_scan_status TEXT NOT NULL,
+          last_scan_message TEXT,
+          last_scanned_at TEXT NOT NULL,
+          UNIQUE(source_id, path)
+        );
         CREATE TABLE IF NOT EXISTS pricing_catalogs (
           id TEXT PRIMARY KEY,
           provider_id TEXT NOT NULL,
@@ -632,6 +659,7 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         CREATE INDEX IF NOT EXISTS idx_usage_events_project ON usage_events(project_id);
         CREATE INDEX IF NOT EXISTS idx_usage_events_model ON usage_events(model);
         CREATE UNIQUE INDEX IF NOT EXISTS idx_usage_events_dedupe ON usage_events(id);
+        CREATE INDEX IF NOT EXISTS idx_indexed_files_source_path ON indexed_files(source_id, path);
         CREATE INDEX IF NOT EXISTS idx_pricing_provider_model ON pricing_catalogs(provider_id, model);
         ",
     )
@@ -1084,7 +1112,7 @@ fn query_source(conn: &Connection, id: &str) -> Result<Source, String> {
     .map_err(to_string)
 }
 
-fn scan_source(conn: &Connection, source: &Source) -> Result<usize, String> {
+fn scan_source(conn: &Connection, source: &Source, full_scan: bool) -> Result<usize, String> {
     let started = now();
     conn.execute(
         "UPDATE log_sources SET last_scan_started_at = ?1, last_scan_status = 'scanning', last_scan_message = NULL WHERE id = ?2",
@@ -1102,6 +1130,7 @@ fn scan_source(conn: &Connection, source: &Source) -> Result<usize, String> {
     }
     let mut imported = 0usize;
     let mut scanned_files = 0usize;
+    let mut skipped_unchanged = 0usize;
     let mut skipped_large = 0usize;
     let mut streamed_large = 0usize;
     let mut skipped_after_limit = false;
@@ -1122,17 +1151,32 @@ fn scan_source(conn: &Connection, source: &Source) -> Result<usize, String> {
             Ok(metadata) => metadata,
             Err(_) => continue,
         };
-        let is_large = metadata.len() > MAX_FILE_BYTES;
-        if is_large && source.parser_id != "codex" {
-            skipped_large += 1;
-            continue;
-        }
-        scanned_files += 1;
         let modified = metadata
             .modified()
             .ok()
             .map(|t| chrono::DateTime::<Utc>::from(t).to_rfc3339())
             .unwrap_or_else(now);
+        if !full_scan
+            && indexed_file_is_current(conn, source, entry.path(), metadata.len(), &modified)?
+        {
+            skipped_unchanged += 1;
+            continue;
+        }
+        let is_large = metadata.len() > MAX_FILE_BYTES;
+        if is_large && source.parser_id != "codex" {
+            skipped_large += 1;
+            upsert_indexed_file(
+                conn,
+                source,
+                entry.path(),
+                metadata.len(),
+                &modified,
+                "skipped_large",
+                Some("Skipped because file is over 20 MB and this parser cannot stream it."),
+            )?;
+            continue;
+        }
+        scanned_files += 1;
         let source_hash = hash(&format!(
             "{}|{}|{}",
             entry.path().to_string_lossy(),
@@ -1157,13 +1201,32 @@ fn scan_source(conn: &Connection, source: &Source) -> Result<usize, String> {
                 imported += 1;
             }
         }
+        upsert_indexed_file(
+            conn,
+            source,
+            entry.path(),
+            metadata.len(),
+            &modified,
+            "ok",
+            Some("Indexed successfully."),
+        )?;
     }
     conn.execute(
         "UPDATE log_sources SET last_scan_finished_at = ?1, last_scan_status = 'ok', last_scan_message = ?2 WHERE id = ?3",
         params![
             now(),
             format!(
-                "Scanned {scanned_files} files, imported {imported} new events{}{}{}.",
+                "{} {scanned_files} file(s), imported {imported} new events{}{}{}{}.",
+                if full_scan {
+                    "Full scanned"
+                } else {
+                    "Scanned changed/new"
+                },
+                if skipped_unchanged > 0 {
+                    format!(", skipped {skipped_unchanged} unchanged")
+                } else {
+                    String::new()
+                },
                 if skipped_large > 0 {
                     format!(", skipped {skipped_large} files over 20 MB")
                 } else {
@@ -1185,6 +1248,80 @@ fn scan_source(conn: &Connection, source: &Source) -> Result<usize, String> {
     )
     .map_err(to_string)?;
     Ok(imported)
+}
+
+fn indexed_file_is_current(
+    conn: &Connection,
+    source: &Source,
+    path: &Path,
+    size_bytes: u64,
+    modified_at: &str,
+) -> Result<bool, String> {
+    let path = path.to_string_lossy().to_string();
+    let exists: Option<i64> = conn
+        .query_row(
+            "SELECT 1 FROM indexed_files
+             WHERE source_id = ?1
+               AND path = ?2
+               AND size_bytes = ?3
+               AND modified_at = ?4
+               AND parser_id = ?5
+               AND parser_version = ?6
+             LIMIT 1",
+            params![
+                source.id,
+                path,
+                size_bytes as i64,
+                modified_at,
+                source.parser_id,
+                PARSER_VERSION
+            ],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(to_string)?;
+    Ok(exists.is_some())
+}
+
+fn upsert_indexed_file(
+    conn: &Connection,
+    source: &Source,
+    path: &Path,
+    size_bytes: u64,
+    modified_at: &str,
+    status: &str,
+    message: Option<&str>,
+) -> Result<(), String> {
+    let path = path.to_string_lossy().to_string();
+    let id = hash(&format!("{}|{}", source.id, path));
+    conn.execute(
+        "INSERT INTO indexed_files
+         (id, source_id, path, size_bytes, modified_at, parser_id, parser_version,
+          last_scan_status, last_scan_message, last_scanned_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+         ON CONFLICT(source_id, path) DO UPDATE SET
+           size_bytes = excluded.size_bytes,
+           modified_at = excluded.modified_at,
+           parser_id = excluded.parser_id,
+           parser_version = excluded.parser_version,
+           last_scan_status = excluded.last_scan_status,
+           last_scan_message = excluded.last_scan_message,
+           last_scanned_at = excluded.last_scanned_at",
+        params![
+            id,
+            source.id,
+            path,
+            size_bytes as i64,
+            modified_at,
+            source.parser_id,
+            PARSER_VERSION,
+            status,
+            message,
+            now()
+        ],
+    )
+    .map_err(to_string)?;
+    Ok(())
 }
 
 fn parse_content(source: &Source, path: &Path, content: &str) -> Vec<ParsedEvent> {
@@ -1522,14 +1659,15 @@ fn insert_event(
              cache_read_tokens, reasoning_tokens, tool_tokens, unknown_tokens, official_api_cost_usd, pricing_catalog_id,
              pricing_match_confidence, source_file_path, source_file_modified_at, source_offset, source_hash,
              raw_record_hash, confidence, warnings_json, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, '0.1.0', ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17,
-             ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?30)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18,
+             ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?31)",
             params![
                 id,
                 event.provider_id,
                 event.product_id,
                 source.id,
                 source.parser_id,
+                PARSER_VERSION,
                 event.timestamp,
                 project_id,
                 conversation_id,

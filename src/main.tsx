@@ -281,10 +281,24 @@ function App() {
 
   const rescanAll = async () => {
     setLoading(true);
-    setStatus("Scanning sources...");
+    setStatus("Scanning new and changed files...");
     try {
       const result = await api<{ imported: number }>("rescan_all");
       setStatus(`Scan complete. Imported ${result.imported} new event(s).`);
+      await refresh();
+    } catch (error) {
+      setStatus(message(error));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const fullRescanAll = async () => {
+    setLoading(true);
+    setStatus("Full rescan running...");
+    try {
+      const result = await api<{ imported: number }>("rescan_all_full");
+      setStatus(`Full rescan complete. Imported ${result.imported} new event(s).`);
       await refresh();
     } catch (error) {
       setStatus(message(error));
@@ -384,7 +398,11 @@ function App() {
           </button>
           <button className="primary-button" onClick={rescanAll} disabled={loading}>
             <Activity size={16} />
-            Rescan
+            Scan New
+          </button>
+          <button className="secondary-button" onClick={fullRescanAll} disabled={loading}>
+            <Database size={16} />
+            Full Rescan
           </button>
         </div>
       </header>
