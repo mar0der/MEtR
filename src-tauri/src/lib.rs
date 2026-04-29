@@ -177,6 +177,7 @@ pub fn run() {
             migrate(&conn)?;
             seed_defaults(&conn)?;
             cleanup_known_bad_imports(&conn)?;
+            recalculate_event_costs(&conn)?;
             app.manage(AppState {
                 db: Mutex::new(conn),
             });
@@ -623,7 +624,7 @@ fn seed_defaults(conn: &Connection) -> rusqlite::Result<()> {
         "openai:gpt-5.1",
         "openai",
         "gpt-5.1",
-        &["gpt-5.1-codex"],
+        &["gpt-5.1-codex", "gpt-5.1-high", "codex"],
         Some(1.25),
         Some(10.0),
         Some(0.125),
@@ -636,7 +637,12 @@ fn seed_defaults(conn: &Connection) -> rusqlite::Result<()> {
         "openai:gpt-5.1-mini",
         "openai",
         "gpt-5.1-mini",
-        &["gpt-5.1-mini-codex"],
+        &[
+            "gpt-5.1-mini-codex",
+            "gpt-5.1-low",
+            "gpt-5.1-medium",
+            "codex-mini",
+        ],
         Some(0.25),
         Some(2.0),
         Some(0.025),
@@ -692,6 +698,63 @@ fn cleanup_known_bad_imports(conn: &Connection) -> rusqlite::Result<()> {
         );
         ",
     )
+}
+
+fn recalculate_event_costs(conn: &Connection) -> rusqlite::Result<()> {
+    let mut stmt = conn.prepare(
+        "SELECT id, provider_id, model, input_tokens, output_tokens, cached_input_tokens,
+         cache_write_tokens, cache_read_tokens, reasoning_tokens, tool_tokens, unknown_tokens
+         FROM usage_events",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, Option<String>>(2)?,
+            ParsedEvent {
+                provider_id: r.get(1)?,
+                product_id: None,
+                timestamp: String::new(),
+                project_path: None,
+                conversation_id: None,
+                message_id: None,
+                request_id: None,
+                model: r.get(2)?,
+                input_tokens: r.get(3)?,
+                output_tokens: r.get(4)?,
+                cached_input_tokens: r.get(5)?,
+                cache_write_tokens: r.get(6)?,
+                cache_read_tokens: r.get(7)?,
+                reasoning_tokens: r.get(8)?,
+                tool_tokens: r.get(9)?,
+                unknown_tokens: r.get(10)?,
+                source_offset: None,
+                raw_record_hash: String::new(),
+                confidence: String::new(),
+                warnings: vec![],
+            },
+        ))
+    })?;
+    let mut updates = Vec::new();
+    for row in rows {
+        let (id, provider_id, model, event) = row?;
+        if let Some(pricing) = find_pricing_sql(conn, &provider_id, model.as_deref())? {
+            updates.push((id, calculate_cost(&event, &pricing), pricing.id));
+        }
+    }
+    drop(stmt);
+    for (id, cost, pricing_id) in updates {
+        conn.execute(
+            "UPDATE usage_events
+             SET official_api_cost_usd = ?1,
+                 pricing_catalog_id = ?2,
+                 pricing_match_confidence = 'exact',
+                 updated_at = ?3
+             WHERE id = ?4",
+            params![cost, pricing_id, now(), id],
+        )?;
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1056,6 +1119,12 @@ fn update_codex_context(context: &mut CodexParseContext, value: &Value) {
     {
         context.model = Some(model.to_string());
     }
+    if let Some(model) = value
+        .pointer("/payload/rate_limits/limit_id")
+        .and_then(Value::as_str)
+    {
+        context.model = Some(model.to_string());
+    }
 }
 
 fn parse_codex_value(
@@ -1088,7 +1157,12 @@ fn parse_codex_value(
         conversation_id: context.session_id.clone(),
         message_id: str_field(value, &["id"]),
         request_id: None,
-        model: context.model.clone(),
+        model: context.model.clone().or_else(|| {
+            value
+                .pointer("/payload/rate_limits/limit_id")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        }),
         input_tokens: input,
         output_tokens: output,
         cached_input_tokens: cached,
@@ -1376,6 +1450,14 @@ fn find_pricing(
     provider_id: &str,
     model: Option<&str>,
 ) -> Result<Option<Pricing>, String> {
+    find_pricing_sql(conn, provider_id, model).map_err(to_string)
+}
+
+fn find_pricing_sql(
+    conn: &Connection,
+    provider_id: &str,
+    model: Option<&str>,
+) -> rusqlite::Result<Option<Pricing>> {
     let Some(model) = model else {
         return Ok(None);
     };
@@ -1387,7 +1469,7 @@ fn find_pricing(
             row_to_pricing,
         )
         .optional()
-        .map_err(to_string)?;
+        ?;
     if exact.is_some() {
         return Ok(exact);
     }
@@ -1396,21 +1478,21 @@ fn find_pricing(
             "SELECT id, input_per_1m, output_per_1m, cached_input_per_1m, cache_write_per_1m, cache_read_per_1m, reasoning_per_1m, tool_per_1m, aliases_json
              FROM pricing_catalogs WHERE provider_id = ?1",
         )
-        .map_err(to_string)?;
-    let mut rows = stmt.query(params![provider_id]).map_err(to_string)?;
-    while let Some(row) = rows.next().map_err(to_string)? {
-        let aliases_json: String = row.get(8).map_err(to_string)?;
+        ?;
+    let mut rows = stmt.query(params![provider_id])?;
+    while let Some(row) = rows.next()? {
+        let aliases_json: String = row.get(8)?;
         let aliases: Vec<String> = serde_json::from_str(&aliases_json).unwrap_or_default();
         if aliases.iter().any(|a| a.eq_ignore_ascii_case(model)) {
             return Ok(Some(Pricing {
-                id: row.get(0).map_err(to_string)?,
-                input_per_1m: row.get(1).map_err(to_string)?,
-                output_per_1m: row.get(2).map_err(to_string)?,
-                cached_input_per_1m: row.get(3).map_err(to_string)?,
-                cache_write_per_1m: row.get(4).map_err(to_string)?,
-                cache_read_per_1m: row.get(5).map_err(to_string)?,
-                reasoning_per_1m: row.get(6).map_err(to_string)?,
-                tool_per_1m: row.get(7).map_err(to_string)?,
+                id: row.get(0)?,
+                input_per_1m: row.get(1)?,
+                output_per_1m: row.get(2)?,
+                cached_input_per_1m: row.get(3)?,
+                cache_write_per_1m: row.get(4)?,
+                cache_read_per_1m: row.get(5)?,
+                reasoning_per_1m: row.get(6)?,
+                tool_per_1m: row.get(7)?,
             }));
         }
     }
