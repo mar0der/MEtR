@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::fs;
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Mutex;
@@ -1102,6 +1103,7 @@ fn scan_source(conn: &Connection, source: &Source) -> Result<usize, String> {
     let mut imported = 0usize;
     let mut scanned_files = 0usize;
     let mut skipped_large = 0usize;
+    let mut streamed_large = 0usize;
     let mut skipped_after_limit = false;
     for entry in WalkDir::new(&root)
         .max_depth(8)
@@ -1120,7 +1122,8 @@ fn scan_source(conn: &Connection, source: &Source) -> Result<usize, String> {
             Ok(metadata) => metadata,
             Err(_) => continue,
         };
-        if metadata.len() > MAX_FILE_BYTES {
+        let is_large = metadata.len() > MAX_FILE_BYTES;
+        if is_large && source.parser_id != "codex" {
             skipped_large += 1;
             continue;
         }
@@ -1136,11 +1139,19 @@ fn scan_source(conn: &Connection, source: &Source) -> Result<usize, String> {
             metadata.len(),
             modified
         ));
-        let content = match fs::read_to_string(entry.path()) {
-            Ok(content) => content,
-            Err(_) => continue,
+        let events = if is_large {
+            streamed_large += 1;
+            match parse_file_streaming(source, entry.path()) {
+                Ok(events) => events,
+                Err(_) => continue,
+            }
+        } else {
+            let content = match fs::read_to_string(entry.path()) {
+                Ok(content) => content,
+                Err(_) => continue,
+            };
+            parse_content(source, entry.path(), &content)
         };
-        let events = parse_content(source, entry.path(), &content);
         for event in events {
             if insert_event(conn, source, entry.path(), &modified, &source_hash, event)? {
                 imported += 1;
@@ -1152,9 +1163,14 @@ fn scan_source(conn: &Connection, source: &Source) -> Result<usize, String> {
         params![
             now(),
             format!(
-                "Scanned {scanned_files} files, imported {imported} new events{}{}.",
+                "Scanned {scanned_files} files, imported {imported} new events{}{}{}.",
                 if skipped_large > 0 {
                     format!(", skipped {skipped_large} files over 20 MB")
+                } else {
+                    String::new()
+                },
+                if streamed_large > 0 {
+                    format!(", streamed {streamed_large} large Codex files")
                 } else {
                     String::new()
                 },
@@ -1177,21 +1193,14 @@ fn parse_content(source: &Source, path: &Path, content: &str) -> Vec<ParsedEvent
     let mut codex_context = CodexParseContext::default();
     for line in content.lines() {
         let trimmed = line.trim();
-        if trimmed.is_empty() {
-            offset += line.len() as i64 + 1;
-            continue;
-        }
-        if let Ok(value) = serde_json::from_str::<Value>(trimmed) {
-            update_codex_context(&mut codex_context, &value);
-            let parsed = if source.parser_id == "codex" {
-                parse_codex_value(source, path, &value, Some(offset), trimmed, &codex_context)
-            } else {
-                parse_value(source, path, &value, Some(offset), trimmed)
-            };
-            if let Some(event) = parsed {
-                events.push(event);
-            }
-        }
+        parse_line_into_events(
+            source,
+            path,
+            trimmed,
+            Some(offset),
+            &mut codex_context,
+            &mut events,
+        );
         offset += line.len() as i64 + 1;
     }
     if events.is_empty() {
@@ -1200,6 +1209,54 @@ fn parse_content(source: &Source, path: &Path, content: &str) -> Vec<ParsedEvent
         }
     }
     events
+}
+
+fn parse_file_streaming(source: &Source, path: &Path) -> Result<Vec<ParsedEvent>, String> {
+    let file = fs::File::open(path).map_err(to_string)?;
+    let reader = BufReader::new(file);
+    let mut events = Vec::new();
+    let mut offset = 0i64;
+    let mut codex_context = CodexParseContext::default();
+
+    for line in reader.lines() {
+        let line = line.map_err(to_string)?;
+        let trimmed = line.trim();
+        parse_line_into_events(
+            source,
+            path,
+            trimmed,
+            Some(offset),
+            &mut codex_context,
+            &mut events,
+        );
+        offset += line.len() as i64 + 1;
+    }
+
+    Ok(events)
+}
+
+fn parse_line_into_events(
+    source: &Source,
+    path: &Path,
+    trimmed: &str,
+    offset: Option<i64>,
+    codex_context: &mut CodexParseContext,
+    events: &mut Vec<ParsedEvent>,
+) {
+    if trimmed.is_empty() {
+        return;
+    }
+    if let Ok(value) = serde_json::from_str::<Value>(trimmed) {
+        update_codex_context(codex_context, &value);
+        let parsed = if source.parser_id == "codex" {
+            parse_codex_value(source, path, &value, offset, trimmed, codex_context)
+        } else {
+            parse_value(source, path, &value, offset, trimmed)
+        };
+        if let Some(event) = parsed {
+            events.push(event);
+        }
+    }
 }
 
 #[derive(Default)]
