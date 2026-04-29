@@ -1,0 +1,3 @@
+{"timestamp":"2026-04-29T11:00:00Z","model":"gpt-5.1-codex","usage":{"input_tokens":1000,"output_tokens":200}}
+this is not json and should be skipped
+{"timestamp":"2026-04-29T11:05:00Z","model":"gpt-5.1-codex","usage":{"input_tokens":1200,"output_tokens":300}}

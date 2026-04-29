@@ -1,0 +1,2 @@
+{"timestamp":"2026-04-29T08:05:00Z","model":"claude-sonnet-4.5","cwd":"D:\\Projects\\demo-api","session_id":"claude-session-1","message_id":"msg-1","usage":{"input_tokens":12000,"output_tokens":2400,"cache_creation_input_tokens":1800,"cache_read_input_tokens":9000}}
+{"timestamp":"2026-04-29T09:15:00Z","model":"claude-sonnet-4.5","cwd":"D:\\Projects\\demo-api","session_id":"claude-session-1","message_id":"msg-2","usage":{"input_tokens":8000,"output_tokens":1800,"cache_read_input_tokens":4000}}

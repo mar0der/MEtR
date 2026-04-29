@@ -1,0 +1,2 @@
+{"timestamp":"2026-04-29T08:45:00Z","model":"gpt-5.1-codex","cwd":"D:\\Projects\\metr","conversation_id":"codex-session-1","message_id":"turn-1","usage":{"input_tokens":15000,"output_tokens":3200,"cached_input_tokens":6000}}
+{"timestamp":"2026-04-29T10:20:00Z","model":"gpt-5.1-mini-codex","cwd":"D:\\Projects\\metr","conversation_id":"codex-session-2","message_id":"turn-1","usage":{"input_tokens":5000,"output_tokens":1100,"cached_input_tokens":2000}}
