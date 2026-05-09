@@ -173,6 +173,7 @@ pub fn run() {
             let conn = Connection::open(db_path.join("metr.db"))?;
             migrate(&conn)?;
             seed_defaults(&conn)?;
+            reprice_usage_events(&conn)?;
             app.manage(AppState {
                 db: Mutex::new(conn),
             });
@@ -251,7 +252,7 @@ fn add_source(state: State<AppState>, input: AddSourceInput) -> Result<Source, S
     };
     let now = now();
     let conn = state.db.lock().map_err(to_string)?;
-    ensure_provider(&conn, &provider_id, provider_display_name(&provider_id))?;
+    ensure_provider(&conn, &provider_id, provider_display_name(&provider_id)).map_err(to_string)?;
     let existing: Option<String> = conn
         .query_row(
             "SELECT id FROM log_sources WHERE path = ?1 AND provider_id = ?2",
@@ -376,7 +377,8 @@ fn create_subscription(
         &conn,
         &input.provider_id,
         provider_display_name(&input.provider_id),
-    )?;
+    )
+    .map_err(to_string)?;
     let id = Uuid::new_v4().to_string();
     let now = now();
     conn.execute(
@@ -394,6 +396,7 @@ fn create_subscription(
         ],
     )
     .map_err(to_string)?;
+    drop(conn);
     let subscriptions = list_subscriptions(state)?;
     subscriptions
         .into_iter()
@@ -577,6 +580,10 @@ fn seed_defaults(conn: &Connection) -> rusqlite::Result<()> {
         ("cline", "Cline / Roo Code"),
         ("continue", "Continue"),
         ("aider", "Aider"),
+        ("lmstudio", "LM Studio"),
+        ("ollama", "Ollama"),
+        ("cloudflare", "Cloudflare Workers AI"),
+        ("kimi", "Kimi / Moonshot"),
         ("generic", "Generic JSONL"),
     ] {
         ensure_provider(conn, id, name)?;
@@ -590,6 +597,58 @@ fn seed_defaults(conn: &Connection) -> rusqlite::Result<()> {
         Some(1.25),
         Some(10.0),
         Some(0.125),
+        None,
+        None,
+        "https://openai.com/api/pricing/",
+    )?;
+    seed_price(
+        conn,
+        "openai:gpt-5.5",
+        "openai",
+        "gpt-5.5",
+        &[],
+        Some(5.0),
+        Some(30.0),
+        Some(0.50),
+        None,
+        None,
+        "https://openai.com/api/pricing/",
+    )?;
+    seed_price(
+        conn,
+        "openai:gpt-5.4",
+        "openai",
+        "gpt-5.4",
+        &[],
+        Some(2.50),
+        Some(15.0),
+        Some(0.25),
+        None,
+        None,
+        "https://openai.com/api/pricing/",
+    )?;
+    seed_price(
+        conn,
+        "openai:gpt-5.3-codex",
+        "openai",
+        "gpt-5.3-codex",
+        &[],
+        Some(1.75),
+        Some(14.0),
+        Some(0.175),
+        None,
+        None,
+        "https://developers.openai.com/api/docs/models/gpt-5.3-codex",
+    )?;
+    seed_price(
+        conn,
+        "openai:gpt-5.4-mini",
+        "openai",
+        "gpt-5.4-mini",
+        &[],
+        Some(0.75),
+        Some(4.50),
+        Some(0.075),
         None,
         None,
         "https://openai.com/api/pricing/",
@@ -616,9 +675,97 @@ fn seed_defaults(conn: &Connection) -> rusqlite::Result<()> {
         Some(3.0),
         Some(15.0),
         None,
-        Some(3.75),
+        Some(6.0),
         Some(0.30),
         "https://docs.anthropic.com/en/docs/about-claude/pricing",
+    )?;
+    seed_price(
+        conn,
+        "anthropic:claude-sonnet-4-5-20250929",
+        "anthropic",
+        "claude-sonnet-4-5-20250929",
+        &["claude-sonnet-4-5", "claude-sonnet-4.5"],
+        Some(3.0),
+        Some(15.0),
+        None,
+        Some(6.0),
+        Some(0.30),
+        "https://docs.anthropic.com/en/docs/about-claude/pricing",
+    )?;
+    seed_price(
+        conn,
+        "anthropic:claude-sonnet-4-6",
+        "anthropic",
+        "claude-sonnet-4-6",
+        &["claude-sonnet-4.6"],
+        Some(3.0),
+        Some(15.0),
+        None,
+        Some(6.0),
+        Some(0.30),
+        "https://docs.anthropic.com/en/docs/about-claude/pricing",
+    )?;
+    seed_price(
+        conn,
+        "anthropic:claude-haiku-4-5-20251001",
+        "anthropic",
+        "claude-haiku-4-5-20251001",
+        &["claude-haiku-4-5", "claude-haiku-4.5", "haiku"],
+        Some(1.0),
+        Some(5.0),
+        None,
+        Some(2.0),
+        Some(0.10),
+        "https://docs.anthropic.com/en/docs/about-claude/pricing",
+    )?;
+    for (id, model, aliases) in [
+        (
+            "anthropic:claude-opus-4-5-20251101",
+            "claude-opus-4-5-20251101",
+            &["claude-opus-4-5", "claude-opus-4.5"][..],
+        ),
+        (
+            "anthropic:claude-opus-4-6",
+            "claude-opus-4-6",
+            &["claude-opus-4.6"][..],
+        ),
+        (
+            "anthropic:claude-opus-4-7",
+            "claude-opus-4-7",
+            &["claude-opus-4.7"][..],
+        ),
+    ] {
+        seed_price(
+            conn,
+            id,
+            "anthropic",
+            model,
+            aliases,
+            Some(5.0),
+            Some(25.0),
+            None,
+            Some(10.0),
+            Some(0.50),
+            "https://docs.anthropic.com/en/docs/about-claude/pricing",
+        )?;
+    }
+    seed_price(
+        conn,
+        "kimi:kimi-k2.6",
+        "kimi",
+        "kimi-k2.6",
+        &[
+            "kimi-k2.6:cloud",
+            "kimi-for-coding",
+            "kimi-code/kimi-for-coding",
+            "Kimi-k2.6",
+        ],
+        Some(0.95),
+        Some(4.0),
+        Some(0.16),
+        Some(0.95),
+        Some(0.16),
+        "https://www.kimi.com/resources/kimi-k2-6-pricing",
     )?;
     seed_price(
         conn,
@@ -652,11 +799,30 @@ fn seed_price(
 ) -> rusqlite::Result<()> {
     let now = now();
     conn.execute(
-        "INSERT OR IGNORE INTO pricing_catalogs
+        "INSERT INTO pricing_catalogs
          (id, provider_id, model, aliases_json, source_url, catalog_version, effective_from,
           input_per_1m, output_per_1m, cached_input_per_1m, cache_write_per_1m, cache_read_per_1m,
           created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, 'seed-2026-04-29', '2026-04-29', ?6, ?7, ?8, ?9, ?10, ?11, ?11)",
+         VALUES (?1, ?2, ?3, ?4, ?5, 'seed-2026-05-08', '2026-05-08', ?6, ?7, ?8, ?9, ?10, ?11, ?11)
+         ON CONFLICT(id) DO UPDATE SET
+          provider_id = excluded.provider_id,
+          model = excluded.model,
+          aliases_json = excluded.aliases_json,
+          source_url = excluded.source_url,
+          catalog_version = excluded.catalog_version,
+          effective_from = excluded.effective_from,
+          currency = 'USD',
+          input_per_1m = excluded.input_per_1m,
+          output_per_1m = excluded.output_per_1m,
+          cached_input_per_1m = excluded.cached_input_per_1m,
+          cache_write_per_1m = excluded.cache_write_per_1m,
+          cache_read_per_1m = excluded.cache_read_per_1m,
+          user_override = 0,
+          notes = NULL,
+          updated_at = excluded.updated_at
+         WHERE pricing_catalogs.user_override = 0
+            OR pricing_catalogs.notes LIKE 'Detected locally%'
+            OR pricing_catalogs.notes LIKE 'Available in local Codex model cache%'",
         params![
             id,
             provider_id,
@@ -718,6 +884,24 @@ fn candidate_sources() -> Vec<CandidateSource> {
                 display_name: "Continue",
                 path: home.join(".continue"),
             },
+            CandidateSource {
+                provider_id: "lmstudio",
+                parser_id: "generic_json",
+                display_name: "LM Studio",
+                path: home.join(".lmstudio"),
+            },
+            CandidateSource {
+                provider_id: "ollama",
+                parser_id: "generic_jsonl",
+                display_name: "Ollama",
+                path: home.join(".ollama"),
+            },
+            CandidateSource {
+                provider_id: "kimi",
+                parser_id: "kimi",
+                display_name: "Kimi Code",
+                path: home.join(".kimi"),
+            },
         ]);
     }
     if let Some(data) = dirs::data_dir() {
@@ -769,6 +953,8 @@ fn infer_source(path: &Path) -> (String, String, String) {
         ("google".into(), "gemini".into(), "Gemini".into())
     } else if text.contains(".continue") {
         ("continue".into(), "generic_jsonl".into(), "Continue".into())
+    } else if text.contains(".kimi") || text.contains("kimi-desktop") {
+        ("kimi".into(), "kimi".into(), "Kimi Code".into())
     } else {
         (
             "generic".into(),
@@ -879,6 +1065,9 @@ fn scan_source(conn: &Connection, source: &Source) -> Result<usize, String> {
 fn parse_content(source: &Source, path: &Path, content: &str) -> Vec<ParsedEvent> {
     let mut events = Vec::new();
     let mut offset = 0i64;
+    let mut context_model: Option<String> = None;
+    let mut context_cwd: Option<String> = None;
+    let mut context_session: Option<String> = None;
     for line in content.lines() {
         let trimmed = line.trim();
         if trimmed.is_empty() {
@@ -886,7 +1075,23 @@ fn parse_content(source: &Source, path: &Path, content: &str) -> Vec<ParsedEvent
             continue;
         }
         if let Ok(value) = serde_json::from_str::<Value>(trimmed) {
-            if let Some(event) = parse_value(source, path, &value, Some(offset), trimmed) {
+            update_record_context(
+                source,
+                &value,
+                &mut context_model,
+                &mut context_cwd,
+                &mut context_session,
+            );
+            if let Some(event) = parse_value(
+                source,
+                path,
+                &value,
+                Some(offset),
+                trimmed,
+                context_model.as_deref(),
+                context_cwd.as_deref(),
+                context_session.as_deref(),
+            ) {
                 events.push(event);
             }
         }
@@ -901,7 +1106,16 @@ fn parse_content(source: &Source, path: &Path, content: &str) -> Vec<ParsedEvent
 }
 
 fn collect_json_events(source: &Source, path: &Path, value: &Value, events: &mut Vec<ParsedEvent>) {
-    if let Some(event) = parse_value(source, path, value, None, &value.to_string()) {
+    if let Some(event) = parse_value(
+        source,
+        path,
+        value,
+        None,
+        &value.to_string(),
+        None,
+        None,
+        None,
+    ) {
         events.push(event);
     }
     match value {
@@ -921,14 +1135,93 @@ fn collect_json_events(source: &Source, path: &Path, value: &Value, events: &mut
     }
 }
 
+fn update_record_context(
+    source: &Source,
+    value: &Value,
+    model: &mut Option<String>,
+    cwd: &mut Option<String>,
+    session: &mut Option<String>,
+) {
+    if let Some(payload) = value.get("payload") {
+        if let Some(next_model) = str_field(payload, &["model"]) {
+            *model = Some(next_model);
+        }
+        if let Some(next_cwd) = str_field(payload, &["cwd"]) {
+            *cwd = Some(next_cwd);
+        }
+        if let Some(next_session) = str_field(payload, &["id", "session_id", "sessionId"]) {
+            *session = Some(next_session);
+        }
+    }
+    if let Some(next_model) = str_field(value, &["model", "model_name", "modelName"]) {
+        *model = Some(next_model);
+    }
+    if let Some(next_cwd) = str_field(value, &["cwd", "working_directory", "workingDirectory"]) {
+        *cwd = Some(next_cwd);
+    }
+    if source.provider_id == "kimi" {
+        if let Some(next_cwd) = infer_project_from_value(value) {
+            *cwd = Some(next_cwd);
+        }
+    }
+    if let Some(next_session) = str_field(
+        value,
+        &[
+            "session_id",
+            "sessionId",
+            "conversation_id",
+            "conversationId",
+        ],
+    ) {
+        *session = Some(next_session);
+    }
+}
+
+fn usage_value(value: &Value) -> &Value {
+    value
+        .get("usage")
+        .or_else(|| {
+            value
+                .get("message")
+                .and_then(|message| message.get("usage"))
+        })
+        .or_else(|| {
+            value
+                .get("payload")
+                .and_then(|payload| payload.get("info"))
+                .and_then(|info| info.get("last_token_usage"))
+        })
+        .or_else(|| {
+            value
+                .get("payload")
+                .and_then(|payload| payload.get("info"))
+                .and_then(|info| info.get("total_token_usage"))
+        })
+        .or_else(|| {
+            value
+                .get("message")
+                .and_then(|message| message.get("payload"))
+                .and_then(|payload| payload.get("token_usage"))
+        })
+        .or_else(|| {
+            value
+                .get("payload")
+                .and_then(|payload| payload.get("token_usage"))
+        })
+        .unwrap_or(value)
+}
+
 fn parse_value(
     source: &Source,
     path: &Path,
     value: &Value,
     source_offset: Option<i64>,
     raw: &str,
+    context_model: Option<&str>,
+    context_cwd: Option<&str>,
+    context_session: Option<&str>,
 ) -> Option<ParsedEvent> {
-    let usage = value.get("usage").unwrap_or(value);
+    let usage = usage_value(value);
     let input = int_field(
         usage,
         &[
@@ -936,6 +1229,10 @@ fn parse_value(
             "prompt_tokens",
             "inputTokens",
             "promptTokens",
+            "input_other",
+            "prompt_eval_count",
+            "prompt_eval_tokens",
+            "num_prompt_tokens",
         ],
     );
     let output = int_field(
@@ -945,6 +1242,10 @@ fn parse_value(
             "completion_tokens",
             "outputTokens",
             "completionTokens",
+            "output",
+            "eval_count",
+            "eval_tokens",
+            "num_completion_tokens",
         ],
     );
     let cached = int_field(
@@ -957,6 +1258,7 @@ fn parse_value(
             "cache_creation_input_tokens",
             "cache_write_tokens",
             "cacheWriteTokens",
+            "input_cache_creation",
         ],
     );
     let cache_read = int_field(
@@ -965,9 +1267,12 @@ fn parse_value(
             "cache_read_input_tokens",
             "cache_read_tokens",
             "cacheReadTokens",
+            "input_cache_read",
         ],
     );
     let reasoning = int_field(usage, &["reasoning_tokens", "reasoningTokens"]);
+    let reasoning =
+        reasoning + int_field(usage, &["reasoning_output_tokens", "reasoningOutputTokens"]);
     let tool = int_field(usage, &["tool_tokens", "toolTokens"]);
     let total = int_field(usage, &["total_tokens", "totalTokens"]);
     let known = input + output + cached + cache_write + cache_read + reasoning + tool;
@@ -975,14 +1280,18 @@ fn parse_value(
     if known == 0 && unknown == 0 {
         return None;
     }
-    let timestamp = str_field(
+    let timestamp = timestamp_field(
         value,
         &["timestamp", "created_at", "createdAt", "time", "date"],
     )
-    .or_else(|| str_field(usage, &["timestamp", "created_at"]))
+    .or_else(|| timestamp_field(usage, &["timestamp", "created_at"]))
     .unwrap_or_else(now);
     let model = str_field(value, &["model", "model_name", "modelName"])
-        .or_else(|| str_field(usage, &["model"]));
+        .or_else(|| str_field(usage, &["model"]))
+        .or_else(|| str_field(value.get("message").unwrap_or(&Value::Null), &["model"]))
+        .or_else(|| str_field(value.get("payload").unwrap_or(&Value::Null), &["model"]))
+        .or_else(|| context_model.map(str::to_string))
+        .or_else(|| default_model_for_source(source, value, usage));
     let project_path = str_field(
         value,
         &[
@@ -993,6 +1302,15 @@ fn parse_value(
             "projectPath",
         ],
     )
+    .or_else(|| str_field(value.get("payload").unwrap_or(&Value::Null), &["cwd"]))
+    .or_else(|| {
+        if source.provider_id == "kimi" {
+            infer_project_from_value(value)
+        } else {
+            None
+        }
+    })
+    .or_else(|| context_cwd.map(str::to_string))
     .or_else(|| infer_project_from_path(path));
     Some(ParsedEvent {
         provider_id: source.provider_id.clone(),
@@ -1008,7 +1326,14 @@ fn parse_value(
                 "sessionId",
                 "chat_id",
             ],
-        ),
+        )
+        .or_else(|| {
+            str_field(
+                value.get("payload").unwrap_or(&Value::Null),
+                &["id", "session_id", "sessionId"],
+            )
+        })
+        .or_else(|| context_session.map(str::to_string)),
         message_id: str_field(value, &["message_id", "messageId", "id"]),
         request_id: str_field(value, &["request_id", "requestId"]),
         model,
@@ -1049,16 +1374,7 @@ fn insert_event(
         None => None,
     };
     let conversation_id = upsert_conversation(conn, &event, project_id.as_deref())?;
-    let pricing = find_pricing(conn, &event.provider_id, event.model.as_deref())?;
-    let (cost, pricing_id, pricing_match) = if let Some(p) = pricing {
-        (
-            Some(calculate_cost(&event, &p)),
-            Some(p.id),
-            "exact".to_string(),
-        )
-    } else {
-        (None, None, "missing".to_string())
-    };
+    let (cost, pricing_id, pricing_match) = price_event(conn, &event)?;
     let id = hash(&format!(
         "{}|{}|{:?}|{:?}|{:?}|{}",
         source.provider_id,
@@ -1114,6 +1430,149 @@ fn insert_event(
         )
         .map_err(to_string)?;
     Ok(changed > 0)
+}
+
+fn price_event(
+    conn: &Connection,
+    event: &ParsedEvent,
+) -> Result<(Option<f64>, Option<String>, String), String> {
+    let pricing = find_pricing(conn, &event.provider_id, event.model.as_deref())?;
+    if let Some(p) = pricing {
+        if pricing_covers_event(event, &p) {
+            Ok((
+                Some(calculate_cost(event, &p)),
+                Some(p.id),
+                "exact".to_string(),
+            ))
+        } else {
+            Ok((None, Some(p.id), "missing_price".to_string()))
+        }
+    } else {
+        Ok((None, None, "missing".to_string()))
+    }
+}
+
+fn pricing_covers_event(event: &ParsedEvent, pricing: &Pricing) -> bool {
+    if event.unknown_tokens > 0 {
+        return false;
+    }
+    if event.input_tokens > 0 && pricing.input_per_1m.is_none() {
+        return false;
+    }
+    if event.output_tokens > 0 && pricing.output_per_1m.is_none() {
+        return false;
+    }
+    if event.cached_input_tokens > 0
+        && pricing
+            .cached_input_per_1m
+            .or(pricing.input_per_1m)
+            .is_none()
+    {
+        return false;
+    }
+    if event.cache_write_tokens > 0
+        && pricing
+            .cache_write_per_1m
+            .or(pricing.input_per_1m)
+            .is_none()
+    {
+        return false;
+    }
+    if event.cache_read_tokens > 0
+        && pricing
+            .cache_read_per_1m
+            .or(pricing.cached_input_per_1m)
+            .is_none()
+    {
+        return false;
+    }
+    if event.reasoning_tokens > 0 && pricing.reasoning_per_1m.or(pricing.output_per_1m).is_none() {
+        return false;
+    }
+    if event.tool_tokens > 0 && pricing.tool_per_1m.or(pricing.input_per_1m).is_none() {
+        return false;
+    }
+    true
+}
+
+fn reprice_usage_events(conn: &Connection) -> rusqlite::Result<()> {
+    #[derive(Clone)]
+    struct EventForPricing {
+        id: String,
+        provider_id: String,
+        model: Option<String>,
+        input_tokens: i64,
+        output_tokens: i64,
+        cached_input_tokens: i64,
+        cache_write_tokens: i64,
+        cache_read_tokens: i64,
+        reasoning_tokens: i64,
+        tool_tokens: i64,
+        unknown_tokens: i64,
+    }
+
+    let events = {
+        let mut stmt = conn.prepare(
+            "SELECT id, provider_id, model, input_tokens, output_tokens, cached_input_tokens,
+             cache_write_tokens, cache_read_tokens, reasoning_tokens, tool_tokens, unknown_tokens
+             FROM usage_events",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(EventForPricing {
+                id: r.get(0)?,
+                provider_id: r.get(1)?,
+                model: r.get(2)?,
+                input_tokens: r.get(3)?,
+                output_tokens: r.get(4)?,
+                cached_input_tokens: r.get(5)?,
+                cache_write_tokens: r.get(6)?,
+                cache_read_tokens: r.get(7)?,
+                reasoning_tokens: r.get(8)?,
+                tool_tokens: r.get(9)?,
+                unknown_tokens: r.get(10)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()?
+    };
+
+    let updated_at = now();
+    for event in events {
+        let parsed = ParsedEvent {
+            provider_id: event.provider_id,
+            product_id: None,
+            timestamp: updated_at.clone(),
+            project_path: None,
+            conversation_id: None,
+            message_id: None,
+            request_id: None,
+            model: event.model,
+            input_tokens: event.input_tokens,
+            output_tokens: event.output_tokens,
+            cached_input_tokens: event.cached_input_tokens,
+            cache_write_tokens: event.cache_write_tokens,
+            cache_read_tokens: event.cache_read_tokens,
+            reasoning_tokens: event.reasoning_tokens,
+            tool_tokens: event.tool_tokens,
+            unknown_tokens: event.unknown_tokens,
+            source_offset: None,
+            raw_record_hash: String::new(),
+            confidence: String::new(),
+            warnings: vec![],
+        };
+        let (cost, pricing_id, pricing_match) = price_event(conn, &parsed).map_err(|e| {
+            rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                e,
+            )))
+        })?;
+        conn.execute(
+            "UPDATE usage_events
+             SET official_api_cost_usd = ?1, pricing_catalog_id = ?2, pricing_match_confidence = ?3, updated_at = ?4
+             WHERE id = ?5",
+            params![cost, pricing_id, pricing_match, updated_at, event.id],
+        )?;
+    }
+    Ok(())
 }
 
 fn upsert_project(
@@ -1405,6 +1864,43 @@ fn int_field(value: &Value, names: &[&str]) -> i64 {
     0
 }
 
+fn timestamp_field(value: &Value, names: &[&str]) -> Option<String> {
+    for name in names {
+        let Some(field) = value.get(*name) else {
+            continue;
+        };
+        if let Some(text) = field.as_str() {
+            return Some(text.to_string());
+        }
+        if let Some(seconds) = field.as_i64() {
+            return unix_timestamp_to_rfc3339(seconds as f64);
+        }
+        if let Some(seconds) = field.as_u64() {
+            return unix_timestamp_to_rfc3339(seconds as f64);
+        }
+        if let Some(seconds) = field.as_f64() {
+            return unix_timestamp_to_rfc3339(seconds);
+        }
+    }
+    None
+}
+
+fn unix_timestamp_to_rfc3339(value: f64) -> Option<String> {
+    if !value.is_finite() || value <= 0.0 {
+        return None;
+    }
+    let seconds = if value > 10_000_000_000.0 {
+        value / 1000.0
+    } else {
+        value
+    };
+    let whole = seconds.trunc() as i64;
+    let nanos = ((seconds.fract() * 1_000_000_000.0).round() as u32).min(999_999_999);
+    Utc.timestamp_opt(whole, nanos)
+        .single()
+        .map(|dt| dt.to_rfc3339())
+}
+
 fn str_field(value: &Value, names: &[&str]) -> Option<String> {
     for name in names {
         if let Some(text) = value.get(*name).and_then(|v| v.as_str()) {
@@ -1414,7 +1910,77 @@ fn str_field(value: &Value, names: &[&str]) -> Option<String> {
     None
 }
 
+fn default_model_for_source(source: &Source, _value: &Value, _usage: &Value) -> Option<String> {
+    match source.provider_id.as_str() {
+        "kimi" => Some("kimi-for-coding".to_string()),
+        _ => None,
+    }
+}
+
+fn infer_project_from_value(value: &Value) -> Option<String> {
+    let mut candidates = Vec::new();
+    collect_project_candidates(value, &mut candidates);
+    candidates.into_iter().next()
+}
+
+fn collect_project_candidates(value: &Value, candidates: &mut Vec<String>) {
+    match value {
+        Value::String(text) => {
+            for path in absolute_paths_in_text(text) {
+                if let Some(project) = project_root_from_path(Path::new(&path)) {
+                    if !candidates.iter().any(|c| c == &project) {
+                        candidates.push(project);
+                    }
+                }
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                collect_project_candidates(item, candidates);
+            }
+        }
+        Value::Object(map) => {
+            for item in map.values() {
+                collect_project_candidates(item, candidates);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn absolute_paths_in_text(text: &str) -> Vec<String> {
+    let mut paths = Vec::new();
+    let mut start = 0;
+    while let Some(relative) = text[start..].find("/Users/") {
+        let absolute_start = start + relative;
+        let mut absolute_end = text.len();
+        for (index, ch) in text[absolute_start..].char_indices() {
+            if matches!(
+                ch,
+                '"' | '\'' | '\n' | '\r' | '\t' | '<' | '>' | '[' | ']' | '{' | '}'
+            ) {
+                absolute_end = absolute_start + index;
+                break;
+            }
+        }
+        let path = text[absolute_start..absolute_end]
+            .trim_end_matches(|c: char| matches!(c, ',' | ':' | ';' | ')' | '.'))
+            .to_string();
+        if !path.is_empty() {
+            paths.push(path);
+        }
+        start = absolute_end.saturating_add(1);
+        if start >= text.len() {
+            break;
+        }
+    }
+    paths
+}
+
 fn infer_project_from_path(path: &Path) -> Option<String> {
+    if let Some(project) = project_root_from_path(path) {
+        return Some(project);
+    }
     let parts: Vec<_> = path
         .components()
         .map(|c| c.as_os_str().to_string_lossy().to_string())
@@ -1431,6 +1997,49 @@ fn infer_project_from_path(path: &Path) -> Option<String> {
         .map(|s| s.to_string())
 }
 
+fn project_root_from_path(path: &Path) -> Option<String> {
+    let parts: Vec<_> = path
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().to_string())
+        .collect();
+    if parts.iter().any(|p| {
+        p.eq_ignore_ascii_case(".kimi")
+            || p.eq_ignore_ascii_case(".codex")
+            || p.eq_ignore_ascii_case(".claude")
+    }) {
+        return None;
+    }
+    for marker in [
+        "Developer",
+        "iDeveloper",
+        "projects",
+        "project",
+        "workspaces",
+        "workspace",
+    ] {
+        if let Some(index) = parts.iter().position(|p| p.eq_ignore_ascii_case(marker)) {
+            if parts.get(index + 1).is_some() {
+                return Some(join_path_parts(&parts[..=index + 1]));
+            }
+        }
+    }
+    if parts.len() >= 4 && parts[1] == "Users" {
+        let first = &parts[3];
+        if !first.starts_with('.') && first != "Library" && first != "Downloads" {
+            return Some(join_path_parts(&parts[..=3]));
+        }
+    }
+    None
+}
+
+fn join_path_parts(parts: &[String]) -> String {
+    if parts.first().is_some_and(|p| p == "/") {
+        format!("/{}", parts[1..].join("/"))
+    } else {
+        parts.join("/")
+    }
+}
+
 fn provider_display_name(provider_id: &str) -> &str {
     match provider_id {
         "openai" => "OpenAI / Codex",
@@ -1440,6 +2049,10 @@ fn provider_display_name(provider_id: &str) -> &str {
         "cline" => "Cline / Roo Code",
         "continue" => "Continue",
         "aider" => "Aider",
+        "lmstudio" => "LM Studio",
+        "ollama" => "Ollama",
+        "cloudflare" => "Cloudflare Workers AI",
+        "kimi" => "Kimi / Moonshot",
         _ => "Generic JSONL",
     }
 }
