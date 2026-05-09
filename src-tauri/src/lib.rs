@@ -191,7 +191,12 @@ pub fn run() {
             list_subscriptions,
             create_subscription,
             delete_subscription,
-            list_pricing_catalog
+            list_pricing_catalog,
+            login_sync,
+            logout_sync,
+            get_sync_status,
+            configure_sync_server,
+            sync_now
         ])
         .run(tauri::generate_context!())
         .expect("error while running MEtR");
@@ -441,6 +446,427 @@ fn list_pricing_catalog(state: State<AppState>) -> Result<Vec<Value>, String> {
     rows.collect::<Result<Vec<_>, _>>().map_err(to_string)
 }
 
+// ---------------------------------------------------------------------------
+// Sync commands
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+struct LoginInput {
+    login: String,
+    password: String,
+    server_url: String,
+}
+
+#[derive(Debug, Serialize)]
+struct SyncStatus {
+    configured: bool,
+    server_url: String,
+    logged_in: bool,
+    username: Option<String>,
+    device_name: Option<String>,
+    last_sync_at: Option<String>,
+    pending_events: i64,
+    sync_enabled: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct SyncResult {
+    uploaded: usize,
+    batches: usize,
+    errors: Vec<String>,
+}
+
+fn ensure_sync_config(conn: &Connection) -> Result<(), String> {
+    let exists: bool = conn
+        .query_row("SELECT 1 FROM sync_config WHERE id = 1", [], |_| Ok(true))
+        .unwrap_or(false);
+    if !exists {
+        let now = now();
+        conn.execute(
+            "INSERT INTO sync_config (id, server_url, created_at, updated_at)
+             VALUES (1, 'https://metr.petarpetkov.com', ?1, ?1)",
+            params![now],
+        )
+        .map_err(to_string)?;
+    }
+    Ok(())
+}
+
+fn get_sync_config(conn: &Connection) -> Result<SyncStatus, String> {
+    ensure_sync_config(conn)?;
+    let row = conn
+        .query_row(
+            "SELECT server_url, auth_token, device_name, username, last_sync_at, sync_enabled
+             FROM sync_config WHERE id = 1",
+            [],
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, Option<String>>(1)?,
+                    r.get::<_, Option<String>>(2)?,
+                    r.get::<_, Option<String>>(3)?,
+                    r.get::<_, Option<String>>(4)?,
+                    r.get::<_, i64>(5)? == 1,
+                ))
+            },
+        )
+        .map_err(to_string)?;
+
+    let pending: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM usage_events WHERE synced_at IS NULL",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+
+    Ok(SyncStatus {
+        configured: true,
+        server_url: row.0,
+        logged_in: row.1.is_some(),
+        username: row.3,
+        device_name: row.2,
+        last_sync_at: row.4,
+        pending_events: pending,
+        sync_enabled: row.5,
+    })
+}
+
+#[tauri::command]
+fn configure_sync_server(state: State<AppState>, server_url: String) -> Result<SyncStatus, String> {
+    let conn = state.db.lock().map_err(to_string)?;
+    ensure_sync_config(&conn)?;
+    let now = now();
+    conn.execute(
+        "UPDATE sync_config SET server_url = ?1, updated_at = ?2 WHERE id = 1",
+        params![server_url, now],
+    )
+    .map_err(to_string)?;
+    get_sync_config(&conn)
+}
+
+#[tauri::command]
+fn login_sync(state: State<AppState>, input: LoginInput) -> Result<SyncStatus, String> {
+    let conn = state.db.lock().map_err(to_string)?;
+    ensure_sync_config(&conn)?;
+
+    let device_name = format!(
+        "{}-{}",
+        std::env::consts::OS,
+        whoami::fallible::hostname().unwrap_or_else(|_| "unknown".to_string())
+    );
+
+    let client = reqwest::blocking::Client::new();
+    let url = format!(
+        "{}/api/v1/auth/login",
+        input.server_url.trim_end_matches('/')
+    );
+    let resp = client
+        .post(&url)
+        .json(&serde_json::json!({
+            "login": input.login,
+            "password": input.password,
+            "device_name": device_name,
+        }))
+        .send()
+        .map_err(|e| format!("Login request failed: {}", e))?;
+
+    if !resp.status().is_success() {
+        let body = resp.text().unwrap_or_default();
+        return Err(format!("Login failed: {}", body));
+    }
+
+    let data: Value = resp
+        .json()
+        .map_err(|e| format!("Invalid login response: {}", e))?;
+    let token = data
+        .get("token")
+        .and_then(|t| t.as_str())
+        .ok_or("No token in login response")?;
+    let username = data
+        .get("user")
+        .and_then(|u| u.get("username"))
+        .and_then(|u| u.as_str())
+        .unwrap_or(&input.login)
+        .to_string();
+
+    let now = now();
+    conn.execute(
+        "UPDATE sync_config SET server_url = ?1, auth_token = ?2, username = ?3, device_name = ?4, sync_enabled = 1, updated_at = ?5 WHERE id = 1",
+        params![input.server_url, token, username, device_name, now],
+    )
+    .map_err(to_string)?;
+
+    get_sync_config(&conn)
+}
+
+#[tauri::command]
+fn logout_sync(state: State<AppState>) -> Result<SyncStatus, String> {
+    let conn = state.db.lock().map_err(to_string)?;
+    ensure_sync_config(&conn)?;
+
+    // Optionally notify server, but ignore errors
+    if let Ok((Some(token), server_url)) = conn.query_row(
+        "SELECT auth_token, server_url FROM sync_config WHERE id = 1",
+        [],
+        |r| Ok((r.get::<_, Option<String>>(0)?, r.get::<_, String>(1)?)),
+    ) {
+        let _ = reqwest::blocking::Client::new()
+            .post(format!(
+                "{}/api/v1/auth/logout",
+                server_url.trim_end_matches('/')
+            ))
+            .header("Authorization", format!("Bearer {}", token))
+            .header("Accept", "application/json")
+            .send();
+    }
+
+    let now = now();
+    conn.execute(
+        "UPDATE sync_config SET auth_token = NULL, username = NULL, user_id = NULL, last_sync_at = NULL, sync_enabled = 0, updated_at = ?1 WHERE id = 1",
+        params![now],
+    )
+    .map_err(to_string)?;
+
+    get_sync_config(&conn)
+}
+
+#[tauri::command]
+fn get_sync_status(state: State<AppState>) -> Result<SyncStatus, String> {
+    let conn = state.db.lock().map_err(to_string)?;
+    get_sync_config(&conn)
+}
+
+#[tauri::command]
+fn sync_now(state: State<AppState>) -> Result<SyncResult, String> {
+    let conn = state.db.lock().map_err(to_string)?;
+    ensure_sync_config(&conn)?;
+
+    let (token, server_url, device_uuid): (String, String, Option<String>) = conn
+        .query_row(
+            "SELECT auth_token, server_url, device_uuid FROM sync_config WHERE id = 1",
+            [],
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, Option<String>>(2)?,
+                ))
+            },
+        )
+        .map_err(|_| "Not logged in. Please log in first.".to_string())?;
+
+    let device_uuid = match device_uuid {
+        Some(uuid) => uuid,
+        None => {
+            let uuid = Uuid::new_v4().to_string();
+            conn.execute(
+                "UPDATE sync_config SET device_uuid = ?1, updated_at = ?2 WHERE id = 1",
+                params![uuid, now()],
+            )
+            .map_err(to_string)?;
+            uuid
+        }
+    };
+
+    let base_url = server_url.trim_end_matches('/');
+    let client = reqwest::blocking::Client::new();
+    let auth_header = format!("Bearer {}", token);
+
+    // Register device
+    let device_name = conn
+        .query_row(
+            "SELECT device_name FROM sync_config WHERE id = 1",
+            [],
+            |r| r.get::<_, String>(0),
+        )
+        .unwrap_or_else(|_| format!("{}-unknown", std::env::consts::OS));
+
+    let reg_resp = client
+        .post(format!("{}/api/v1/devices/register", base_url))
+        .header("Authorization", &auth_header)
+        .header("Accept", "application/json")
+        .json(&serde_json::json!({
+            "device_uuid": device_uuid,
+            "display_name": device_name,
+            "platform": std::env::consts::OS,
+            "hostname_hash": hash(&whoami::fallible::hostname().unwrap_or_else(|_| "unknown".to_string())),
+            "os_version": whoami::distro(),
+            "app_version": env!("CARGO_PKG_VERSION"),
+        }))
+        .send()
+        .map_err(|e| format!("Device registration failed: {}", e))?;
+
+    if !reg_resp.status().is_success() {
+        let body = reg_resp.text().unwrap_or_default();
+        return Err(format!("Device registration failed: {}", body));
+    }
+
+    // Query unsynced events in batches
+    let mut total_uploaded = 0usize;
+    let mut batch_count = 0usize;
+    let mut errors = Vec::new();
+
+    loop {
+        let mut stmt = conn
+            .prepare(
+                "SELECT u.id, u.provider_id, u.timestamp, u.model,
+                 u.input_tokens, u.output_tokens, u.cached_input_tokens,
+                 u.cache_write_tokens, u.cache_read_tokens,
+                 u.reasoning_tokens, u.tool_tokens, u.unknown_tokens,
+                 u.source_hash, u.raw_record_hash, u.source_file_path, u.source_offset,
+                 u.official_api_cost_usd, u.pricing_match_confidence, u.warnings_json,
+                 p.path, p.display_name,
+                 c.external_conversation_id, c.display_name,
+                 u.created_at, u.updated_at
+                 FROM usage_events u
+                 LEFT JOIN projects p ON p.id = u.project_id
+                 LEFT JOIN conversations c ON c.id = u.conversation_id
+                 WHERE u.synced_at IS NULL
+                 ORDER BY u.timestamp ASC
+                 LIMIT 500",
+            )
+            .map_err(to_string)?;
+
+        let events: Vec<Value> = stmt
+            .query_map([], |r| {
+                let project_path: Option<String> = r.get(19)?;
+                let project_display: Option<String> = r.get(20)?;
+                let conversation_external: Option<String> = r.get(21)?;
+                let conversation_display: Option<String> = r.get(22)?;
+                let cost: Option<f64> = r.get(16)?;
+                let pricing_match_confidence: String = r.get(17)?;
+                let warnings_json: String = r.get(18)?;
+                let warnings = serde_json::from_str::<Value>(&warnings_json)
+                    .unwrap_or_else(|_| Value::Array(vec![]));
+                Ok(serde_json::json!({
+                    "source_event_id": r.get::<_, String>(0)?,
+                    "source_event_hash": r.get::<_, String>(13)?,
+                    "source_file_hash": r.get::<_, String>(12)?,
+                    "source_offset": r.get::<_, Option<i64>>(15)?,
+                    "provider_id": r.get::<_, String>(1)?,
+                    "timestamp": r.get::<_, String>(2)?,
+                    "model": r.get::<_, Option<String>>(3)?,
+                    "project": project_path.map(|root_path| serde_json::json!({
+                        "root_path": root_path,
+                        "display_name": project_display,
+                    })),
+                    "conversation": conversation_external.map(|external_conversation_id| serde_json::json!({
+                        "external_conversation_id": external_conversation_id,
+                        "display_name": conversation_display,
+                    })),
+                    "tokens": {
+                        "input": r.get::<_, i64>(4)?,
+                        "output": r.get::<_, i64>(5)?,
+                        "cached_input": r.get::<_, i64>(6)?,
+                        "cache_write": r.get::<_, i64>(7)?,
+                        "cache_read": r.get::<_, i64>(8)?,
+                        "reasoning": r.get::<_, i64>(9)?,
+                        "tool": r.get::<_, i64>(10)?,
+                        "unknown": r.get::<_, i64>(11)?,
+                    },
+                    "client_cost": cost.map(|official_api_cost_usd| serde_json::json!({
+                        "official_api_cost_usd": official_api_cost_usd,
+                        "pricing_match_confidence": pricing_match_confidence,
+                    })),
+                    "warnings": warnings,
+                    "client_created_at": r.get::<_, String>(23)?,
+                    "client_updated_at": r.get::<_, String>(24)?,
+                }))
+            })
+            .map_err(to_string)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(to_string)?;
+
+        if events.is_empty() {
+            break;
+        }
+
+        let client_batch_id = format!("{}-{}", device_uuid, Uuid::new_v4());
+        let resp = client
+            .post(format!("{}/api/v1/sync/events", base_url))
+            .header("Authorization", &auth_header)
+            .header("Accept", "application/json")
+            .json(&serde_json::json!({
+                "device_uuid": device_uuid,
+                "client_batch_id": client_batch_id,
+                "events": events,
+            }))
+            .send()
+            .map_err(|e| format!("Sync request failed: {}", e))?;
+
+        if resp.status().is_success() {
+            let now = now();
+            let event_ids: Vec<String> = events
+                .iter()
+                .filter_map(|e| {
+                    e.get("source_event_id")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string())
+                })
+                .collect();
+
+            for id in event_ids {
+                conn.execute(
+                    "UPDATE usage_events
+                     SET synced_at = ?1, sync_batch_id = ?2, sync_error = NULL, updated_at = ?1
+                     WHERE id = ?3",
+                    params![now, client_batch_id, id],
+                )
+                .map_err(to_string)?;
+            }
+
+            total_uploaded += events.len();
+            batch_count += 1;
+        } else {
+            let body = resp.text().unwrap_or_default();
+            errors.push(format!("Batch {} failed: {}", batch_count + 1, body));
+            let failed_at = now();
+            for event in &events {
+                if let Some(id) = event.get("source_event_id").and_then(|v| v.as_str()) {
+                    conn.execute(
+                        "UPDATE usage_events SET sync_error = ?1, updated_at = ?2 WHERE id = ?3",
+                        params![errors.last().cloned().unwrap_or_default(), failed_at, id],
+                    )
+                    .map_err(to_string)?;
+                }
+            }
+            break;
+        }
+    }
+
+    let now = now();
+    conn.execute(
+        "UPDATE sync_config SET last_sync_at = ?1, updated_at = ?1 WHERE id = 1",
+        params![now],
+    )
+    .map_err(to_string)?;
+
+    Ok(SyncResult {
+        uploaded: total_uploaded,
+        batches: batch_count,
+        errors,
+    })
+}
+
+fn add_column_if_missing(
+    conn: &Connection,
+    table: &str,
+    column: &str,
+    def: &str,
+) -> rusqlite::Result<()> {
+    let sql = format!("ALTER TABLE {} ADD COLUMN {} {}", table, column, def);
+    match conn.execute(&sql, []) {
+        Ok(_) => Ok(()),
+        Err(rusqlite::Error::SqliteFailure(code, Some(msg)))
+            if code.extended_code == 1 && msg.contains("duplicate column name") =>
+        {
+            Ok(())
+        }
+        Err(e) => Err(e),
+    }
+}
+
 fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch(
         "
@@ -522,6 +948,22 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
           raw_record_hash TEXT NOT NULL,
           confidence TEXT NOT NULL,
           warnings_json TEXT NOT NULL DEFAULT '[]',
+          synced_at TEXT,
+          sync_batch_id TEXT,
+          sync_error TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS sync_config (
+          id INTEGER PRIMARY KEY CHECK (id = 1),
+          server_url TEXT NOT NULL DEFAULT 'https://metr.petarpetkov.com',
+          auth_token TEXT,
+          device_uuid TEXT,
+          device_name TEXT,
+          user_id TEXT,
+          username TEXT,
+          last_sync_at TEXT,
+          sync_enabled INTEGER NOT NULL DEFAULT 0,
           created_at TEXT NOT NULL,
           updated_at TEXT NOT NULL
         );
@@ -568,7 +1010,11 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         CREATE UNIQUE INDEX IF NOT EXISTS idx_usage_events_dedupe ON usage_events(id);
         CREATE INDEX IF NOT EXISTS idx_pricing_provider_model ON pricing_catalogs(provider_id, model);
         ",
-    )
+    )?;
+    add_column_if_missing(conn, "usage_events", "synced_at", "TEXT")?;
+    add_column_if_missing(conn, "usage_events", "sync_batch_id", "TEXT")?;
+    add_column_if_missing(conn, "usage_events", "sync_error", "TEXT")?;
+    Ok(())
 }
 
 fn seed_defaults(conn: &Connection) -> rusqlite::Result<()> {
