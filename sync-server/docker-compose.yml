@@ -1,0 +1,90 @@
+services:
+  nginx:
+    image: nginx:1.25-alpine
+    container_name: "${COMPOSE_PROJECT_NAME:-metr-sync}-nginx"
+    ports:
+      - "${NGINX_PORT:-8090}:80"
+    volumes:
+      - ./backend:/var/www/html
+      - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      - php
+    networks:
+      - metr-sync
+
+  php:
+    build: ./backend
+    container_name: "${COMPOSE_PROJECT_NAME:-metr-sync}-php"
+    environment:
+      - APP_ENV=${APP_ENV}
+      - APP_DEBUG=${APP_DEBUG}
+      - APP_URL=${APP_URL}
+      - DB_HOST=${DB_HOST}
+      - DB_PORT=${DB_PORT}
+      - DB_DATABASE=${DB_DATABASE}
+      - DB_USERNAME=${DB_USERNAME}
+      - DB_PASSWORD=${DB_PASSWORD}
+      - REDIS_HOST=${REDIS_HOST}
+      - REDIS_PORT=${REDIS_PORT}
+    volumes:
+      - ./backend:/var/www/html
+    depends_on:
+      - db
+      - redis
+    networks:
+      - metr-sync
+
+  scheduler:
+    build: ./backend
+    container_name: "${COMPOSE_PROJECT_NAME:-metr-sync}-scheduler"
+    command: php -d memory_limit=512M artisan schedule:work
+    environment:
+      - APP_ENV=${APP_ENV}
+      - APP_DEBUG=${APP_DEBUG}
+      - APP_URL=${APP_URL}
+      - DB_HOST=${DB_HOST}
+      - DB_PORT=${DB_PORT}
+      - DB_DATABASE=${DB_DATABASE}
+      - DB_USERNAME=${DB_USERNAME}
+      - DB_PASSWORD=${DB_PASSWORD}
+      - REDIS_HOST=${REDIS_HOST}
+      - REDIS_PORT=${REDIS_PORT}
+    volumes:
+      - ./backend:/var/www/html
+    depends_on:
+      - db
+      - redis
+    networks:
+      - metr-sync
+
+  db:
+    image: mysql:8.0
+    container_name: "${COMPOSE_PROJECT_NAME:-metr-sync}-db"
+    ports:
+      - "${DB_EXPOSE_PORT:-3308}:3306"
+    environment:
+      - MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PASSWORD}
+      - MYSQL_DATABASE=${MYSQL_DATABASE}
+      - MYSQL_USER=${MYSQL_USER}
+      - MYSQL_PASSWORD=${MYSQL_PASSWORD}
+    volumes:
+      - db-data:/var/lib/mysql
+    networks:
+      - metr-sync
+
+  redis:
+    image: redis:7-alpine
+    container_name: "${COMPOSE_PROJECT_NAME:-metr-sync}-redis"
+    command: redis-server --maxmemory 128mb --maxmemory-policy allkeys-lru
+    ports:
+      - "${REDIS_EXPOSE_PORT:-6381}:6379"
+    networks:
+      - metr-sync
+
+networks:
+  metr-sync:
+    name: "${COMPOSE_PROJECT_NAME:-metr-sync}"
+
+volumes:
+  db-data:
+    name: metr_sync_db_data

@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import { invoke } from "@tauri-apps/api/core";
 import {
   Activity,
+  Cloud,
   Database,
   FolderPlus,
   RefreshCw,
@@ -113,6 +114,17 @@ type PricingEntry = {
   source_url: string | null;
 };
 
+type SyncStatus = {
+  configured: boolean;
+  server_url: string;
+  logged_in: boolean;
+  username: string | null;
+  device_name: string | null;
+  last_sync_at: string | null;
+  pending_events: number;
+  sync_enabled: boolean;
+};
+
 type Tab = "all" | "settings" | string;
 type SubscriptionForm = {
   provider_id: string;
@@ -150,20 +162,32 @@ function App() {
     currency: "USD",
     billing_anchor_day: "13"
   });
+  const [syncStatus, setSyncStatus] = useState<SyncStatus | null>(null);
+  const [syncForm, setSyncForm] = useState({
+    server_url: "https://metr.petarpetkov.com",
+    login: "",
+    password: ""
+  });
+  const [syncLoading, setSyncLoading] = useState(false);
 
   const refresh = async () => {
     setLoading(true);
     try {
-      const [nextSummary, nextSources, nextSubs, nextPricing] = await Promise.all([
+      const [nextSummary, nextSources, nextSubs, nextPricing, nextSync] = await Promise.all([
         api<DashboardSummary>("get_dashboard_summary"),
         api<Source[]>("list_sources"),
         api<Subscription[]>("list_subscriptions"),
-        api<PricingEntry[]>("list_pricing_catalog")
+        api<PricingEntry[]>("list_pricing_catalog"),
+        api<SyncStatus>("get_sync_status")
       ]);
       setSummary(nextSummary);
       setSources(nextSources);
       setSubscriptions(nextSubs);
       setPricing(nextPricing);
+      setSyncStatus(nextSync);
+      if (nextSync.logged_in && nextSync.server_url) {
+        setSyncForm((s) => ({ ...s, server_url: nextSync.server_url }));
+      }
       setStatus("Data refreshed");
     } catch (error) {
       setStatus(message(error));
@@ -255,6 +279,52 @@ function App() {
     await refresh();
   };
 
+  const doLogin = async () => {
+    setSyncLoading(true);
+    try {
+      const result = await api<SyncStatus>("login_sync", {
+        input: {
+          login: syncForm.login,
+          password: syncForm.password,
+          server_url: syncForm.server_url
+        }
+      });
+      setSyncStatus(result);
+      setStatus(`Logged in as ${result.username ?? syncForm.login}`);
+    } catch (error) {
+      setStatus(message(error));
+    } finally {
+      setSyncLoading(false);
+    }
+  };
+
+  const doLogout = async () => {
+    setSyncLoading(true);
+    try {
+      const result = await api<SyncStatus>("logout_sync");
+      setSyncStatus(result);
+      setStatus("Logged out");
+    } catch (error) {
+      setStatus(message(error));
+    } finally {
+      setSyncLoading(false);
+    }
+  };
+
+  const doSync = async () => {
+    setSyncLoading(true);
+    setStatus("Syncing...");
+    try {
+      const result = await api<{ uploaded: number; batches: number; errors: string[] }>("sync_now");
+      setStatus(`Synced ${result.uploaded} event(s) in ${result.batches} batch(es)`);
+      await refresh();
+    } catch (error) {
+      setStatus(message(error));
+    } finally {
+      setSyncLoading(false);
+    }
+  };
+
   return (
     <main className="app-shell">
       <header className="titlebar">
@@ -290,7 +360,13 @@ function App() {
 
       <div className="status-line">
         <span>{status}</span>
-        <span className="privacy"><ShieldCheck size={14} /> Local database only</span>
+        <span className="privacy">
+          {syncStatus?.logged_in ? (
+            <><Cloud size={14} /> Connected to {syncStatus.server_url.replace(/^https:\/\//, "")}</>
+          ) : (
+            <><ShieldCheck size={14} /> Local database only</>
+          )}
+        </span>
       </div>
 
       {activeTab === "settings" ? (
@@ -315,6 +391,13 @@ function App() {
             await api("remove_source", { sourceId: source_id });
             await refresh();
           }}
+          syncStatus={syncStatus}
+          syncForm={syncForm}
+          setSyncForm={setSyncForm}
+          syncLoading={syncLoading}
+          onLogin={doLogin}
+          onLogout={doLogout}
+          onSync={doSync}
         />
       ) : (
         <DashboardView
@@ -486,9 +569,66 @@ function SettingsView(props: {
   addSubscription: () => void;
   deleteSubscription: (id: string) => void;
   removeSource: (id: string) => void;
+  syncStatus: SyncStatus | null;
+  syncForm: { server_url: string; login: string; password: string };
+  setSyncForm: (value: { server_url: string; login: string; password: string }) => void;
+  syncLoading: boolean;
+  onLogin: () => void;
+  onLogout: () => void;
+  onSync: () => void;
 }) {
   return (
     <div className="settings-grid">
+      <section className="panel">
+        <h2><Cloud size={16} /> Sync Account</h2>
+        {props.syncStatus?.logged_in ? (
+          <div className="sync-logged-in">
+            <p><strong>Logged in:</strong> {props.syncStatus.username}</p>
+            <p><strong>Server:</strong> {props.syncStatus.server_url}</p>
+            <p><strong>Device:</strong> {props.syncStatus.device_name}</p>
+            <p><strong>Last sync:</strong> {date(props.syncStatus.last_sync_at)}</p>
+            <p><strong>Pending events:</strong> {props.syncStatus.pending_events}</p>
+            <div className="form-row">
+              <button className="primary-button" onClick={props.onSync} disabled={props.syncLoading}>
+                <RefreshCw size={14} />
+                {props.syncLoading ? "Syncing..." : "Sync Now"}
+              </button>
+              <button className="secondary-button" onClick={props.onLogout} disabled={props.syncLoading}>
+                Logout
+              </button>
+            </div>
+          </div>
+        ) : (
+          <div className="sync-login-form">
+            <div className="form-row">
+              <input
+                type="url"
+                value={props.syncForm.server_url}
+                onChange={(e) => props.setSyncForm({ ...props.syncForm, server_url: e.target.value })}
+                placeholder="https://metr.petarpetkov.com"
+              />
+            </div>
+            <div className="form-row">
+              <input
+                type="email"
+                value={props.syncForm.login}
+                onChange={(e) => props.setSyncForm({ ...props.syncForm, login: e.target.value })}
+                placeholder="Email or username"
+              />
+              <input
+                type="password"
+                value={props.syncForm.password}
+                onChange={(e) => props.setSyncForm({ ...props.syncForm, password: e.target.value })}
+                placeholder="Password"
+              />
+            </div>
+            <button className="primary-button" onClick={props.onLogin} disabled={props.syncLoading}>
+              {props.syncLoading ? "Logging in..." : "Log in"}
+            </button>
+          </div>
+        )}
+      </section>
+
       <section className="panel">
         <h2>Sources</h2>
         <div className="form-row">
