@@ -196,7 +196,8 @@ pub fn run() {
             logout_sync,
             get_sync_status,
             configure_sync_server,
-            sync_now
+            sync_now,
+            full_resync
         ])
         .run(tauri::generate_context!())
         .expect("error while running MEtR");
@@ -473,6 +474,7 @@ struct SyncStatus {
 struct SyncResult {
     uploaded: usize,
     batches: usize,
+    subscriptions_uploaded: usize,
     errors: Vec<String>,
 }
 
@@ -640,7 +642,17 @@ fn get_sync_status(state: State<AppState>) -> Result<SyncStatus, String> {
 #[tauri::command]
 fn sync_now(state: State<AppState>) -> Result<SyncResult, String> {
     let conn = state.db.lock().map_err(to_string)?;
-    ensure_sync_config(&conn)?;
+    perform_sync(&conn, false)
+}
+
+#[tauri::command]
+fn full_resync(state: State<AppState>) -> Result<SyncResult, String> {
+    let conn = state.db.lock().map_err(to_string)?;
+    perform_sync(&conn, true)
+}
+
+fn perform_sync(conn: &Connection, force_all: bool) -> Result<SyncResult, String> {
+    ensure_sync_config(conn)?;
 
     let (token, server_url, device_uuid): (String, String, Option<String>) = conn
         .query_row(
@@ -702,10 +714,27 @@ fn sync_now(state: State<AppState>) -> Result<SyncResult, String> {
         return Err(format!("Device registration failed: {}", body));
     }
 
+    let mut errors = Vec::new();
+    let subscriptions_uploaded = match sync_subscriptions(conn, &client, base_url, &auth_header) {
+        Ok(count) => count,
+        Err(error) => {
+            errors.push(format!("Subscription sync failed: {error}"));
+            0
+        }
+    };
+
+    if force_all {
+        conn.execute(
+            "UPDATE usage_events
+             SET synced_at = NULL, sync_batch_id = NULL, sync_error = NULL, updated_at = ?1",
+            params![now()],
+        )
+        .map_err(to_string)?;
+    }
+
     // Query unsynced events in batches
     let mut total_uploaded = 0usize;
     let mut batch_count = 0usize;
-    let mut errors = Vec::new();
 
     loop {
         let mut stmt = conn
@@ -845,8 +874,73 @@ fn sync_now(state: State<AppState>) -> Result<SyncResult, String> {
     Ok(SyncResult {
         uploaded: total_uploaded,
         batches: batch_count,
+        subscriptions_uploaded,
         errors,
     })
+}
+
+fn sync_subscriptions(
+    conn: &Connection,
+    client: &reqwest::blocking::Client,
+    base_url: &str,
+    auth_header: &str,
+) -> Result<usize, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, provider_id, product_name, monthly_amount, currency,
+             billing_anchor_day, enabled, notes
+             FROM subscriptions
+             ORDER BY provider_id, product_name",
+        )
+        .map_err(to_string)?;
+
+    let subscriptions: Vec<Value> = stmt
+        .query_map([], |r| {
+            let enabled: i64 = r.get(6)?;
+            Ok(serde_json::json!({
+                "source_subscription_id": r.get::<_, String>(0)?,
+                "provider_id": r.get::<_, String>(1)?,
+                "product_name": r.get::<_, String>(2)?,
+                "monthly_amount": r.get::<_, f64>(3)?,
+                "currency": r.get::<_, String>(4)?,
+                "billing_anchor_day": r.get::<_, i64>(5)?,
+                "enabled": enabled == 1,
+                "notes": r.get::<_, Option<String>>(7)?,
+            }))
+        })
+        .map_err(to_string)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(to_string)?;
+
+    if subscriptions.is_empty() {
+        return Ok(0);
+    }
+
+    let subscription_count = subscriptions.len();
+    let resp = client
+        .post(format!("{}/api/v1/sync/subscriptions", base_url))
+        .header("Authorization", auth_header)
+        .header("Accept", "application/json")
+        .json(&serde_json::json!({
+            "subscriptions": subscriptions,
+        }))
+        .send()
+        .map_err(|e| format!("Subscription sync request failed: {}", e))?;
+
+    let status = resp.status();
+    if !status.is_success() {
+        let body = resp.text().unwrap_or_default();
+        return Err(format!("{status}: {body}"));
+    }
+
+    let data: Value = resp
+        .json()
+        .map_err(|e| format!("Invalid subscription sync response: {}", e))?;
+
+    Ok(data
+        .get("synced")
+        .and_then(|value| value.as_u64())
+        .unwrap_or(subscription_count as u64) as usize)
 }
 
 fn add_column_if_missing(

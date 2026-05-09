@@ -153,4 +153,53 @@ class SyncTest extends TestCase
             'pricing_match_confidence' => 'missing',
         ]);
     }
+
+    public function test_subscription_sync_is_idempotent(): void
+    {
+        $user = User::factory()->create();
+        $token = $user->createToken('test')->plainTextToken;
+
+        $payload = [
+            'subscriptions' => [
+                [
+                    'source_subscription_id' => 'local-sub-1',
+                    'provider_id' => 'openai',
+                    'product_name' => 'ChatGPT Plus / Codex',
+                    'monthly_amount' => 20,
+                    'currency' => 'usd',
+                    'billing_anchor_day' => 9,
+                    'enabled' => true,
+                ],
+            ],
+        ];
+
+        $this->withHeader('Authorization', "Bearer {$token}")
+            ->postJson('/api/v1/sync/subscriptions', $payload)
+            ->assertOk()
+            ->assertJsonPath('synced', 1);
+
+        $this->assertDatabaseHas('subscriptions', [
+            'user_id' => $user->id,
+            'source_subscription_id' => 'local-sub-1',
+            'provider_id' => 'openai',
+            'plan_name' => 'ChatGPT Plus / Codex',
+            'monthly_price' => 20,
+            'currency' => 'USD',
+            'billing_anchor_day' => 9,
+            'active' => true,
+        ]);
+
+        $payload['subscriptions'][0]['monthly_amount'] = 25;
+
+        $this->withHeader('Authorization', "Bearer {$token}")
+            ->postJson('/api/v1/sync/subscriptions', $payload)
+            ->assertOk()
+            ->assertJsonPath('synced', 1);
+
+        $this->assertDatabaseCount('subscriptions', 1);
+        $this->assertDatabaseHas('subscriptions', [
+            'source_subscription_id' => 'local-sub-1',
+            'monthly_price' => 25,
+        ]);
+    }
 }

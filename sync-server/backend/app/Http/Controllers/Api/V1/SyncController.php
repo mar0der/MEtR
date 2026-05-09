@@ -4,6 +4,7 @@ namespace App\Http\Controllers\Api\V1;
 
 use App\Models\Device;
 use App\Models\ModelPrice;
+use App\Models\Subscription;
 use App\Services\Sync\IngestUsageEvents;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -58,6 +59,65 @@ class SyncController extends Controller
         $result = $this->ingest->handle($device, $data['client_batch_id'], $data['events']);
 
         return response()->json($result);
+    }
+
+    public function subscriptions(Request $request): JsonResponse
+    {
+        $data = $request->validate([
+            'subscriptions' => ['required', 'array'],
+            'subscriptions.*.source_subscription_id' => ['required', 'string', 'max:255'],
+            'subscriptions.*.provider_id' => ['required', 'string', 'exists:providers,id'],
+            'subscriptions.*.product_name' => ['required', 'string', 'max:255'],
+            'subscriptions.*.monthly_amount' => ['required', 'numeric', 'min:0'],
+            'subscriptions.*.currency' => ['required', 'string', 'max:8'],
+            'subscriptions.*.billing_anchor_day' => ['nullable', 'integer', 'min:1', 'max:31'],
+            'subscriptions.*.enabled' => ['boolean'],
+            'subscriptions.*.notes' => ['nullable', 'string'],
+        ]);
+
+        $synced = 0;
+
+        foreach ($data['subscriptions'] as $subscription) {
+            $match = [
+                'user_id' => $request->user()->id,
+                'source_subscription_id' => $subscription['source_subscription_id'],
+            ];
+
+            $payload = [
+                'provider_account_id' => null,
+                'provider_id' => $subscription['provider_id'],
+                'plan_name' => $subscription['product_name'],
+                'monthly_price' => $subscription['monthly_amount'],
+                'currency' => strtoupper($subscription['currency']),
+                'billing_anchor_day' => $subscription['billing_anchor_day'] ?? null,
+                'active' => $subscription['enabled'] ?? true,
+                'notes' => $subscription['notes'] ?? null,
+            ];
+
+            $existing = Subscription::where($match)->first()
+                ?? Subscription::where([
+                    'user_id' => $request->user()->id,
+                    'provider_id' => $subscription['provider_id'],
+                    'plan_name' => $subscription['product_name'],
+                ])->first();
+
+            if ($existing) {
+                $existing->update(array_merge($payload, [
+                    'source_subscription_id' => $subscription['source_subscription_id'],
+                ]));
+            } else {
+                $request->user()->subscriptions()->create(array_merge($payload, [
+                    'source_subscription_id' => $subscription['source_subscription_id'],
+                ]));
+            }
+
+            $synced++;
+        }
+
+        return response()->json([
+            'ok' => true,
+            'synced' => $synced,
+        ]);
     }
 
     public function settings(Request $request): JsonResponse

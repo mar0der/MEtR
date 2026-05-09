@@ -125,6 +125,13 @@ type SyncStatus = {
   sync_enabled: boolean;
 };
 
+type SyncResult = {
+  uploaded: number;
+  batches: number;
+  subscriptions_uploaded: number;
+  errors: string[];
+};
+
 type Tab = "all" | "settings" | string;
 type SubscriptionForm = {
   provider_id: string;
@@ -315,8 +322,27 @@ function App() {
     setSyncLoading(true);
     setStatus("Syncing...");
     try {
-      const result = await api<{ uploaded: number; batches: number; errors: string[] }>("sync_now");
-      setStatus(`Synced ${result.uploaded} event(s) in ${result.batches} batch(es)`);
+      const result = await api<SyncResult>("sync_now");
+      const warning = result.errors.length ? `, ${result.errors.length} warning(s)` : "";
+      setStatus(`Synced ${result.uploaded} event(s), ${result.subscriptions_uploaded} subscription(s)${warning}`);
+      await refresh();
+    } catch (error) {
+      setStatus(message(error));
+    } finally {
+      setSyncLoading(false);
+    }
+  };
+
+  const doFullResync = async () => {
+    if (!window.confirm("Full resync will re-upload local events to repair server-side project, model, and cost fields. Continue?")) {
+      return;
+    }
+    setSyncLoading(true);
+    setStatus("Running full resync...");
+    try {
+      const result = await api<SyncResult>("full_resync");
+      const warning = result.errors.length ? `, ${result.errors.length} warning(s)` : "";
+      setStatus(`Full resync sent ${result.uploaded} event(s), ${result.subscriptions_uploaded} subscription(s)${warning}`);
       await refresh();
     } catch (error) {
       setStatus(message(error));
@@ -398,6 +424,7 @@ function App() {
           onLogin={doLogin}
           onLogout={doLogout}
           onSync={doSync}
+          onFullResync={doFullResync}
         />
       ) : (
         <DashboardView
@@ -576,6 +603,7 @@ function SettingsView(props: {
   onLogin: () => void;
   onLogout: () => void;
   onSync: () => void;
+  onFullResync: () => void;
 }) {
   return (
     <div className="settings-grid">
@@ -592,6 +620,10 @@ function SettingsView(props: {
               <button className="primary-button" onClick={props.onSync} disabled={props.syncLoading}>
                 <RefreshCw size={14} />
                 {props.syncLoading ? "Syncing..." : "Sync Now"}
+              </button>
+              <button className="secondary-button" onClick={props.onFullResync} disabled={props.syncLoading}>
+                <RefreshCw size={14} />
+                Full Resync
               </button>
               <button className="secondary-button" onClick={props.onLogout} disabled={props.syncLoading}>
                 Logout

@@ -21,6 +21,7 @@ Route::prefix('v1')->group(function () {
         Route::post('/devices/register', [DeviceController::class, 'register']);
 
         Route::post('/sync/events', [SyncController::class, 'events']);
+        Route::post('/sync/subscriptions', [SyncController::class, 'subscriptions']);
         Route::get('/sync/settings', [SyncController::class, 'settings']);
 
         Route::get('/dashboard/summary', [DashboardController::class, 'summary']);
