@@ -26,9 +26,23 @@
         form label { display:block; font-size:13px; font-weight:600; margin-bottom:4px; color:var(--muted); }
         form input, form select { width:100%; padding:10px 12px; border:1px solid var(--border); border-radius:6px; background:var(--card); color:var(--text); font-size:14px; margin-bottom:12px; }
         .grid { display:grid; grid-template-columns:repeat(auto-fit, minmax(220px, 1fr)); gap:14px; }
+        .grid.two-col { grid-template-columns:repeat(2, minmax(0, 1fr)); }
+        .grid.stats-grid { grid-template-columns:repeat(3, minmax(0, 1fr)); }
+        @media (max-width: 768px) {
+            .grid.two-col { grid-template-columns:1fr; }
+            .grid.stats-grid { grid-template-columns:repeat(2, minmax(0, 1fr)); }
+        }
         .stat .value { font-size:22px; font-weight:700; }
         .stat .label { font-size:12px; color:var(--muted); text-transform:uppercase; }
         .flash { padding:10px 14px; border-radius:6px; margin-bottom:12px; background:#dcfce7; color:#14532d; border:1px solid #bbf7d0; }
+        .tabs { display:flex; gap:4px; border-bottom:2px solid var(--border); margin-bottom:16px; }
+        .tab-btn { background:transparent; border:none; border-bottom:2px solid transparent; padding:10px 18px; font-size:14px; font-weight:500; color:var(--muted); cursor:pointer; margin-bottom:-2px; }
+        .tab-btn:hover { color:var(--text); }
+        .tab-btn.active { color:var(--accent); border-bottom-color:var(--accent); }
+        table td:first-child { min-width:140px; word-break:break-word; }
+        table td:nth-child(2), table td:nth-child(3), table td:nth-child(4) { white-space:nowrap; }
+        .card table { table-layout:auto; }
+        .card h3 { margin-top:0; font-size:16px; }
     </style>
 </head>
 <body>
