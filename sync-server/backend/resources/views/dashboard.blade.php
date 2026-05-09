@@ -5,7 +5,7 @@
 @section('content')
 <h1>Dashboard</h1>
 
-<div class="grid">
+<div class="grid stats-grid">
     <div class="card stat">
         <div class="value">{{ number_format($summary['event_count'] ?? 0) }}</div>
         <div class="label">Events</div>
@@ -49,10 +49,35 @@
     </form>
 </div>
 
-<div class="grid">
+<div class="tabs">
+    <button class="tab-btn active" onclick="switchTab(event, 'tab-devices')">Devices & Projects</button>
+    <button class="tab-btn" onclick="switchTab(event, 'tab-accounts')">Accounts & Models</button>
+    <button class="tab-btn" onclick="switchTab(event, 'tab-all')">All Tables</button>
+</div>
+
+<div id="tab-devices" class="tab-content" style="display:block;">
+    @include('partials.dashboard-table', ['title' => 'By Device', 'rows' => $byDevice])
+    @include('partials.dashboard-table', ['title' => 'By Project', 'rows' => $byProject])
+</div>
+
+<div id="tab-accounts" class="tab-content" style="display:none;">
+    @include('partials.dashboard-table', ['title' => 'By Provider Account', 'rows' => $byProviderAccount])
+    @include('partials.dashboard-table', ['title' => 'By Model', 'rows' => $byModel])
+</div>
+
+<div id="tab-all" class="tab-content" style="display:none;">
     @include('partials.dashboard-table', ['title' => 'By Device', 'rows' => $byDevice])
     @include('partials.dashboard-table', ['title' => 'By Project', 'rows' => $byProject])
     @include('partials.dashboard-table', ['title' => 'By Provider Account', 'rows' => $byProviderAccount])
     @include('partials.dashboard-table', ['title' => 'By Model', 'rows' => $byModel])
 </div>
+
+<script>
+function switchTab(evt, tabId) {
+    document.querySelectorAll('.tab-content').forEach(el => el.style.display = 'none');
+    document.querySelectorAll('.tab-btn').forEach(el => el.classList.remove('active'));
+    document.getElementById(tabId).style.display = 'block';
+    evt.currentTarget.classList.add('active');
+}
+</script>
 @endsection
