@@ -6,14 +6,21 @@
 <h1>Dashboard</h1>
 
 <div class="grid stats-grid">
+    {{-- Row 1: Money & totals --}}
+    <div class="card stat" style="border-left:4px solid var(--accent);">
+        <div class="value" style="color:var(--accent);">{{ ($summary['total_cost'] ?? null) !== null ? '$'.number_format((float) $summary['total_cost'], 2) : '—' }}</div>
+        <div class="label">API Equivalent Cost</div>
+    </div>
+    <div class="card stat">
+        <div class="value">{{ number_format($summary['total_tokens'] ?? 0) }}</div>
+        <div class="label">Total Tokens</div>
+    </div>
     <div class="card stat">
         <div class="value">{{ number_format($summary['event_count'] ?? 0) }}</div>
         <div class="label">Events</div>
     </div>
-    <div class="card stat">
-        <div class="value">{{ ($summary['total_cost'] ?? null) !== null ? '$'.number_format((float) $summary['total_cost'], 2) : '—' }}</div>
-        <div class="label">API Equivalent Cost</div>
-    </div>
+
+    {{-- Row 2: Token breakdown --}}
     <div class="card stat">
         <div class="value">{{ number_format($summary['input_tokens'] ?? 0) }}</div>
         <div class="label">Input Tokens</div>
@@ -23,12 +30,25 @@
         <div class="label">Output Tokens</div>
     </div>
     <div class="card stat">
-        <div class="value">{{ number_format($summary['missing_price_count'] ?? 0) }}</div>
-        <div class="label">Missing Prices</div>
+        <div class="value">{{ number_format($summary['cached_input_tokens'] ?? 0) }}</div>
+        <div class="label">Cached Input Tokens</div>
+    </div>
+
+    {{-- Row 3: Data quality indicators --}}
+    <div class="card stat">
+        <div class="value">{{ number_format($summary['unpriced_count'] ?? 0) }}</div>
+        <div class="label">Unpriced Events</div>
+        <div class="muted" style="font-size:11px; margin-top:4px;">Missing token breakdown — can't calculate cost</div>
     </div>
     <div class="card stat">
-        <div class="value">{{ number_format($summary['unknown_account_count'] ?? 0) }}</div>
-        <div class="label">Unknown Account</div>
+        <div class="value">{{ number_format($summary['unattributed_count'] ?? 0) }}</div>
+        <div class="label">Unattributed Account</div>
+        <div class="muted" style="font-size:11px; margin-top:4px;">No API key matched for these events</div>
+    </div>
+    <div class="card stat">
+        <div class="value">{{ number_format($summary['unknown_tokens'] ?? 0) }}</div>
+        <div class="label">Unknown Tokens</div>
+        <div class="muted" style="font-size:11px; margin-top:4px;">Total tokens with no category breakdown</div>
     </div>
 </div>
 

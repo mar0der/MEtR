@@ -5,20 +5,19 @@ namespace App\Http\Controllers\Api\V1;
 use App\Models\UpdateRelease;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Http\Response;
 use Illuminate\Routing\Controller;
 use Illuminate\Support\Facades\Storage;
 
 class UpdateController extends Controller
 {
-    public function manifest(Request $request, string $target, string $arch, string $currentVersion): JsonResponse
+    public function manifest(Request $request, string $target, string $arch, string $currentVersion): JsonResponse|Response
     {
         $latest = UpdateRelease::orderByDesc('released_at')->first();
 
         if (! $latest || version_compare($latest->version, $currentVersion, '<=')) {
-            return response()->json([
-                'version' => $currentVersion,
-                'available' => false,
-            ]);
+            // Tauri v2 expects 204 No Content when there is no update
+            return response()->noContent();
         }
 
         $platformKey = match ("{$target}-{$arch}") {
@@ -30,39 +29,30 @@ class UpdateController extends Controller
         };
 
         if (! $platformKey) {
-            return response()->json([
-                'version' => $currentVersion,
-                'available' => false,
-            ]);
+            return response()->noContent();
         }
 
         $asset = $latest->assets()->where('platform', $platformKey)->first();
 
         if (! $asset) {
-            return response()->json([
-                'version' => $currentVersion,
-                'available' => false,
-            ]);
+            return response()->noContent();
         }
 
         $disk = Storage::disk('updates');
         if (! $disk->exists($asset->filename)) {
-            return response()->json([
-                'version' => $currentVersion,
-                'available' => false,
-            ]);
+            return response()->noContent();
         }
+
+        // Force HTTPS for update URLs
+        $baseUrl = rtrim(config('app.url', 'https://metr.petarpetkov.com'), '/');
+        $baseUrl = str_replace('http://', 'https://', $baseUrl);
 
         return response()->json([
             'version' => $latest->version,
             'notes' => $latest->release_notes,
             'pub_date' => $latest->released_at->toIso8601String(),
-            'platforms' => [
-                $platformKey => [
-                    'signature' => $asset->signature,
-                    'url' => url("updates/{$asset->filename}"),
-                ],
-            ],
+            'signature' => $asset->signature,
+            'url' => "{$baseUrl}/updates/{$asset->filename}",
         ]);
     }
 }

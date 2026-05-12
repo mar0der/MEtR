@@ -1,7 +1,20 @@
 #!/bin/bash
 set -e
 
-VERSION="${1:-0.1.0}"
+# Read version from tauri.conf.json as the source of truth
+VERSION="${1:-}"
+if [ -z "$VERSION" ]; then
+  if command -v jq >/dev/null 2>&1; then
+    VERSION="$(jq -r '.version' src-tauri/tauri.conf.json)"
+  else
+    VERSION="$(grep '"version"' src-tauri/tauri.conf.json | head -1 | sed -E 's/.*"version": *"([^"]+)".*/\1/')"
+  fi
+fi
+
+if [ -z "$VERSION" ] || [ "$VERSION" = "null" ]; then
+  echo "ERROR: Could not determine version from src-tauri/tauri.conf.json"
+  exit 1
+fi
 
 echo "Building MEtR v${VERSION}..."
 
@@ -17,8 +30,10 @@ if [ -z "$TAURI_SIGNING_PRIVATE_KEY" ]; then
   exit 1
 fi
 
-# Update version in files
-# (For now, manual version bumping is expected in package.json, Cargo.toml, tauri.conf.json)
+# Sync version across all config files
+sed -i.bak -E "s/\"version\": *\"[^\"]+\"/\"version\": \"${VERSION}\"/" package.json && rm -f package.json.bak
+sed -i.bak -E "s/^version = \"[^\"]+\"/version = \"${VERSION}\"/" src-tauri/Cargo.toml && rm -f src-tauri/Cargo.toml.bak
+echo "Synced version ${VERSION} to package.json and Cargo.toml"
 
 npm run tauri:build
 
@@ -30,7 +45,8 @@ done
 
 echo ""
 echo "To publish this release to the server, run:"
-echo "  php artisan metr:release:publish --version=${VERSION} \\"
+echo "  php artisan metr:release:publish --release-version=${VERSION} \\"
 echo "    --notes='Release notes here' \\"
-echo "    --darwin-dmg=src-tauri/target/release/bundle/dmg/MEtR_${VERSION}_aarch64.dmg \\"
-echo "    --darwin-sig=src-tauri/target/release/bundle/macos/MEtR.app.tar.gz.sig"
+echo "    --darwin-tgz=src-tauri/target/release/bundle/macos/MEtR.app.tar.gz \\"
+echo "    --darwin-sig=src-tauri/target/release/bundle/macos/MEtR.app.tar.gz.sig \\"
+echo "    --darwin-dmg=src-tauri/target/release/bundle/dmg/MEtR_${VERSION}_aarch64.dmg"

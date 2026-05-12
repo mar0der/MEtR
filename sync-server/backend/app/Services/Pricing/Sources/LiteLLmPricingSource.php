@@ -6,12 +6,31 @@ class LiteLLmPricingSource extends AbstractPricingSource
 {
     private const URL = 'https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json';
 
-    private const ALLOWED_PROVIDERS = ['openai', 'anthropic', 'moonshot'];
+    /**
+     * Providers we import. We keep ALL their models for reliable log matching.
+     */
+    private const ALLOWED_PROVIDERS = ['openai', 'anthropic', 'moonshot', 'gemini'];
 
+    /**
+     * Map LiteLLM provider → our internal provider_id.
+     */
     private const PROVIDER_MAP = [
         'openai' => 'openai',
         'anthropic' => 'anthropic',
         'moonshot' => 'kimi',
+        'gemini' => 'google',
+    ];
+
+    /**
+     * Prefixes LiteLLM adds to model names for routed providers.
+     */
+    private const PREFIXES = [
+        'azure/', 'azure/global/', 'azure/us/', 'azure/eu/',
+        'openrouter/', 'groq/', 'together_ai/', 'replicate/',
+        'bedrock/', 'vertex_ai/', 'fireworks_ai/', 'deepinfra/',
+        'baseten/', 'hyperbolic/', 'novita/', 'crusoe/',
+        'wandb/', 'vercel_ai_gateway/', 'gmi/', 'databricks/',
+        'aiml/',
     ];
 
     public function getProviderId(): string
@@ -33,7 +52,7 @@ class LiteLLmPricingSource extends AbstractPricingSource
             return [];
         }
 
-        $raw = [];
+        $prices = [];
 
         foreach ($json as $key => $entry) {
             $provider = $entry['litellm_provider'] ?? null;
@@ -50,114 +69,40 @@ class LiteLLmPricingSource extends AbstractPricingSource
             }
 
             $model = $this->normalizeModelName($key, $provider);
+            $internalProvider = self::PROVIDER_MAP[$provider];
 
-            if (! $this->isRelevantModel($model, $provider)) {
+            // Skip duplicate model names after normalization
+            if (isset($prices[$model])) {
                 continue;
             }
 
-            $raw[] = [
-                'provider_id' => self::PROVIDER_MAP[$provider],
+            $prices[$model] = [
+                'provider_id' => $internalProvider,
                 'model' => $model,
                 'input_per_1m' => (float) $input * 1_000_000,
                 'output_per_1m' => (float) $output * 1_000_000,
                 'cached_input_per_1m' => $this->extractCachedInput($entry),
-            ];
-        }
-
-        // Group by (provider + price + base model). Keep shortest model name as canonical,
-        // merge longer variants as aliases. Only merge when one name is a prefix of the other
-        // (e.g. gpt-5.2 + gpt-5.2-chat + gpt-5.2-codex), NOT different models with same price
-        // (e.g. claude-sonnet-4-5 vs claude-sonnet-4-6).
-        $groups = [];
-        foreach ($raw as $r) {
-            $base = $this->baseModelName($r['model']);
-            $priceKey = sprintf(
-                '%s|%s|%.10f|%.10f|%.10f',
-                $r['provider_id'],
-                $base,
-                $r['input_per_1m'],
-                $r['output_per_1m'],
-                $r['cached_input_per_1m'] ?? 0
-            );
-
-            if (! isset($groups[$priceKey])) {
-                $groups[$priceKey] = [
-                    'canonical' => $r['model'],
-                    'provider_id' => $r['provider_id'],
-                    'input_per_1m' => $r['input_per_1m'],
-                    'output_per_1m' => $r['output_per_1m'],
-                    'cached_input_per_1m' => $r['cached_input_per_1m'],
-                    'variants' => [],
-                ];
-            } else {
-                // Shorter name wins as canonical
-                if (strlen($r['model']) < strlen($groups[$priceKey]['canonical'])) {
-                    $groups[$priceKey]['variants'][] = $groups[$priceKey]['canonical'];
-                    $groups[$priceKey]['canonical'] = $r['model'];
-                } else {
-                    $groups[$priceKey]['variants'][] = $r['model'];
-                }
-            }
-        }
-
-        $prices = [];
-        foreach ($groups as $group) {
-            $model = $group['canonical'];
-            $aliases = array_values(array_unique(array_merge(
-                $group['variants'],
-                $this->buildAliases($model, $group['provider_id'])
-            )));
-
-            $prices[$model] = [
-                'provider_id' => $group['provider_id'],
-                'model' => $model,
-                'input_per_1m' => $group['input_per_1m'],
-                'output_per_1m' => $group['output_per_1m'],
-                'cached_input_per_1m' => $group['cached_input_per_1m'],
                 'currency' => 'USD',
-                'aliases_json' => $aliases,
+                'aliases_json' => $this->buildAliases($model, $internalProvider),
             ];
         }
 
         return $prices;
     }
 
-    private function isRelevantModel(string $model, string $provider): bool
-    {
-        if ($provider === 'openai') {
-            return (bool) preg_match('/^gpt-5(\.|$)/', $model);
-        }
-
-        if ($provider === 'anthropic') {
-            return (bool) preg_match('/^claude-(sonnet|opus|haiku)-4-/', $model);
-        }
-
-        if ($provider === 'moonshot') {
-            return (bool) preg_match('/^kimi-k2/', $model);
-        }
-
-        return false;
-    }
-
-    /**
-     * Strip variant suffixes to find the base model for grouping.
-     * e.g. gpt-5.2-codex → gpt-5.2, claude-sonnet-4-6-20260205 → claude-sonnet-4-6
-     */
-    private function baseModelName(string $model): string
-    {
-        // Strip variant suffixes that don't change the core model identity
-        $base = preg_replace('/-(chat|codex|codex-max|max)$/', '', $model);
-        return $base ?? $model;
-    }
-
     private function normalizeModelName(string $key, string $provider): string
     {
+        foreach (self::PREFIXES as $prefix) {
+            if (str_starts_with($key, $prefix)) {
+                $key = substr($key, strlen($prefix));
+                break;
+            }
+        }
+
+        // For moonshot entries, keep the model name after moonshot/
         if ($provider === 'moonshot' && str_starts_with($key, 'moonshot/')) {
             $key = substr($key, strlen('moonshot/'));
         }
-
-        $key = preg_replace('/-(\d{8}|\d{4}-\d{2}-\d{2})$/', '', $key);
-        $key = preg_replace('/-latest$/', '', $key);
 
         return $key;
     }
@@ -169,40 +114,107 @@ class LiteLLmPricingSource extends AbstractPricingSource
         return $cached !== null ? (float) $cached * 1_000_000 : null;
     }
 
+    /**
+     * Build alias list for a model to improve log matching.
+     */
     private function buildAliases(string $model, string $providerId): array
     {
         $aliases = [];
 
+        // Version-number dot aliases: claude-haiku-4-5 → claude-haiku-4.5
+        $dotted = preg_replace('/(\d)-(\d)(?!\d)/', '$1.$2', $model);
+        if ($dotted !== $model && ! in_array($dotted, $aliases, true)) {
+            $aliases[] = $dotted;
+        }
+
+        // Provider-specific aliases
         if ($providerId === 'openai') {
-            if (preg_match('/^gpt-(\d+\.\d+)$/', $model, $m)) {
-                $aliases[] = "gpt-{$m[1]}-codex";
-                $aliases[] = "gpt-{$m[1]}-codex-max";
-            }
-            if (preg_match('/^gpt-(\d+\.\d+)-mini$/', $model, $m)) {
-                $aliases[] = "gpt-{$m[1]}-codex-mini";
-                $aliases[] = "gpt-{$m[1]}-mini-codex";
-            }
-            if (preg_match('/^gpt-5$/', $model)) {
-                $aliases[] = 'gpt-5-codex';
-                $aliases[] = 'codex';
-            }
+            $aliases = array_merge($aliases, $this->buildOpenAIAliases($model));
         }
 
         if ($providerId === 'kimi') {
-            if ($model === 'kimi-k2.6') {
-                $aliases[] = 'kimi-for-coding';
-                $aliases[] = 'kimi-code/kimi-for-coding';
-                $aliases[] = 'Kimi-k2.6';
-                $aliases[] = 'kimi-k2.6:cloud';
-            }
+            $aliases = array_merge($aliases, $this->buildKimiAliases($model));
         }
 
         if ($providerId === 'anthropic') {
-            if (preg_match('/^(claude-[a-z]+-\d+-\d+)-\d{8}$/', $model, $m)) {
-                $aliases[] = $m[1];
-            }
-            if (preg_match('/^(claude-[a-z]+)-(\d+)-(\d+)$/', $model, $m)) {
-                $aliases[] = "{$m[1]}-{$m[2]}.{$m[3]}";
+            $aliases = array_merge($aliases, $this->buildAnthropicAliases($model));
+        }
+
+        return array_values(array_unique($aliases));
+    }
+
+    private function buildOpenAIAliases(string $model): array
+    {
+        $aliases = [];
+
+        // gpt-5 → codex
+        if ($model === 'gpt-5' || $model === 'gpt-5-codex') {
+            $aliases[] = 'codex';
+        }
+
+        // gpt-5.X base variants
+        if (preg_match('/^gpt-5\.\d+$/', $model)) {
+            $aliases[] = $model . '-chat';
+            $aliases[] = $model . '-codex';
+            $aliases[] = $model . '-codex-max';
+        }
+
+        // gpt-5.X-pro
+        if (preg_match('/^gpt-5\.\d+-pro$/', $model)) {
+            $base = preg_replace('/-pro$/', '', $model);
+            $aliases[] = $base . '-pro';
+        }
+
+        // gpt-5.X-mini variants
+        if (preg_match('/^gpt-5\.\d+-mini$/', $model)) {
+            $aliases[] = str_replace('-mini', '-codex-mini', $model);
+            $aliases[] = str_replace('-mini', '-mini-codex', $model);
+        }
+
+        // gpt-5.X-nano
+        if (preg_match('/^gpt-5\.\d+-nano$/', $model)) {
+            $aliases[] = str_replace('-nano', '', $model) . '-nano';
+        }
+
+        return $aliases;
+    }
+
+    private function buildKimiAliases(string $model): array
+    {
+        $aliases = [];
+
+        // kimi-k2.6 is also known as kimi-for-coding
+        if ($model === 'kimi-k2.6') {
+            $aliases[] = 'kimi-for-coding';
+            $aliases[] = 'kimi-code/kimi-for-coding';
+            $aliases[] = 'Kimi-k2.6';
+            $aliases[] = 'kimi-k2.6:cloud';
+        }
+
+        return $aliases;
+    }
+
+    private function buildAnthropicAliases(string $model): array
+    {
+        $aliases = [];
+
+        // Claude model families: claude-haiku-4-5 → claude-haiku-4.5 already handled by dot alias above
+        // Additional known aliases from seed data
+        $known = [
+            'claude-haiku-4-5' => ['claude-haiku-4.5'],
+            'claude-sonnet-4-5' => ['claude-sonnet-4.5'],
+            'claude-sonnet-4-6' => ['claude-sonnet-4.6'],
+            'claude-opus-4-1' => ['claude-opus-4.1'],
+            'claude-opus-4-5' => ['claude-opus-4.5'],
+            'claude-opus-4-6' => ['claude-opus-4.6'],
+            'claude-opus-4-7' => ['claude-opus-4.7'],
+        ];
+
+        if (isset($known[$model])) {
+            foreach ($known[$model] as $alias) {
+                if (! in_array($alias, $aliases, true)) {
+                    $aliases[] = $alias;
+                }
             }
         }
 
