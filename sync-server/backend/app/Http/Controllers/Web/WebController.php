@@ -9,6 +9,7 @@ use App\Models\ModelPrice;
 use App\Models\Project;
 use App\Models\ProviderAccount;
 use App\Models\Subscription;
+use App\Models\UpdateRelease;
 use App\Models\UsageEvent;
 use Illuminate\Http\Request;
 use Illuminate\Routing\Controller;
@@ -17,6 +18,17 @@ use Illuminate\Support\Facades\DB;
 
 class WebController extends Controller
 {
+    public function download()
+    {
+        $latest = UpdateRelease::orderByDesc('released_at')->first();
+        $assets = $latest ? $latest->assets()->get()->keyBy('platform') : collect();
+
+        return view('download', [
+            'release' => $latest,
+            'assets' => $assets,
+        ]);
+    }
+
     public function loginForm()
     {
         if (Auth::check()) {

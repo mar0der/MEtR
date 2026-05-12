@@ -46,19 +46,25 @@
     </style>
 </head>
 <body>
-    @auth
     <nav>
         <div class="left">
-            <a href="/dashboard" style="font-weight:700;">MEtR Sync</a>
-            <a href="/devices">Devices</a>
-            <a href="/provider-accounts">Accounts</a>
-            <a href="/subscriptions">Subscriptions</a>
-            <a href="/projects">Projects</a>
-            <a href="/pricing">Pricing</a>
+            <a href="{{ auth()->check() ? '/dashboard' : '/download' }}" style="font-weight:700;">MEtR</a>
+            @auth
+                <a href="/devices">Devices</a>
+                <a href="/provider-accounts">Accounts</a>
+                <a href="/subscriptions">Subscriptions</a>
+                <a href="/projects">Projects</a>
+                <a href="/pricing">Pricing</a>
+            @else
+                <a href="/download">Download</a>
+            @endauth
         </div>
-        <form method="POST" action="/logout" style="margin:0;">@csrf<button class="btn secondary" style="padding:6px 12px;font-size:13px;">Logout</button></form>
+        @auth
+            <form method="POST" action="/logout" style="margin:0;">@csrf<button class="btn secondary" style="padding:6px 12px;font-size:13px;">Logout</button></form>
+        @else
+            <a href="/login" class="btn secondary" style="padding:6px 12px;font-size:13px;">Login</a>
+        @endauth
     </nav>
-    @endauth
     <div class="container">
         @if(session('success'))
             <div class="flash">{{ session('success') }}</div>

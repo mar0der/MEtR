@@ -15,6 +15,8 @@ Route::get('/updates/{filename}', function (string $filename) {
     return response()->file($path);
 })->where('filename', '.*');
 
+Route::get('/download', [WebController::class, 'download'])->name('download');
+
 Route::get('/login', [WebController::class, 'loginForm'])->name('login');
 Route::post('/login', [WebController::class, 'login']);
 
@@ -28,4 +30,9 @@ Route::middleware('auth')->group(function () {
     Route::get('/pricing', [WebController::class, 'pricing']);
 });
 
-Route::get('/', fn () => redirect('/dashboard'));
+Route::get('/', function () {
+    if (auth()->check()) {
+        return redirect('/dashboard');
+    }
+    return redirect('/download');
+});
