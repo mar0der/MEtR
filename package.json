@@ -19,7 +19,10 @@
   "license": "ISC",
   "description": "",
   "dependencies": {
-    "@tauri-apps/api": "^2.10.1",
+    "@tauri-apps/api": "^2.11.0",
+    "@tauri-apps/plugin-dialog": "^2.7.1",
+    "@tauri-apps/plugin-process": "^2.3.1",
+    "@tauri-apps/plugin-updater": "^2.10.1",
     "@vitejs/plugin-react": "^6.0.1",
     "clsx": "^2.1.1",
     "lucide-react": "^1.14.0",
@@ -29,7 +32,7 @@
     "vite": "^8.0.10"
   },
   "devDependencies": {
-    "@tauri-apps/cli": "^2.10.1",
+    "@tauri-apps/cli": "^2.11.1",
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3"
   }

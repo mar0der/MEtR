@@ -11,9 +11,11 @@ import {
   Settings,
   ShieldCheck,
   Trash2,
-  WalletCards
+  WalletCards,
+  Download
 } from "lucide-react";
 import "./styles.css";
+import { checkForUpdates } from "./updater";
 
 type UsageTotals = {
   input_tokens: number;
@@ -119,6 +121,12 @@ type PricingEntry = {
   source_url: string | null;
 };
 
+type MissingModel = {
+  provider_id: string;
+  model: string;
+  event_count: number;
+};
+
 type SyncStatus = {
   configured: boolean;
   server_url: string;
@@ -163,6 +171,7 @@ function App() {
   const [detected, setDetected] = useState<DetectedSource[]>([]);
   const [subscriptions, setSubscriptions] = useState<Subscription[]>([]);
   const [pricing, setPricing] = useState<PricingEntry[]>([]);
+  const [missingModels, setMissingModels] = useState<MissingModel[]>([]);
   const [activeTab, setActiveTab] = useState<Tab>("all");
   const [status, setStatus] = useState("Ready");
   const [loading, setLoading] = useState(false);
@@ -181,21 +190,25 @@ function App() {
     password: ""
   });
   const [syncLoading, setSyncLoading] = useState(false);
+  const [pricingLoading, setPricingLoading] = useState(false);
+  const [newPriceForm, setNewPriceForm] = useState<Record<string, { input: string; output: string }>>({});
 
   const refresh = async () => {
     setLoading(true);
     try {
-      const [nextSummary, nextSources, nextSubs, nextPricing, nextSync] = await Promise.all([
+      const [nextSummary, nextSources, nextSubs, nextPricing, nextMissing, nextSync] = await Promise.all([
         api<DashboardSummary>("get_dashboard_summary"),
         api<Source[]>("list_sources"),
         api<Subscription[]>("list_subscriptions"),
         api<PricingEntry[]>("list_pricing_catalog"),
+        api<MissingModel[]>("list_missing_models"),
         api<SyncStatus>("get_sync_status")
       ]);
       setSummary(nextSummary);
       setSources(nextSources);
       setSubscriptions(nextSubs);
       setPricing(nextPricing);
+      setMissingModels(nextMissing);
       setSyncStatus(nextSync);
       if (nextSync.logged_in && nextSync.server_url) {
         setSyncForm((s) => ({ ...s, server_url: nextSync.server_url }));
@@ -224,9 +237,13 @@ function App() {
         // Keep background polling quiet in the UI; manual controls still show status.
       }
     }, 300_000);
+    const updateCheckId = window.setTimeout(() => {
+      void checkForUpdates(false);
+    }, 5000);
     return () => {
       window.clearInterval(refreshId);
       window.clearInterval(rescanId);
+      window.clearTimeout(updateCheckId);
     };
   }, []);
 
@@ -388,6 +405,62 @@ function App() {
     }
   };
 
+  const doPullPricing = async () => {
+    setPricingLoading(true);
+    setStatus("Pulling prices from server...");
+    try {
+      const result = await api<{ pulled: number }>("pull_pricing");
+      setStatus(`Pulled ${result.pulled} price(s) from server`);
+      await refresh();
+    } catch (error) {
+      setStatus(message(error));
+    } finally {
+      setPricingLoading(false);
+    }
+  };
+
+  const doPushPricing = async () => {
+    setPricingLoading(true);
+    setStatus("Pushing local prices to server...");
+    try {
+      const result = await api<{ pushed: number }>("push_pricing");
+      setStatus(`Pushed ${result.pushed} price(s) to server`);
+    } catch (error) {
+      setStatus(message(error));
+    } finally {
+      setPricingLoading(false);
+    }
+  };
+
+  const addLocalPricing = async (providerId: string, model: string) => {
+    const key = `${providerId}::${model}`;
+    const form = newPriceForm[key];
+    if (!form || !form.input || !form.output) return;
+    setPricingLoading(true);
+    setStatus(`Adding price for ${model}...`);
+    try {
+      await api("add_pricing", {
+        input: {
+          provider_id: providerId,
+          model: model,
+          input_per_1m: Number(form.input),
+          output_per_1m: Number(form.output),
+        }
+      });
+      setStatus(`Price added for ${model}`);
+      setNewPriceForm((prev) => {
+        const next = { ...prev };
+        delete next[key];
+        return next;
+      });
+      await refresh();
+    } catch (error) {
+      setStatus(message(error));
+    } finally {
+      setPricingLoading(false);
+    }
+  };
+
   return (
     <main className="app-shell">
       <header className="titlebar">
@@ -398,6 +471,9 @@ function App() {
         <div className="actions">
           <button className="icon-button" onClick={refresh} disabled={loading} title="Refresh">
             <RefreshCw size={17} />
+          </button>
+          <button className="icon-button" onClick={() => void checkForUpdates(true)} disabled={loading} title="Check for Updates">
+            <Download size={17} />
           </button>
           <button className="primary-button" onClick={rescanAll} disabled={loading}>
             <Activity size={16} />
@@ -442,10 +518,13 @@ function App() {
           detected={detected}
           subscriptions={subscriptions}
           pricing={pricing}
+          missingModels={missingModels}
           manualPath={manualPath}
           setManualPath={setManualPath}
           subForm={subForm}
           setSubForm={setSubForm}
+          newPriceForm={newPriceForm}
+          setNewPriceForm={setNewPriceForm}
           runDetection={runDetection}
           addDetected={addDetected}
           addManual={addManual}
@@ -462,10 +541,14 @@ function App() {
           syncForm={syncForm}
           setSyncForm={setSyncForm}
           syncLoading={syncLoading}
+          pricingLoading={pricingLoading}
           onLogin={doLogin}
           onLogout={doLogout}
           onSync={doSync}
           onFullResync={doFullResync}
+          onPullPricing={doPullPricing}
+          onPushPricing={doPushPricing}
+          onAddLocalPricing={addLocalPricing}
         />
       ) : (
         <DashboardView
@@ -643,10 +726,13 @@ function SettingsView(props: {
   detected: DetectedSource[];
   subscriptions: Subscription[];
   pricing: PricingEntry[];
+  missingModels: MissingModel[];
   manualPath: string;
   setManualPath: (value: string) => void;
   subForm: SubscriptionForm;
   setSubForm: (value: SubscriptionForm) => void;
+  newPriceForm: Record<string, { input: string; output: string }>;
+  setNewPriceForm: (value: Record<string, { input: string; output: string }>) => void;
   runDetection: () => void;
   addDetected: (source: DetectedSource) => void;
   addManual: () => void;
@@ -657,10 +743,14 @@ function SettingsView(props: {
   syncForm: { server_url: string; login: string; password: string };
   setSyncForm: (value: { server_url: string; login: string; password: string }) => void;
   syncLoading: boolean;
+  pricingLoading: boolean;
   onLogin: () => void;
   onLogout: () => void;
   onSync: () => void;
   onFullResync: () => void;
+  onPullPricing: () => void;
+  onPushPricing: () => void;
+  onAddLocalPricing: (providerId: string, model: string) => void;
 }) {
   return (
     <div className="settings-grid">
@@ -827,6 +917,91 @@ function SettingsView(props: {
 
       <section className="panel">
         <h2>Pricing Catalog</h2>
+        <div className="form-row">
+          <button className="primary-button" onClick={props.onPullPricing} disabled={props.pricingLoading || !props.syncStatus?.logged_in} title={props.syncStatus?.logged_in ? "Pull latest prices from central server" : "Log in to sync first"}>
+            <RefreshCw size={14} />
+            {props.pricingLoading ? "Pulling..." : "Pull from Server"}
+          </button>
+          <button className="secondary-button" onClick={props.onPushPricing} disabled={props.pricingLoading || !props.syncStatus?.logged_in} title={props.syncStatus?.logged_in ? "Push local prices to central server" : "Log in to sync first"}>
+            <Cloud size={14} />
+            {props.pricingLoading ? "Pushing..." : "Push to Server"}
+          </button>
+        </div>
+        {!props.syncStatus?.logged_in && (
+          <p className="muted">Log in to Sync Account above to fetch or contribute prices.</p>
+        )}
+
+        {props.missingModels.length > 0 && (
+          <>
+            <h3 style={{ marginTop: 16, marginBottom: 8 }}>Missing Prices ({props.missingModels.length} model{props.missingModels.length !== 1 ? "s" : ""})</h3>
+            <table>
+              <thead>
+                <tr>
+                  <th>Provider</th>
+                  <th>Model</th>
+                  <th>Events</th>
+                  <th>Input / 1M</th>
+                  <th>Output / 1M</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody>
+                {props.missingModels.map((m) => {
+                  const key = `${m.provider_id}::${m.model}`;
+                  const form = props.newPriceForm[key] ?? { input: "", output: "" };
+                  return (
+                    <tr key={key}>
+                      <td>{m.provider_id}</td>
+                      <td>{m.model}</td>
+                      <td>{m.event_count}</td>
+                      <td>
+                        <input
+                          type="number"
+                          step="0.01"
+                          style={{ width: 80 }}
+                          value={form.input}
+                          placeholder="$"
+                          onChange={(e) =>
+                            props.setNewPriceForm({
+                              ...props.newPriceForm,
+                              [key]: { ...form, input: e.target.value },
+                            })
+                          }
+                        />
+                      </td>
+                      <td>
+                        <input
+                          type="number"
+                          step="0.01"
+                          style={{ width: 80 }}
+                          value={form.output}
+                          placeholder="$"
+                          onChange={(e) =>
+                            props.setNewPriceForm({
+                              ...props.newPriceForm,
+                              [key]: { ...form, output: e.target.value },
+                            })
+                          }
+                        />
+                      </td>
+                      <td>
+                        <button
+                          className="secondary-button"
+                          disabled={props.pricingLoading || !form.input || !form.output}
+                          onClick={() => props.onAddLocalPricing(m.provider_id, m.model)}
+                        >
+                          Add
+                        </button>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </>
+        )}
+
+        <h3 style={{ marginTop: 16, marginBottom: 8 }}>Known Prices ({props.pricing.length})</h3>
         <table>
           <thead>
             <tr>
@@ -847,6 +1022,7 @@ function SettingsView(props: {
                 <td>{price(entry.cached_input_per_1m)}</td>
               </tr>
             ))}
+            {props.pricing.length === 0 && <EmptyRow colSpan={5} text="No prices loaded. Pull from server or add manually." />}
           </tbody>
         </table>
       </section>
