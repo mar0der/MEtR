@@ -1238,13 +1238,13 @@ fn pull_pricing_from_server(conn: &Connection) -> Result<usize, String> {
             _ => "[]".to_string(),
         };
         let source_url = item.get("source_url").and_then(Value::as_str);
-        let input = item.get("input_per_1m").and_then(Value::as_f64);
-        let output = item.get("output_per_1m").and_then(Value::as_f64);
-        let cached = item.get("cached_input_per_1m").and_then(Value::as_f64);
-        let cache_write = item.get("cache_write_per_1m").and_then(Value::as_f64);
-        let cache_read = item.get("cache_read_per_1m").and_then(Value::as_f64);
-        let reasoning = item.get("reasoning_per_1m").and_then(Value::as_f64);
-        let tool = item.get("tool_per_1m").and_then(Value::as_f64);
+        let input = json_f64(item.get("input_per_1m"));
+        let output = json_f64(item.get("output_per_1m"));
+        let cached = json_f64(item.get("cached_input_per_1m"));
+        let cache_write = json_f64(item.get("cache_write_per_1m"));
+        let cache_read = json_f64(item.get("cache_read_per_1m"));
+        let reasoning = json_f64(item.get("reasoning_per_1m"));
+        let tool = json_f64(item.get("tool_per_1m"));
         let catalog_version = item
             .get("catalog_version")
             .and_then(Value::as_str)
@@ -2737,4 +2737,13 @@ fn now() -> String {
 
 fn to_string<E: std::fmt::Display>(err: E) -> String {
     err.to_string()
+}
+
+/// Parse a serde_json::Value as f64, handling both numbers and numeric strings.
+fn json_f64(value: Option<&Value>) -> Option<f64> {
+    match value {
+        Some(Value::Number(n)) => n.as_f64(),
+        Some(Value::String(s)) => s.parse().ok(),
+        _ => None,
+    }
 }
