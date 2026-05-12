@@ -55,6 +55,9 @@ type SessionSummary = {
   project_name: string | null;
   model: string | null;
   timestamp: string;
+  input_tokens: number;
+  output_tokens: number;
+  cached_tokens: number;
   total_tokens: number;
   api_equivalent_cost: number | null;
   confidence: string;
@@ -607,7 +610,9 @@ function DashboardView({
               <th>Time</th>
               <th>Project</th>
               <th>Model</th>
-              <th>Tokens</th>
+              <th>Input</th>
+              <th>Output</th>
+              <th>Cached</th>
               <th>API Cost</th>
               <th>Confidence</th>
             </tr>
@@ -618,12 +623,14 @@ function DashboardView({
                 <td>{date(session.timestamp)}</td>
                 <td>{session.project_name ?? "Unknown"}</td>
                 <td>{session.model ?? "Unknown"}</td>
-                <td>{compact(session.total_tokens)}</td>
+                <td>{compact(session.input_tokens)}</td>
+                <td>{compact(session.output_tokens)}</td>
+                <td>{compact(session.cached_tokens)}</td>
                 <td>{session.api_equivalent_cost == null ? "Unknown" : money(session.api_equivalent_cost)}</td>
                 <td><span className={`pill ${session.confidence}`}>{session.confidence}</span></td>
               </tr>
             ))}
-            {sessions.length === 0 && <EmptyRow colSpan={6} text="No sessions indexed yet." />}
+            {sessions.length === 0 && <EmptyRow colSpan={8} text="No sessions indexed yet." />}
           </tbody>
         </table>
       </section>
