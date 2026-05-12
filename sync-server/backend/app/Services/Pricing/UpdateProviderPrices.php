@@ -46,7 +46,20 @@ class UpdateProviderPrices
                 'tool_per_1m' => $prices['tool_per_1m'] ?? null,
             ];
 
+            $newAliases = isset($prices['aliases_json']) ? json_encode($prices['aliases_json']) : null;
+
             if ($current && $this->pricesEqual($current, $newValues)) {
+                // Prices unchanged — update aliases in place if they differ
+                $currentAliases = $current->aliases_json ?? '[]';
+                if ($newAliases !== null && $currentAliases !== $newAliases) {
+                    $current->update(['aliases_json' => $newAliases]);
+                    Log::info('Updated model aliases', [
+                        'provider_id' => $providerId,
+                        'model' => $model,
+                        'old_aliases' => $currentAliases,
+                        'new_aliases' => $newAliases,
+                    ]);
+                }
                 continue;
             }
 
@@ -57,7 +70,7 @@ class UpdateProviderPrices
             ModelPrice::create(array_merge($newValues, [
                 'provider_id' => $providerId,
                 'model' => $model,
-                'aliases_json' => isset($prices['aliases_json']) ? json_encode($prices['aliases_json']) : null,
+                'aliases_json' => $newAliases,
                 'currency' => $prices['currency'] ?? 'USD',
                 'effective_from' => $effectiveFrom ?? $observation->fetched_at,
                 'effective_to' => null,

@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { invoke } from "@tauri-apps/api/core";
+import { getVersion } from "@tauri-apps/api/app";
 import {
   Activity,
   Cloud,
@@ -191,6 +192,7 @@ function App() {
   });
   const [syncLoading, setSyncLoading] = useState(false);
   const [pricingLoading, setPricingLoading] = useState(false);
+  const [appVersion, setAppVersion] = useState<string>("");
   const [newPriceForm, setNewPriceForm] = useState<Record<string, { input: string; output: string }>>({});
 
   const refresh = async () => {
@@ -223,6 +225,7 @@ function App() {
 
   useEffect(() => {
     refresh();
+    getVersion().then((v) => setAppVersion(v)).catch(() => setAppVersion(""));
   }, []);
 
   useEffect(() => {
@@ -465,7 +468,7 @@ function App() {
     <main className="app-shell">
       <header className="titlebar">
         <div>
-          <h1>MEtR</h1>
+          <h1>MEtR <span className="version-badge">v{appVersion}</span></h1>
           <p>Local LLM usage, subscriptions, and API-equivalent cost.</p>
         </div>
         <div className="actions">

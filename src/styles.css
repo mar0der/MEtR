@@ -53,6 +53,20 @@ h1 {
   letter-spacing: 0;
 }
 
+.version-badge {
+  display: inline-block;
+  font-size: 12px;
+  font-weight: 600;
+  color: #657386;
+  background: #eef3f8;
+  border: 1px solid #dce2ea;
+  border-radius: 999px;
+  padding: 2px 8px;
+  vertical-align: middle;
+  margin-left: 6px;
+  letter-spacing: 0.02em;
+}
+
 h2 {
   font-size: 15px;
   margin-bottom: 14px;
@@ -440,5 +454,11 @@ input {
 
   .sync-logged-in strong {
     color: #e8ecf2;
+  }
+
+  .version-badge {
+    color: #9ca8b7;
+    background: #202a35;
+    border-color: #2a3542;
   }
 }

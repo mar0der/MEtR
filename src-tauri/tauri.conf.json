@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "MEtR",
-  "version": "0.1.0",
+  "version": "26.20.3",
   "identifier": "com.metr.local",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -28,11 +28,15 @@
     "active": true,
     "createUpdaterArtifacts": true,
     "targets": ["msi", "nsis", "dmg", "app"],
-    "icon": []
+    "icon": [],
+    "macOS": {
+      "signingIdentity": "Developer ID Application: Petar Petkov (TG94VNPLAA)",
+      "providerShortName": "TG94VNPLAA"
+    }
   },
   "plugins": {
     "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDdENDA0OUVEQUNFMDA0MzQKUldRMEJPQ3M3VWxBZlFIU1I2anBwQ1J2cVU4eEg0ZmtKSDJ5cHY0bnNib2k3YkQ4THovNlRHTisK",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDM0QThDMjZGMDVBNTFDMjMKUldRakhLVUZiOEtvTkNLOGZ1RVlnd2U5bDJZNExhdXZwYXgwTkwyYXd0Z3ZTaTZPazU0UnQ3YWcK",
       "endpoints": [
         "https://metr.petarpetkov.com/api/v1/update/{{target}}/{{arch}}/{{current_version}}"
       ]

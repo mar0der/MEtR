@@ -124,12 +124,54 @@ class SyncController extends Controller
     {
         $user = $request->user();
 
+        // Only send model prices for models this user actually has events for.
+        // For new users with no events, fall back to all active prices.
+        $usedModels = \App\Models\UsageEvent::where('user_id', $user->id)
+            ->whereNotNull('model')
+            ->select('provider_id', 'model')
+            ->distinct()
+            ->get();
+
+        $allPrices = ModelPrice::with('provider')
+            ->whereNull('effective_to')
+            ->orderBy('provider_id')
+            ->orderBy('model')
+            ->get();
+
+        $modelPrices = $usedModels->isEmpty()
+            ? $allPrices
+            : $allPrices->filter(function ($price) use ($usedModels) {
+                // Direct model name match
+                $hasDirectMatch = $usedModels->contains(function ($used) use ($price) {
+                    return $used->provider_id === $price->provider_id
+                        && strtolower($used->model) === strtolower($price->model);
+                });
+                if ($hasDirectMatch) {
+                    return true;
+                }
+
+                // Alias match
+                $aliases = json_decode($price->aliases_json ?? '[]', true);
+                foreach ($aliases as $alias) {
+                    $hasAliasMatch = $usedModels->contains(function ($used) use ($price, $alias) {
+                        return $used->provider_id === $price->provider_id
+                            && strtolower($used->model) === strtolower($alias);
+                    });
+                    if ($hasAliasMatch) {
+                        return true;
+                    }
+                }
+
+                return false;
+            })
+            ->values();
+
         return response()->json([
             'provider_accounts' => $user->providerAccounts()->with('provider')->get(),
             'attribution_rules' => $user->attributionRules()->with(['provider', 'providerAccount', 'device'])->get(),
             'subscriptions' => $user->subscriptions()->with(['providerAccount', 'provider'])->get(),
             'projects' => $user->projects()->with('projectRoots')->get(),
-            'model_prices' => ModelPrice::whereNull('effective_to')->get(),
+            'model_prices' => $modelPrices,
             'sync_cursor' => now()->toIso8601String(),
         ]);
     }

@@ -10,10 +10,11 @@ use Illuminate\Support\Facades\Storage;
 class PublishUpdateRelease extends Command
 {
     protected $signature = 'metr:release:publish
-        {--version= : Release version (e.g. 0.1.1)}
+        {--release-version= : Release version (e.g. 0.1.1)}
         {--notes= : Release notes}
-        {--darwin-dmg= : Path to macOS .dmg artifact}
-        {--darwin-sig= : Path to macOS .dmg.sig file}
+        {--darwin-tgz= : Path to macOS .tar.gz updater archive}
+        {--darwin-sig= : Path to macOS .tar.gz.sig signature file}
+        {--darwin-dmg= : Path to macOS .dmg installer (optional, for fresh installs)}
         {--windows-msi= : Path to Windows .msi artifact}
         {--windows-sig= : Path to Windows .msi.sig file}
         {--force : Overwrite existing release with same version}';
@@ -22,9 +23,9 @@ class PublishUpdateRelease extends Command
 
     public function handle(): int
     {
-        $version = $this->option('version');
+        $version = $this->option('release-version');
         if (! $version) {
-            $this->error('Version is required. Use --version=0.1.1');
+            $this->error('Version is required. Use --release-version=0.1.1');
 
             return self::FAILURE;
         }
@@ -52,18 +53,19 @@ class PublishUpdateRelease extends Command
 
         $platforms = [];
 
-        if ($this->option('darwin-dmg') && $this->option('darwin-sig')) {
-            $dmgPath = $this->option('darwin-dmg');
+        // macOS updater uses .tar.gz archive
+        if ($this->option('darwin-tgz') && $this->option('darwin-sig')) {
+            $tgzPath = $this->option('darwin-tgz');
             $sigPath = $this->option('darwin-sig');
 
-            if (! file_exists($dmgPath) || ! file_exists($sigPath)) {
-                $this->error('macOS artifact or signature file not found.');
+            if (! file_exists($tgzPath) || ! file_exists($sigPath)) {
+                $this->error('macOS updater archive or signature file not found.');
 
                 return self::FAILURE;
             }
 
-            $filename = basename($dmgPath);
-            $disk->putFileAs('', $dmgPath, $filename);
+            $filename = basename($tgzPath);
+            $disk->putFileAs('', $tgzPath, $filename);
 
             $platforms[] = UpdateAsset::create([
                 'update_release_id' => $release->id,
@@ -72,7 +74,17 @@ class PublishUpdateRelease extends Command
                 'signature' => trim(file_get_contents($sigPath)),
             ]);
 
-            $this->info("Uploaded macOS artifact: {$filename}");
+            $this->info("Uploaded macOS updater archive: {$filename}");
+        }
+
+        // Optional: macOS DMG for fresh installs
+        if ($this->option('darwin-dmg')) {
+            $dmgPath = $this->option('darwin-dmg');
+            if (file_exists($dmgPath)) {
+                $filename = basename($dmgPath);
+                $disk->putFileAs('', $dmgPath, $filename);
+                $this->info("Uploaded macOS installer DMG: {$filename}");
+            }
         }
 
         if ($this->option('windows-msi') && $this->option('windows-sig')) {
@@ -99,7 +111,7 @@ class PublishUpdateRelease extends Command
         }
 
         if (empty($platforms)) {
-            $this->warn('No artifacts uploaded. Provide --darwin-dmg/--darwin-sig and/or --windows-msi/--windows-sig.');
+            $this->warn('No updater artifacts uploaded. Provide --darwin-tgz/--darwin-sig and/or --windows-msi/--windows-sig.');
         }
 
         $this->info("Release {$version} published successfully.");

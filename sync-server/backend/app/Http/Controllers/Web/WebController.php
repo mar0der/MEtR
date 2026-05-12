@@ -75,9 +75,10 @@ class WebController extends Controller
             DB::raw('SUM(reasoning_tokens) as reasoning_tokens'),
             DB::raw('SUM(tool_tokens) as tool_tokens'),
             DB::raw('SUM(unknown_tokens) as unknown_tokens'),
+            DB::raw('SUM(input_tokens + output_tokens + cached_input_tokens + cache_write_tokens + cache_read_tokens + reasoning_tokens + tool_tokens + unknown_tokens) as total_tokens'),
             DB::raw('COUNT(*) as event_count'),
-            DB::raw('SUM(CASE WHEN official_api_cost_usd IS NULL THEN 1 ELSE 0 END) as missing_price_count'),
-            DB::raw('SUM(CASE WHEN provider_account_id IS NULL THEN 1 ELSE 0 END) as unknown_account_count'),
+            DB::raw('SUM(CASE WHEN official_api_cost_usd IS NULL THEN 1 ELSE 0 END) as unpriced_count'),
+            DB::raw('SUM(CASE WHEN provider_account_id IS NULL THEN 1 ELSE 0 END) as unattributed_count'),
             DB::raw('SUM(official_api_cost_usd) as total_cost'),
         ])->first();
 
@@ -184,8 +185,47 @@ class WebController extends Controller
 
     public function pricing()
     {
+        $user = Auth::user();
+
+        // Models this user actually has events for
+        $usedModels = UsageEvent::where('user_id', $user->id)
+            ->whereNotNull('model')
+            ->select('provider_id', 'model')
+            ->distinct()
+            ->get()
+            ->map(fn ($e) => strtolower($e->provider_id . '|' . $e->model))
+            ->toArray();
+
+        $allPrices = ModelPrice::with('provider')
+            ->whereNull('effective_to')
+            ->orderBy('provider_id')
+            ->orderBy('model')
+            ->get();
+
+        // Split into used vs unused
+        $used = [];
+        $unused = [];
+        foreach ($allPrices as $price) {
+            $key = strtolower($price->provider_id . '|' . $price->model);
+            $aliases = json_decode($price->aliases_json ?? '[]', true);
+            $hasMatch = in_array($key, $usedModels);
+            foreach ($aliases as $alias) {
+                if (in_array(strtolower($price->provider_id . '|' . $alias), $usedModels)) {
+                    $hasMatch = true;
+                    break;
+                }
+            }
+            if ($hasMatch) {
+                $used[] = $price;
+            } else {
+                $unused[] = $price;
+            }
+        }
+
         return view('pricing', [
-            'prices' => ModelPrice::with('provider')->orderBy('provider_id')->orderBy('model')->get(),
+            'prices' => array_merge($used, $unused),
+            'usedCount' => count($used),
+            'unusedCount' => count($unused),
         ]);
     }
 }
