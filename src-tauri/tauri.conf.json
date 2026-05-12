@@ -20,12 +20,22 @@
       }
     ],
     "security": {
-      "csp": null
+      "csp": null,
+      "capabilities": ["default"]
     }
   },
   "bundle": {
     "active": true,
-    "targets": ["msi", "dmg"],
+    "createUpdaterArtifacts": true,
+    "targets": ["msi", "nsis", "dmg", "app"],
     "icon": []
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDdENDA0OUVEQUNFMDA0MzQKUldRMEJPQ3M3VWxBZlFIU1I2anBwQ1J2cVU4eEg0ZmtKSDJ5cHY0bnNib2k3YkQ4THovNlRHTisK",
+      "endpoints": [
+        "https://metr.petarpetkov.com/api/v1/update/{{target}}/{{arch}}/{{current_version}}"
+      ]
+    }
   }
 }

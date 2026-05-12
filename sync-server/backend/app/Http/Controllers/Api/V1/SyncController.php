@@ -133,4 +133,58 @@ class SyncController extends Controller
             'sync_cursor' => now()->toIso8601String(),
         ]);
     }
+
+    public function pricing(Request $request): JsonResponse
+    {
+        $data = $request->validate([
+            'prices' => ['required', 'array'],
+            'prices.*.provider_id' => ['required', 'string', 'exists:providers,id'],
+            'prices.*.model' => ['required', 'string'],
+            'prices.*.aliases_json' => ['nullable', 'array'],
+            'prices.*.input_per_1m' => ['nullable', 'numeric'],
+            'prices.*.output_per_1m' => ['nullable', 'numeric'],
+            'prices.*.cached_input_per_1m' => ['nullable', 'numeric'],
+            'prices.*.cache_write_per_1m' => ['nullable', 'numeric'],
+            'prices.*.cache_read_per_1m' => ['nullable', 'numeric'],
+            'prices.*.reasoning_per_1m' => ['nullable', 'numeric'],
+            'prices.*.tool_per_1m' => ['nullable', 'numeric'],
+            'prices.*.source_url' => ['nullable', 'string'],
+            'prices.*.catalog_version' => ['nullable', 'string'],
+        ]);
+
+        $synced = 0;
+        foreach ($data['prices'] as $price) {
+            $effectiveFrom = $price['effective_from'] ?? now()->toDateTimeString();
+
+            $match = [
+                'provider_id' => $price['provider_id'],
+                'model' => $price['model'],
+                'effective_from' => $effectiveFrom,
+                'effective_to' => null,
+            ];
+
+            $payload = [
+                'aliases_json' => !empty($price['aliases_json']) ? json_encode($price['aliases_json']) : null,
+                'currency' => $price['currency'] ?? 'USD',
+                'input_per_1m' => $price['input_per_1m'] ?? null,
+                'output_per_1m' => $price['output_per_1m'] ?? null,
+                'cached_input_per_1m' => $price['cached_input_per_1m'] ?? null,
+                'cache_write_per_1m' => $price['cache_write_per_1m'] ?? null,
+                'cache_read_per_1m' => $price['cache_read_per_1m'] ?? null,
+                'reasoning_per_1m' => $price['reasoning_per_1m'] ?? null,
+                'tool_per_1m' => $price['tool_per_1m'] ?? null,
+                'source_url' => $price['source_url'] ?? null,
+                'catalog_version' => $price['catalog_version'] ?? 'client-sync',
+                'user_override' => false,
+            ];
+
+            ModelPrice::updateOrCreate($match, $payload);
+            $synced++;
+        }
+
+        return response()->json([
+            'ok' => true,
+            'synced' => $synced,
+        ]);
+    }
 }

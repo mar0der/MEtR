@@ -9,6 +9,7 @@ use App\Http\Controllers\Api\V1\ProjectController;
 use App\Http\Controllers\Api\V1\ProviderAccountController;
 use App\Http\Controllers\Api\V1\SubscriptionController;
 use App\Http\Controllers\Api\V1\SyncController;
+use App\Http\Controllers\Api\V1\UpdateController;
 use Illuminate\Support\Facades\Route;
 
 Route::prefix('v1')->group(function () {
@@ -22,7 +23,10 @@ Route::prefix('v1')->group(function () {
 
         Route::post('/sync/events', [SyncController::class, 'events']);
         Route::post('/sync/subscriptions', [SyncController::class, 'subscriptions']);
+        Route::post('/sync/pricing', [SyncController::class, 'pricing']);
         Route::get('/sync/settings', [SyncController::class, 'settings']);
+
+        Route::get('/update/{target}/{arch}/{currentVersion}', [UpdateController::class, 'manifest']);
 
         Route::get('/dashboard/summary', [DashboardController::class, 'summary']);
         Route::get('/dashboard/by-device', [DashboardController::class, 'byDevice']);

@@ -201,6 +201,9 @@ struct Pricing {
 
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             let db_path = app
                 .path()
@@ -232,8 +235,12 @@ pub fn run() {
             delete_subscription,
             list_pricing_catalog,
             clear_parsed_data,
-            open_project_path
-            ,
+            open_project_path,
+            list_pricing_catalog,
+            list_missing_models,
+            add_pricing,
+            pull_pricing,
+            push_pricing,
             get_sync_status,
             configure_sync_server,
             login_sync,
@@ -556,6 +563,168 @@ fn list_pricing_catalog(state: State<AppState>) -> Result<Vec<Value>, String> {
         })
         .map_err(to_string)?;
     rows.collect::<Result<Vec<_>, _>>().map_err(to_string)
+}
+
+#[derive(Debug, Deserialize)]
+struct AddPricingInput {
+    provider_id: String,
+    model: String,
+    input_per_1m: Option<f64>,
+    output_per_1m: Option<f64>,
+    cached_input_per_1m: Option<f64>,
+    cache_write_per_1m: Option<f64>,
+    cache_read_per_1m: Option<f64>,
+    reasoning_per_1m: Option<f64>,
+    tool_per_1m: Option<f64>,
+    source_url: Option<String>,
+}
+
+#[tauri::command]
+fn add_pricing(state: State<AppState>, input: AddPricingInput) -> Result<Value, String> {
+    let conn = state.db.lock().map_err(to_string)?;
+    let id = format!("{}:{}", input.provider_id, input.model.to_ascii_lowercase());
+    let now_ts = now();
+    conn.execute(
+        "INSERT INTO pricing_catalogs
+         (id, provider_id, model, aliases_json, source_url, catalog_version, effective_from,
+          input_per_1m, output_per_1m, cached_input_per_1m, cache_write_per_1m, cache_read_per_1m,
+          reasoning_per_1m, tool_per_1m, user_override, created_at, updated_at)
+         VALUES (?1, ?2, ?3, '[]', ?4, 'user', '2026-01-01', ?5, ?6, ?7, ?8, ?9, ?10, ?11, 1, ?12, ?12)
+         ON CONFLICT(id) DO UPDATE SET
+           input_per_1m = excluded.input_per_1m,
+           output_per_1m = excluded.output_per_1m,
+           cached_input_per_1m = excluded.cached_input_per_1m,
+           cache_write_per_1m = excluded.cache_write_per_1m,
+           cache_read_per_1m = excluded.cache_read_per_1m,
+           reasoning_per_1m = excluded.reasoning_per_1m,
+           tool_per_1m = excluded.tool_per_1m,
+           source_url = excluded.source_url,
+           user_override = 1,
+           updated_at = excluded.updated_at",
+        params![
+            id,
+            input.provider_id,
+            input.model,
+            input.source_url,
+            input.input_per_1m,
+            input.output_per_1m,
+            input.cached_input_per_1m,
+            input.cache_write_per_1m,
+            input.cache_read_per_1m,
+            input.reasoning_per_1m,
+            input.tool_per_1m,
+            now_ts
+        ],
+    )
+    .map_err(to_string)?;
+    recalculate_event_costs(&conn).map_err(to_string)?;
+    Ok(serde_json::json!({ "id": id, "updated": true }))
+}
+
+#[tauri::command]
+fn list_missing_models(state: State<AppState>) -> Result<Vec<Value>, String> {
+    let conn = state.db.lock().map_err(to_string)?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT u.provider_id, u.model, COUNT(*) as event_count
+             FROM usage_events u
+             WHERE u.model IS NOT NULL AND u.model != ''
+               AND NOT EXISTS (
+                 SELECT 1 FROM pricing_catalogs p
+                 WHERE p.provider_id = u.provider_id
+                   AND (lower(p.model) = lower(u.model)
+                        OR (json_array_length(p.aliases_json) > 0
+                            AND lower(p.aliases_json) LIKE '%' || lower(u.model) || '%'))
+               )
+             GROUP BY u.provider_id, u.model
+             ORDER BY event_count DESC",
+        )
+        .map_err(to_string)?;
+    let rows = stmt
+        .query_map([], |r| {
+            Ok(serde_json::json!({
+                "provider_id": r.get::<_, String>(0)?,
+                "model": r.get::<_, String>(1)?,
+                "event_count": r.get::<_, i64>(2)?,
+            }))
+        })
+        .map_err(to_string)?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(to_string)
+}
+
+#[tauri::command]
+fn pull_pricing(state: State<AppState>) -> Result<Value, String> {
+    let conn = state.db.lock().map_err(to_string)?;
+    let count = pull_pricing_from_server(&conn)?;
+    recalculate_event_costs(&conn).map_err(to_string)?;
+    Ok(serde_json::json!({ "pulled": count }))
+}
+
+#[tauri::command]
+fn push_pricing(state: State<AppState>) -> Result<Value, String> {
+    let conn = state.db.lock().map_err(to_string)?;
+    ensure_sync_config(&conn)?;
+    let (token, server_url): (String, String) = conn
+        .query_row(
+            "SELECT auth_token, server_url FROM sync_config WHERE id = 1",
+            [],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+        )
+        .map_err(|_| "Not logged in. Please log in first.".to_string())?;
+
+    let mut stmt = conn
+        .prepare(
+            "SELECT provider_id, model, aliases_json, input_per_1m, output_per_1m,
+             cached_input_per_1m, cache_write_per_1m, cache_read_per_1m,
+             reasoning_per_1m, tool_per_1m, source_url, catalog_version
+             FROM pricing_catalogs",
+        )
+        .map_err(to_string)?;
+    let prices: Vec<Value> = stmt
+        .query_map([], |r| {
+            let aliases_json: String = r.get::<_, String>(2)?;
+            let aliases: Vec<String> = serde_json::from_str(&aliases_json).unwrap_or_default();
+            Ok(serde_json::json!({
+                "provider_id": r.get::<_, String>(0)?,
+                "model": r.get::<_, String>(1)?,
+                "aliases_json": aliases,
+                "input_per_1m": r.get::<_, Option<f64>>(3)?,
+                "output_per_1m": r.get::<_, Option<f64>>(4)?,
+                "cached_input_per_1m": r.get::<_, Option<f64>>(5)?,
+                "cache_write_per_1m": r.get::<_, Option<f64>>(6)?,
+                "cache_read_per_1m": r.get::<_, Option<f64>>(7)?,
+                "reasoning_per_1m": r.get::<_, Option<f64>>(8)?,
+                "tool_per_1m": r.get::<_, Option<f64>>(9)?,
+                "source_url": r.get::<_, Option<String>>(10)?,
+                "catalog_version": r.get::<_, Option<String>>(11)?,
+            }))
+        })
+        .map_err(to_string)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(to_string)?;
+
+    if prices.is_empty() {
+        return Ok(serde_json::json!({ "pushed": 0 }));
+    }
+
+    let base_url = server_url.trim_end_matches('/');
+    let client = reqwest::blocking::Client::new();
+    let resp = client
+        .post(format!("{}/api/v1/sync/pricing", base_url))
+        .header("Authorization", format!("Bearer {}", token))
+        .header("Accept", "application/json")
+        .json(&serde_json::json!({ "prices": prices }))
+        .send()
+        .map_err(|e| format!("Pricing push request failed: {}", e))?;
+
+    if !resp.status().is_success() {
+        let body = resp.text().unwrap_or_default();
+        return Err(format!("Pricing push failed: {}", body));
+    }
+
+    let data: Value = resp.json().map_err(|e| format!("Invalid pricing push response: {}", e))?;
+    let pushed = data.get("synced").and_then(Value::as_u64).unwrap_or(0);
+    Ok(serde_json::json!({ "pushed": pushed }))
 }
 
 fn ensure_sync_config(conn: &Connection) -> Result<(), String> {
@@ -1321,156 +1490,6 @@ fn seed_defaults(conn: &Connection) -> rusqlite::Result<()> {
     ] {
         ensure_provider(conn, id, name)?;
     }
-    seed_price(
-        conn,
-        "openai:gpt-5.5",
-        "openai",
-        "gpt-5.5",
-        &[
-            "gpt-5.5-codex",
-            "gpt-5.5-high",
-            "gpt-5.5-medium",
-            "gpt-5.5-low",
-        ],
-        Some(5.0),
-        Some(30.0),
-        Some(0.5),
-        None,
-        None,
-        "https://openai.com/api/pricing/",
-    )?;
-    seed_price(
-        conn,
-        "openai:gpt-5.4",
-        "openai",
-        "gpt-5.4",
-        &[
-            "gpt-5.4-codex",
-            "gpt-5.4-high",
-            "gpt-5.4-medium",
-            "gpt-5.4-low",
-        ],
-        Some(2.5),
-        Some(15.0),
-        Some(0.25),
-        None,
-        None,
-        "https://openai.com/api/pricing/",
-    )?;
-    seed_price(
-        conn,
-        "openai:gpt-5.4-mini",
-        "openai",
-        "gpt-5.4-mini",
-        &[
-            "gpt-5.4-mini-codex",
-            "gpt-5.4-mini-high",
-            "gpt-5.4-mini-medium",
-            "gpt-5.4-mini-low",
-        ],
-        Some(0.75),
-        Some(4.5),
-        Some(0.075),
-        None,
-        None,
-        "https://openai.com/api/pricing/",
-    )?;
-    seed_price(
-        conn,
-        "openai:gpt-5.4-nano",
-        "openai",
-        "gpt-5.4-nano",
-        &[
-            "gpt-5.4-nano-codex",
-            "gpt-5.4-nano-high",
-            "gpt-5.4-nano-medium",
-            "gpt-5.4-nano-low",
-        ],
-        Some(0.20),
-        Some(1.25),
-        Some(0.02),
-        None,
-        None,
-        "https://openai.com/api/pricing/",
-    )?;
-    seed_price(
-        conn,
-        "openai:gpt-5.3-codex",
-        "openai",
-        "gpt-5.3-codex",
-        &[
-            "gpt-5.3",
-            "gpt-5.3-high",
-            "gpt-5.3-medium",
-            "gpt-5.3-low",
-            "gpt-5.3-codex-high",
-            "gpt-5.3-codex-medium",
-            "gpt-5.3-codex-low",
-        ],
-        Some(1.75),
-        Some(14.0),
-        Some(0.175),
-        None,
-        None,
-        "https://platform.openai.com/docs/pricing/",
-    )?;
-    seed_price(
-        conn,
-        "openai:gpt-5.1",
-        "openai",
-        "gpt-5.1",
-        &["gpt-5.1-codex", "gpt-5.1-high"],
-        Some(1.25),
-        Some(10.0),
-        Some(0.125),
-        None,
-        None,
-        "https://openai.com/api/pricing/",
-    )?;
-    seed_price(
-        conn,
-        "openai:gpt-5.1-mini",
-        "openai",
-        "gpt-5.1-mini",
-        &[
-            "gpt-5.1-mini-codex",
-            "gpt-5.1-low",
-            "gpt-5.1-medium",
-            "codex-mini",
-        ],
-        Some(0.25),
-        Some(2.0),
-        Some(0.025),
-        None,
-        None,
-        "https://openai.com/api/pricing/",
-    )?;
-    seed_price(
-        conn,
-        "anthropic:claude-sonnet-4.5",
-        "anthropic",
-        "claude-sonnet-4.5",
-        &["claude-sonnet-4-5"],
-        Some(3.0),
-        Some(15.0),
-        None,
-        Some(3.75),
-        Some(0.30),
-        "https://docs.anthropic.com/en/docs/about-claude/pricing",
-    )?;
-    seed_price(
-        conn,
-        "google:gemini-2.5-pro",
-        "google",
-        "gemini-2.5-pro",
-        &[],
-        Some(1.25),
-        Some(10.0),
-        Some(0.31),
-        None,
-        None,
-        "https://ai.google.dev/gemini-api/docs/pricing",
-    )?;
     Ok(())
 }
 
@@ -1549,54 +1568,6 @@ fn recalculate_event_costs(conn: &Connection) -> rusqlite::Result<()> {
             params![cost, pricing_id, now(), id],
         )?;
     }
-    Ok(())
-}
-
-#[allow(clippy::too_many_arguments)]
-fn seed_price(
-    conn: &Connection,
-    id: &str,
-    provider_id: &str,
-    model: &str,
-    aliases: &[&str],
-    input: Option<f64>,
-    output: Option<f64>,
-    cached: Option<f64>,
-    cache_write: Option<f64>,
-    cache_read: Option<f64>,
-    source_url: &str,
-) -> rusqlite::Result<()> {
-    let now = now();
-    conn.execute(
-        "INSERT INTO pricing_catalogs
-         (id, provider_id, model, aliases_json, source_url, catalog_version, effective_from,
-          input_per_1m, output_per_1m, cached_input_per_1m, cache_write_per_1m, cache_read_per_1m,
-          created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, 'seed-2026-04-29', '2026-04-29', ?6, ?7, ?8, ?9, ?10, ?11, ?11)
-         ON CONFLICT(id) DO UPDATE SET
-           aliases_json = CASE WHEN pricing_catalogs.user_override = 0 THEN excluded.aliases_json ELSE pricing_catalogs.aliases_json END,
-           source_url = CASE WHEN pricing_catalogs.user_override = 0 THEN excluded.source_url ELSE pricing_catalogs.source_url END,
-           input_per_1m = CASE WHEN pricing_catalogs.user_override = 0 THEN excluded.input_per_1m ELSE pricing_catalogs.input_per_1m END,
-           output_per_1m = CASE WHEN pricing_catalogs.user_override = 0 THEN excluded.output_per_1m ELSE pricing_catalogs.output_per_1m END,
-           cached_input_per_1m = CASE WHEN pricing_catalogs.user_override = 0 THEN excluded.cached_input_per_1m ELSE pricing_catalogs.cached_input_per_1m END,
-           cache_write_per_1m = CASE WHEN pricing_catalogs.user_override = 0 THEN excluded.cache_write_per_1m ELSE pricing_catalogs.cache_write_per_1m END,
-           cache_read_per_1m = CASE WHEN pricing_catalogs.user_override = 0 THEN excluded.cache_read_per_1m ELSE pricing_catalogs.cache_read_per_1m END,
-           catalog_version = CASE WHEN pricing_catalogs.user_override = 0 THEN excluded.catalog_version ELSE pricing_catalogs.catalog_version END,
-           updated_at = excluded.updated_at",
-        params![
-            id,
-            provider_id,
-            model,
-            serde_json::to_string(aliases).unwrap(),
-            source_url,
-            input,
-            output,
-            cached,
-            cache_write,
-            cache_read,
-            now
-        ],
-    )?;
     Ok(())
 }
 
