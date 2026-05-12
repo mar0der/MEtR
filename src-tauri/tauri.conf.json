@@ -28,7 +28,11 @@
     "active": true,
     "createUpdaterArtifacts": true,
     "targets": ["msi", "nsis", "dmg", "app"],
-    "icon": [],
+    "icon": [
+      "icons/icon.ico",
+      "icons/icon.png",
+      "icons/icon.svg"
+    ],
     "macOS": {
       "signingIdentity": "Developer ID Application: Petar Petkov (TG94VNPLAA)",
       "providerShortName": "TG94VNPLAA"
