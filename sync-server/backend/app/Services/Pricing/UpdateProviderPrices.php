@@ -19,8 +19,16 @@ class UpdateProviderPrices
      */
     public function handle(PriceObservation $observation, array $parsedPrices): void
     {
-        $providerId = $observation->provider_id;
+        $this->processPrices($observation, $observation->provider_id, $parsedPrices);
+    }
 
+    public function handleMultiProvider(PriceObservation $observation, string $providerId, array $parsedPrices, ?string $effectiveFrom = null): void
+    {
+        $this->processPrices($observation, $providerId, $parsedPrices, $effectiveFrom);
+    }
+
+    private function processPrices(PriceObservation $observation, string $providerId, array $parsedPrices, ?string $effectiveFrom = null): void
+    {
         foreach ($parsedPrices as $model => $prices) {
             $current = ModelPrice::where('provider_id', $providerId)
                 ->where('model', $model)
@@ -49,9 +57,9 @@ class UpdateProviderPrices
             ModelPrice::create(array_merge($newValues, [
                 'provider_id' => $providerId,
                 'model' => $model,
-                'aliases_json' => $prices['aliases_json'] ?? null,
+                'aliases_json' => isset($prices['aliases_json']) ? json_encode($prices['aliases_json']) : null,
                 'currency' => $prices['currency'] ?? 'USD',
-                'effective_from' => $observation->fetched_at,
+                'effective_from' => $effectiveFrom ?? $observation->fetched_at,
                 'effective_to' => null,
                 'source_url' => $observation->source_url,
                 'source_hash' => $observation->source_hash,
