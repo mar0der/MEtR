@@ -14,7 +14,7 @@ use walkdir::WalkDir;
 
 const MAX_SCAN_FILES_PER_SOURCE: usize = 2_000;
 const MAX_FILE_BYTES: u64 = 20 * 1024 * 1024;
-const PARSER_VERSION: &str = "0.1.0";
+const PARSER_VERSION: &str = "0.1.1";
 
 struct AppState {
     db: Mutex<Connection>,
@@ -543,7 +543,12 @@ fn list_pricing_catalog(state: State<AppState>) -> Result<Vec<Value>, String> {
         .prepare(
             "SELECT id, provider_id, model, aliases_json, input_per_1m, output_per_1m,
              cached_input_per_1m, cache_write_per_1m, cache_read_per_1m, source_url
-             FROM pricing_catalogs ORDER BY provider_id, model",
+             FROM pricing_catalogs
+             WHERE input_per_1m IS NOT NULL OR output_per_1m IS NOT NULL
+                OR cached_input_per_1m IS NOT NULL OR cache_write_per_1m IS NOT NULL
+                OR cache_read_per_1m IS NOT NULL OR reasoning_per_1m IS NOT NULL
+                OR tool_per_1m IS NOT NULL OR user_override = 1
+             ORDER BY provider_id, model",
         )
         .map_err(to_string)?;
     let rows = stmt
@@ -1295,6 +1300,41 @@ fn pull_pricing_from_server(conn: &Connection) -> Result<usize, String> {
         .map_err(to_string)?;
         pulled += 1;
     }
+
+    // Delete non-user-override prices that are no longer returned by the server.
+    // This keeps the catalog clean — only used models + user overrides remain.
+    let mut stmt = conn
+        .prepare("SELECT id FROM pricing_catalogs WHERE user_override = 0")
+        .map_err(to_string)?;
+    let existing_ids: Vec<String> = stmt
+        .query_map([], |r| r.get::<_, String>(0))
+        .map_err(to_string)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(to_string)?;
+    drop(stmt);
+
+    let mut kept_ids = Vec::new();
+    for item in prices {
+        let provider_id = item.get("provider_id").and_then(Value::as_str).unwrap_or("");
+        let model = item.get("model").and_then(Value::as_str).unwrap_or("");
+        if !provider_id.is_empty() && !model.is_empty() {
+            kept_ids.push(format!("{}:{}", provider_id, model.to_ascii_lowercase()));
+        }
+    }
+
+    let removed: usize = existing_ids
+        .iter()
+        .filter(|id| !kept_ids.contains(id))
+        .filter_map(|id| {
+            conn.execute("DELETE FROM pricing_catalogs WHERE id = ?1", params![id])
+                .ok()
+        })
+        .count();
+
+    if removed > 0 {
+        println!("[Pricing] Removed {} unused server prices from local catalog", removed);
+    }
+
     Ok(pulled)
 }
 
@@ -1486,6 +1526,9 @@ fn seed_defaults(conn: &Connection) -> rusqlite::Result<()> {
         ("cline", "Cline / Roo Code"),
         ("continue", "Continue"),
         ("aider", "Aider"),
+        ("kimi", "Kimi / Moonshot"),
+        ("ollama", "Ollama"),
+        ("lmstudio", "LM Studio"),
         ("generic", "Generic JSONL"),
     ] {
         ensure_provider(conn, id, name)?;
@@ -1629,6 +1672,26 @@ fn candidate_sources() -> Vec<CandidateSource> {
             parser_id: "generic_jsonl",
             display_name: "VS Code Cline/Roo",
             path: data.join("Code").join("User").join("globalStorage"),
+        });
+        candidates.push(CandidateSource {
+            provider_id: "kimi",
+            parser_id: "generic_jsonl",
+            display_name: "Kimi / Moonshot",
+            path: data.join("Kimi"),
+        });
+    }
+    if let Some(home) = dirs::home_dir() {
+        candidates.push(CandidateSource {
+            provider_id: "kimi",
+            parser_id: "generic_jsonl",
+            display_name: "Kimi / Moonshot",
+            path: home.join(".kimi"),
+        });
+        candidates.push(CandidateSource {
+            provider_id: "kimi",
+            parser_id: "generic_jsonl",
+            display_name: "Kimi / Moonshot",
+            path: home.join(".moonshot"),
         });
     }
     candidates
@@ -2081,14 +2144,17 @@ fn parse_codex_value(
     if known == 0 && unknown == 0 {
         return None;
     }
+    let detected_provider = str_field(value, &["provider", "provider_id", "providerId", "source", "source_type", "sourceType", "app", "client"])
+        .or_else(|| str_field(usage, &["provider", "provider_id", "providerId", "source"]));
     Some(ParsedEvent {
-        provider_id: source.provider_id.clone(),
+        provider_id: detected_provider.unwrap_or_else(|| source.provider_id.clone()),
         product_id: None,
         timestamp: str_field(value, &["timestamp"]).unwrap_or_else(now),
         project_path: context
             .cwd
             .clone()
-            .or_else(|| infer_project_from_path(path)),
+            .or_else(|| infer_project_from_path(path))
+            .or_else(|| path.file_stem().and_then(|s| s.to_str()).map(|s| s.to_string())),
         conversation_id: context.session_id.clone(),
         message_id: str_field(value, &["id"]),
         request_id: None,
@@ -2145,7 +2211,13 @@ fn parse_value(
     source_offset: Option<i64>,
     raw: &str,
 ) -> Option<ParsedEvent> {
-    let usage = value.get("usage").unwrap_or(value);
+    // Look for usage in various nested locations
+    let usage = value.get("usage")
+        .or_else(|| value.get("token_usage"))
+        .or_else(|| value.get("api_usage"))
+        .or_else(|| value.get("tokens"))
+        .or_else(|| value.get("usage_stats"))
+        .unwrap_or(value);
     let input = int_field(
         usage,
         &[
@@ -2194,12 +2266,12 @@ fn parse_value(
     }
     let timestamp = str_field(
         value,
-        &["timestamp", "created_at", "createdAt", "time", "date"],
+        &["timestamp", "created_at", "createdAt", "time", "date", "start_time", "startTime", "started_at", "startedAt", "end_time", "endTime", "ended_at", "endedAt"],
     )
-    .or_else(|| str_field(usage, &["timestamp", "created_at"]))
+    .or_else(|| str_field(usage, &["timestamp", "created_at", "createdAt", "start_time", "startTime"]))
     .unwrap_or_else(now);
-    let model = str_field(value, &["model", "model_name", "modelName"])
-        .or_else(|| str_field(usage, &["model"]));
+    let model = str_field(value, &["model", "model_name", "modelName", "model_id", "modelId", "model_version", "modelVersion"])
+        .or_else(|| str_field(usage, &["model", "model_id", "modelId"]));
     let project_path = str_field(
         value,
         &[
@@ -2208,6 +2280,14 @@ fn parse_value(
             "workingDirectory",
             "project_path",
             "projectPath",
+            "work_dir",
+            "workDir",
+            "directory",
+            "dir",
+            "folder",
+            "workspace",
+            "workspace_path",
+            "workspacePath",
         ],
     )
     .or_else(|| infer_project_from_path(path));
