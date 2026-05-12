@@ -678,6 +678,8 @@ fn login_sync(state: State<AppState>, input: LoginInput) -> Result<SyncStatus, S
         params![input.server_url, token, username, device_name, now],
     )
     .map_err(to_string)?;
+    let _ = pull_pricing_from_server(&conn);
+    recalculate_event_costs(&conn).map_err(to_string)?;
 
     get_sync_config(&conn)
 }
@@ -721,13 +723,19 @@ fn get_sync_status(state: State<AppState>) -> Result<SyncStatus, String> {
 #[tauri::command]
 fn sync_now(state: State<AppState>) -> Result<SyncResult, String> {
     let conn = state.db.lock().map_err(to_string)?;
-    perform_sync(&conn, false)
+    let result = perform_sync(&conn, false)?;
+    let _ = pull_pricing_from_server(&conn);
+    recalculate_event_costs(&conn).map_err(to_string)?;
+    Ok(result)
 }
 
 #[tauri::command]
 fn full_resync(state: State<AppState>) -> Result<SyncResult, String> {
     let conn = state.db.lock().map_err(to_string)?;
-    perform_sync(&conn, true)
+    let result = perform_sync(&conn, true)?;
+    let _ = pull_pricing_from_server(&conn);
+    recalculate_event_costs(&conn).map_err(to_string)?;
+    Ok(result)
 }
 
 fn perform_sync(conn: &Connection, force_all: bool) -> Result<SyncResult, String> {
@@ -1018,6 +1026,107 @@ fn sync_subscriptions(
         .get("synced")
         .and_then(|value| value.as_u64())
         .unwrap_or(subscription_count as u64) as usize)
+}
+
+fn pull_pricing_from_server(conn: &Connection) -> Result<usize, String> {
+    ensure_sync_config(conn)?;
+    let (token, server_url): (String, String) = conn
+        .query_row(
+            "SELECT auth_token, server_url FROM sync_config WHERE id = 1",
+            [],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+        )
+        .map_err(|_| "Not logged in. Please log in first.".to_string())?;
+
+    let base_url = server_url.trim_end_matches('/');
+    let client = reqwest::blocking::Client::new();
+    let data: Value = client
+        .get(format!("{}/api/v1/sync/settings", base_url))
+        .header("Authorization", format!("Bearer {}", token))
+        .header("Accept", "application/json")
+        .send()
+        .map_err(|e| format!("Pricing pull request failed: {}", e))?
+        .json()
+        .map_err(|e| format!("Invalid pricing pull response: {}", e))?;
+
+    let prices = data
+        .get("model_prices")
+        .and_then(Value::as_array)
+        .ok_or("Missing model_prices in sync settings response".to_string())?;
+
+    let mut pulled = 0usize;
+    let now_ts = now();
+    for item in prices {
+        let provider_id = item.get("provider_id").and_then(Value::as_str).unwrap_or("");
+        let model = item.get("model").and_then(Value::as_str).unwrap_or("");
+        if provider_id.is_empty() || model.is_empty() {
+            continue;
+        }
+
+        let aliases_json = match item.get("aliases_json") {
+            Some(Value::String(s)) => s.clone(),
+            Some(Value::Array(arr)) => serde_json::to_string(arr).unwrap_or_else(|_| "[]".to_string()),
+            _ => "[]".to_string(),
+        };
+        let source_url = item.get("source_url").and_then(Value::as_str);
+        let input = item.get("input_per_1m").and_then(Value::as_f64);
+        let output = item.get("output_per_1m").and_then(Value::as_f64);
+        let cached = item.get("cached_input_per_1m").and_then(Value::as_f64);
+        let cache_write = item.get("cache_write_per_1m").and_then(Value::as_f64);
+        let cache_read = item.get("cache_read_per_1m").and_then(Value::as_f64);
+        let reasoning = item.get("reasoning_per_1m").and_then(Value::as_f64);
+        let tool = item.get("tool_per_1m").and_then(Value::as_f64);
+        let catalog_version = item
+            .get("catalog_version")
+            .and_then(Value::as_str)
+            .unwrap_or("server-sync");
+        let effective_from = item
+            .get("effective_from")
+            .and_then(Value::as_str)
+            .unwrap_or("2026-01-01");
+        let id = format!("{}:{}", provider_id, model.to_ascii_lowercase());
+
+        conn.execute(
+            "INSERT INTO pricing_catalogs
+             (id, provider_id, model, aliases_json, source_url, catalog_version, effective_from,
+              input_per_1m, output_per_1m, cached_input_per_1m, cache_write_per_1m, cache_read_per_1m,
+              reasoning_per_1m, tool_per_1m, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?15)
+             ON CONFLICT(id) DO UPDATE SET
+               aliases_json = CASE WHEN pricing_catalogs.user_override = 0 THEN excluded.aliases_json ELSE pricing_catalogs.aliases_json END,
+               source_url = CASE WHEN pricing_catalogs.user_override = 0 THEN excluded.source_url ELSE pricing_catalogs.source_url END,
+               input_per_1m = CASE WHEN pricing_catalogs.user_override = 0 THEN excluded.input_per_1m ELSE pricing_catalogs.input_per_1m END,
+               output_per_1m = CASE WHEN pricing_catalogs.user_override = 0 THEN excluded.output_per_1m ELSE pricing_catalogs.output_per_1m END,
+               cached_input_per_1m = CASE WHEN pricing_catalogs.user_override = 0 THEN excluded.cached_input_per_1m ELSE pricing_catalogs.cached_input_per_1m END,
+               cache_write_per_1m = CASE WHEN pricing_catalogs.user_override = 0 THEN excluded.cache_write_per_1m ELSE pricing_catalogs.cache_write_per_1m END,
+               cache_read_per_1m = CASE WHEN pricing_catalogs.user_override = 0 THEN excluded.cache_read_per_1m ELSE pricing_catalogs.cache_read_per_1m END,
+               reasoning_per_1m = CASE WHEN pricing_catalogs.user_override = 0 THEN excluded.reasoning_per_1m ELSE pricing_catalogs.reasoning_per_1m END,
+               tool_per_1m = CASE WHEN pricing_catalogs.user_override = 0 THEN excluded.tool_per_1m ELSE pricing_catalogs.tool_per_1m END,
+               catalog_version = CASE WHEN pricing_catalogs.user_override = 0 THEN excluded.catalog_version ELSE pricing_catalogs.catalog_version END,
+               effective_from = CASE WHEN pricing_catalogs.user_override = 0 THEN excluded.effective_from ELSE pricing_catalogs.effective_from END,
+               updated_at = excluded.updated_at",
+            params![
+                id,
+                provider_id,
+                model,
+                aliases_json,
+                source_url,
+                catalog_version,
+                effective_from,
+                input,
+                output,
+                cached,
+                cache_write,
+                cache_read,
+                reasoning,
+                tool,
+                now_ts
+            ],
+        )
+        .map_err(to_string)?;
+        pulled += 1;
+    }
+    Ok(pulled)
 }
 
 fn add_column_if_missing(
