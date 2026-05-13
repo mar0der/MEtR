@@ -12,9 +12,8 @@ use tauri::{Manager, State};
 use uuid::Uuid;
 use walkdir::WalkDir;
 
-const MAX_SCAN_FILES_PER_SOURCE: usize = 2_000;
-const MAX_FILE_BYTES: u64 = 20 * 1024 * 1024;
-const PARSER_VERSION: &str = "0.1.1";
+const MAX_SCAN_FILES_PER_SOURCE: usize = 50_000;
+const PARSER_VERSION: &str = "0.1.2";
 
 struct AppState {
     db: Mutex<Connection>,
@@ -1829,8 +1828,6 @@ fn scan_source(conn: &Connection, source: &Source, full_scan: bool) -> Result<us
     let mut imported = 0usize;
     let mut scanned_files = 0usize;
     let mut skipped_unchanged = 0usize;
-    let mut skipped_large = 0usize;
-    let mut streamed_large = 0usize;
     let mut skipped_after_limit = false;
     for entry in WalkDir::new(&root)
         .max_depth(8)
@@ -1860,20 +1857,6 @@ fn scan_source(conn: &Connection, source: &Source, full_scan: bool) -> Result<us
             skipped_unchanged += 1;
             continue;
         }
-        let is_large = metadata.len() > MAX_FILE_BYTES;
-        if is_large && source.parser_id != "codex" {
-            skipped_large += 1;
-            upsert_indexed_file(
-                conn,
-                source,
-                entry.path(),
-                metadata.len(),
-                &modified,
-                "skipped_large",
-                Some("Skipped because file is over 20 MB and this parser cannot stream it."),
-            )?;
-            continue;
-        }
         scanned_files += 1;
         let source_hash = hash(&format!(
             "{}|{}|{}",
@@ -1881,8 +1864,7 @@ fn scan_source(conn: &Connection, source: &Source, full_scan: bool) -> Result<us
             metadata.len(),
             modified
         ));
-        let events = if is_large {
-            streamed_large += 1;
+        let events = if source.parser_id == "codex" && metadata.len() > 100 * 1024 * 1024 {
             match parse_file_streaming(source, entry.path()) {
                 Ok(events) => events,
                 Err(_) => continue,
@@ -1914,7 +1896,7 @@ fn scan_source(conn: &Connection, source: &Source, full_scan: bool) -> Result<us
         params![
             now(),
             format!(
-                "{} {scanned_files} file(s), imported {imported} new events{}{}{}{}.",
+                "{} {scanned_files} file(s), imported {imported} new events{}{}.",
                 if full_scan {
                     "Full scanned"
                 } else {
@@ -1925,16 +1907,7 @@ fn scan_source(conn: &Connection, source: &Source, full_scan: bool) -> Result<us
                 } else {
                     String::new()
                 },
-                if skipped_large > 0 {
-                    format!(", skipped {skipped_large} files over 20 MB")
-                } else {
-                    String::new()
-                },
-                if streamed_large > 0 {
-                    format!(", streamed {streamed_large} large Codex files")
-                } else {
-                    String::new()
-                },
+
                 if skipped_after_limit {
                     format!(", stopped at the {MAX_SCAN_FILES_PER_SOURCE} file safety limit")
                 } else {
@@ -2530,7 +2503,31 @@ fn row_to_pricing(row: &rusqlite::Row<'_>) -> rusqlite::Result<Pricing> {
 
 fn calculate_cost(event: &ParsedEvent, pricing: &Pricing) -> f64 {
     let million = 1_000_000.0;
-    (event.input_tokens as f64 / million) * pricing.input_per_1m.unwrap_or(0.0)
+
+    // Provider-specific token counting semantics:
+    //
+    // Anthropic / Claude:
+    //   - input_tokens = ONLY uncached/new tokens (disjoint from cache)
+    //   - cache_read_input_tokens and cache_creation_input_tokens are separate
+    //   → NO subtraction needed
+    //
+    // OpenAI, Kimi/Moonshot, Gemini, DeepSeek, and most OpenAI-compatible APIs:
+    //   - prompt_tokens / input_tokens = TOTAL including cached subset
+    //   - cached_tokens / cachedContentTokenCount = subset of input
+    //   → MUST subtract cached from input to avoid double-counting
+    //
+    // Heuristic: if we see Anthropic-style cache_read/cache_write fields,
+    // assume input is already uncached. Otherwise, if cached_input_tokens > 0,
+    // subtract it from input_tokens.
+    let has_anthropic_style_cache =
+        event.cache_read_tokens > 0 || event.cache_write_tokens > 0;
+    let effective_input = if !has_anthropic_style_cache && event.cached_input_tokens > 0 {
+        (event.input_tokens - event.cached_input_tokens).max(0)
+    } else {
+        event.input_tokens
+    };
+
+    (effective_input as f64 / million) * pricing.input_per_1m.unwrap_or(0.0)
         + (event.output_tokens as f64 / million) * pricing.output_per_1m.unwrap_or(0.0)
         + (event.cached_input_tokens as f64 / million)
             * pricing
