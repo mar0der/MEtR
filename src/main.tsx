@@ -207,7 +207,7 @@ function App() {
   const fetchSessions = async (page: number, provider?: string) => {
     try {
       const result = await api<PaginatedSessions>("get_recent_sessions", {
-        providerId: provider || null,
+        provider_id: provider || null,
         offset: (page - 1) * SESSIONS_PER_PAGE,
         limit: SESSIONS_PER_PAGE,
       });
