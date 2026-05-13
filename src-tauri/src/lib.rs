@@ -13,7 +13,7 @@ use uuid::Uuid;
 use walkdir::WalkDir;
 
 const MAX_SCAN_FILES_PER_SOURCE: usize = 50_000;
-const PARSER_VERSION: &str = "0.1.3";
+const PARSER_VERSION: &str = "0.1.4";
 
 struct AppState {
     db: Mutex<Connection>,
@@ -2152,7 +2152,17 @@ fn update_generic_context(source: &Source, context: &mut GenericParseContext, va
     }
     if source.provider_id == "kimi" {
         if let Some(next_cwd) = infer_project_from_value(value) {
-            context.cwd = Some(next_cwd);
+            let root = project_root_from_path(Path::new(&next_cwd));
+            if let Some(root) = root {
+                // Only update if we don't already have a valid root, or if the new root
+                // is different and also valid (has markers). Avoid overwriting a good
+                // project root with a system path or shallow directory.
+                let has_markers = find_project_root_by_markers(Path::new(&root)).is_some();
+                let current_has_markers = context.cwd.as_ref().and_then(|c| find_project_root_by_markers(Path::new(c))).is_some();
+                if context.cwd.is_none() || (has_markers && !current_has_markers) {
+                    context.cwd = Some(root);
+                }
+            }
         }
     }
 }
@@ -2362,6 +2372,7 @@ fn parse_value(
     .or_else(|| {
         if source.provider_id == "kimi" {
             infer_project_from_value(value)
+                .and_then(|p| project_root_from_path(Path::new(&p)))
         } else {
             None
         }
@@ -2848,7 +2859,62 @@ fn infer_project_from_path(path: &Path) -> Option<String> {
         .map(|s| s.to_string())
 }
 
+fn find_project_root_by_markers(start_path: &Path) -> Option<String> {
+    const MARKERS: &[&str] = &[
+        ".git",
+        "package.json",
+        "Cargo.toml",
+        "pyproject.toml",
+        "composer.json",
+        "go.mod",
+        "pom.xml",
+        "build.gradle",
+        "tsconfig.json",
+    ];
+    let mut current = Some(start_path);
+    while let Some(dir) = current {
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                if let Ok(meta) = entry.metadata() {
+                    if meta.is_file() {
+                        if let Some(name) = entry.file_name().to_str() {
+                            if MARKERS.contains(&name) {
+                                return dir.to_str().map(|s| s.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        current = dir.parent();
+    }
+    None
+}
+
+fn is_dot_tool_dir(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        ".nvm" | ".cargo" | ".rustup" | ".npm" | ".yarn" | ".pnpm" | ".composer" | ".gem" | ".rbenv" | ".pyenv" | ".venv" | ".virtualenvs" | ".local" | ".config" | ".cache" | ".docker" | ".kube" | ".aws" | ".ssh" | ".gnupg" | ".m2" | ".gradle" | ".android" | ".cocoapods" | ".fastlane" | ".homebrew" | ".oh-my-zsh" | ".tldr" | ".tmux" | ".vim" | ".nvim" | ".emacs.d" | ".vscode" | ".cursor"
+    )
+}
+
 fn project_root_from_path(path: &Path) -> Option<String> {
+    // Reject paths that contain spaces (usually shell command fragments)
+    if path.to_string_lossy().contains(' ') {
+        return None;
+    }
+    // First: try marker-based detection for true project root
+    if let Some(root) = find_project_root_by_markers(path) {
+        let root_path = Path::new(&root);
+        // Reject dot-tool directories like ~/.nvm
+        if let Some(file_name) = root_path.file_name().and_then(|s| s.to_str()) {
+            if is_dot_tool_dir(file_name) {
+                return None;
+            }
+        }
+        return Some(root);
+    }
+    // Fallback to heuristic path component analysis
     let parts: Vec<_> = path
         .components()
         .map(|c| c.as_os_str().to_string_lossy().to_string())
@@ -2876,7 +2942,7 @@ fn project_root_from_path(path: &Path) -> Option<String> {
     }
     if parts.len() >= 4 && parts[1] == "Users" {
         let first = &parts[3];
-        if !first.starts_with('.') && first != "Library" && first != "Downloads" {
+        if !first.starts_with('.') && first != "Library" && first != "Downloads" && !is_dot_tool_dir(first) {
             return Some(join_path_parts(&parts[..=3]));
         }
     }
@@ -2931,16 +2997,17 @@ fn absolute_paths_in_text(text: &str) -> Vec<String> {
         for (index, ch) in text[absolute_start..].char_indices() {
             if matches!(
                 ch,
-                '"' | '\'' | '\n' | '\r' | '\t' | '<' | '>' | '[' | ']' | '{' | '}'
+                '"' | '\'' | '\n' | '\r' | '\t' | '<' | '>' | '[' | ']' | '{' | '}' | '&' | '|' | ';' | '(' | '`' | '\\' | ' '
             ) {
                 absolute_end = absolute_start + index;
                 break;
             }
         }
         let path = text[absolute_start..absolute_end]
-            .trim_end_matches(|c: char| matches!(c, ',' | ':' | ';' | ')' | '.'))
+            .trim_end_matches(|c: char| matches!(c, ',' | ':' | ';' | ')' | '.' | '`' | '\\'))
+            .trim()
             .to_string();
-        if !path.is_empty() {
+        if !path.is_empty() && !path.contains("&&") && !path.contains("||") && !path.contains(" -name ") {
             paths.push(path);
         }
         start = absolute_end.saturating_add(1);
