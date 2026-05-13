@@ -13,7 +13,8 @@ import {
   ShieldCheck,
   Trash2,
   WalletCards,
-  Download
+  Download,
+  AlertCircle
 } from "lucide-react";
 import "./styles.css";
 import { checkForUpdates } from "./updater";
@@ -254,8 +255,15 @@ function App() {
   };
 
   useEffect(() => {
-    refresh();
+    // Defer initial data load so the UI renders first (prevents white screen on slow DB ops)
+    const initTimer = window.setTimeout(() => {
+      refresh().catch((err) => {
+        console.error("[MEtR] Initial refresh failed:", err);
+        setStatus("Failed to load data. Try restarting the app.");
+      });
+    }, 100);
     getVersion().then((v) => setAppVersion(v)).catch(() => setAppVersion(""));
+    return () => clearTimeout(initTimer);
   }, []);
 
   useEffect(() => {
@@ -282,8 +290,8 @@ function App() {
 
   const providerTabs = useMemo(() => {
     const ids = new Set<string>();
-    summary.providers.forEach((p) => ids.add(p.provider_id));
-    sources.forEach((s) => ids.add(s.provider_id));
+    (summary.providers || []).forEach((p) => ids.add(p.provider_id));
+    (sources || []).forEach((s) => ids.add(s.provider_id));
     return Array.from(ids).map((id) => ({
       id,
       label: summary.providers.find((p) => p.provider_id === id)?.display_name ?? id
@@ -565,57 +573,61 @@ function App() {
       </div>
 
       {activeTab === "settings" ? (
-        <SettingsView
-          sources={sources}
-          detected={detected}
-          subscriptions={subscriptions}
-          pricing={pricing}
-          missingModels={missingModels}
-          manualPath={manualPath}
-          setManualPath={setManualPath}
-          subForm={subForm}
-          setSubForm={setSubForm}
-          newPriceForm={newPriceForm}
-          setNewPriceForm={setNewPriceForm}
-          runDetection={runDetection}
-          addDetected={addDetected}
-          addManual={addManual}
-          addSubscription={addSubscription}
-          deleteSubscription={async (id) => {
-            await api("delete_subscription", { id });
-            await refresh();
-          }}
-          removeSource={async (source_id) => {
-            await api("remove_source", { sourceId: source_id });
-            await refresh();
-          }}
-          syncStatus={syncStatus}
-          syncForm={syncForm}
-          setSyncForm={setSyncForm}
-          syncLoading={syncLoading}
-          pricingLoading={pricingLoading}
-          onLogin={doLogin}
-          onLogout={doLogout}
-          onSync={doSync}
-          onFullResync={doFullResync}
-          onPullPricing={doPullPricing}
-          onPushPricing={doPushPricing}
-          onAddLocalPricing={addLocalPricing}
-          onClearAllData={clearAllData}
-        />
+        <ErrorBoundary fallback={<ErrorView />}>
+          <SettingsView
+            sources={sources}
+            detected={detected}
+            subscriptions={subscriptions}
+            pricing={pricing}
+            missingModels={missingModels}
+            manualPath={manualPath}
+            setManualPath={setManualPath}
+            subForm={subForm}
+            setSubForm={setSubForm}
+            newPriceForm={newPriceForm}
+            setNewPriceForm={setNewPriceForm}
+            runDetection={runDetection}
+            addDetected={addDetected}
+            addManual={addManual}
+            addSubscription={addSubscription}
+            deleteSubscription={async (id) => {
+              await api("delete_subscription", { id });
+              await refresh();
+            }}
+            removeSource={async (source_id) => {
+              await api("remove_source", { sourceId: source_id });
+              await refresh();
+            }}
+            syncStatus={syncStatus}
+            syncForm={syncForm}
+            setSyncForm={setSyncForm}
+            syncLoading={syncLoading}
+            pricingLoading={pricingLoading}
+            onLogin={doLogin}
+            onLogout={doLogout}
+            onSync={doSync}
+            onFullResync={doFullResync}
+            onPullPricing={doPullPricing}
+            onPushPricing={doPushPricing}
+            onAddLocalPricing={addLocalPricing}
+            onClearAllData={clearAllData}
+          />
+        </ErrorBoundary>
       ) : (
-        <DashboardView
-          summary={summary}
-          provider={activeProvider}
-          projects={filteredProjects}
-          sessions={paginatedSessions.sessions}
-          totalSessionCount={paginatedSessions.total_count}
-          sessionPage={sessionPage}
-          sessionsPerPage={SESSIONS_PER_PAGE}
-          onPageChange={setSessionPage}
-          empty={sources.length === 0 && summary.totals.total_tokens === 0}
-          goSettings={() => setActiveTab("settings")}
-        />
+        <ErrorBoundary fallback={<ErrorView />}>
+          <DashboardView
+            summary={summary}
+            provider={activeProvider}
+            projects={filteredProjects}
+            sessions={paginatedSessions.sessions}
+            totalSessionCount={paginatedSessions.total_count}
+            sessionPage={sessionPage}
+            sessionsPerPage={SESSIONS_PER_PAGE}
+            onPageChange={setSessionPage}
+            empty={(sources || []).length === 0 && (summary?.totals?.total_tokens || 0) === 0}
+            goSettings={() => setActiveTab("settings")}
+          />
+        </ErrorBoundary>
       )}
     </main>
   );
@@ -1116,6 +1128,38 @@ function SettingsView(props: {
   );
 }
 
+class ErrorBoundary extends React.Component<{ children: React.ReactNode; fallback: React.ReactNode }, { hasError: boolean }> {
+  constructor(props: { children: React.ReactNode; fallback: React.ReactNode }) {
+    super(props);
+    this.state = { hasError: false };
+  }
+  static getDerivedStateFromError() {
+    return { hasError: true };
+  }
+  componentDidCatch(error: unknown, info: React.ErrorInfo) {
+    console.error("[MEtR] Render error:", error, info);
+  }
+  render() {
+    if (this.state.hasError) {
+      return this.props.fallback;
+    }
+    return this.props.children;
+  }
+}
+
+function ErrorView() {
+  return (
+    <section className="empty-state" style={{ minHeight: "auto", padding: 40 }}>
+      <AlertCircle size={42} color="#ef4444" />
+      <h2>Something went wrong</h2>
+      <p>The app encountered an error while rendering. Try restarting MEtR.</p>
+      <button className="primary-button" onClick={() => window.location.reload()}>
+        Reload App
+      </button>
+    </section>
+  );
+}
+
 function Metric({ label, value, detail }: { label: string; value: string; detail: string }) {
   return (
     <div className="metric">
@@ -1127,13 +1171,14 @@ function Metric({ label, value, detail }: { label: string; value: string; detail
 }
 
 function TokenBars({ totals }: { totals: UsageTotals }) {
-  const effectiveInput = Math.max(0, totals.input_tokens - totals.cached_input_tokens);
+  const safe = totals || emptyTotals();
+  const effectiveInput = Math.max(0, safe.input_tokens - safe.cached_input_tokens);
   const rows = [
     ["Input", effectiveInput],
-    ["Output", totals.output_tokens],
-    ["Cached", totals.cached_input_tokens + totals.cache_read_tokens + totals.cache_write_tokens],
-    ["Reasoning/tool", totals.reasoning_tokens + totals.tool_tokens],
-    ["Unknown", totals.unknown_tokens]
+    ["Output", safe.output_tokens],
+    ["Cached", safe.cached_input_tokens + safe.cache_read_tokens + safe.cache_write_tokens],
+    ["Reasoning/tool", safe.reasoning_tokens + safe.tool_tokens],
+    ["Unknown", safe.unknown_tokens]
   ] as const;
   const max = Math.max(...rows.map(([, value]) => value), 1);
   return (
@@ -1234,9 +1279,10 @@ function folderHint(path: string | null) {
 }
 
 function tokenMix(totals: UsageTotals) {
-  const effectiveInput = Math.max(0, totals.input_tokens - totals.cached_input_tokens);
-  const cached = totals.cached_input_tokens + totals.cache_read_tokens + totals.cache_write_tokens;
-  return `In ${compact(effectiveInput)}  Out ${compact(totals.output_tokens)}  Cached ${compact(cached)}`;
+  const safe = totals || emptyTotals();
+  const effectiveInput = Math.max(0, safe.input_tokens - safe.cached_input_tokens);
+  const cached = safe.cached_input_tokens + safe.cache_read_tokens + safe.cache_write_tokens;
+  return `In ${compact(effectiveInput)}  Out ${compact(safe.output_tokens)}  Cached ${compact(cached)}`;
 }
 
 function durationLabel(firstSeen: string | null, lastSeen: string | null) {
