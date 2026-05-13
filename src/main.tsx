@@ -204,6 +204,12 @@ function App() {
   const [sessionPage, setSessionPage] = useState(1);
   const SESSIONS_PER_PAGE = 50;
 
+  // Refs to avoid stale closures in setInterval
+  const activeTabRef = React.useRef(activeTab);
+  const sessionPageRef = React.useRef(sessionPage);
+  activeTabRef.current = activeTab;
+  sessionPageRef.current = sessionPage;
+
   const fetchSessions = async (page: number, provider?: string) => {
     try {
       const result = await api<PaginatedSessions>("get_recent_sessions", {
@@ -237,7 +243,7 @@ function App() {
       if (nextSync.logged_in && nextSync.server_url) {
         setSyncForm((s) => ({ ...s, server_url: nextSync.server_url }));
       }
-      await fetchSessions(sessionPage, activeTab === "all" || activeTab === "settings" ? undefined : activeTab);
+      await fetchSessions(sessionPageRef.current, activeTabRef.current === "all" || activeTabRef.current === "settings" ? undefined : activeTabRef.current);
       setStatus("Data refreshed");
     } catch (error) {
       setStatus(message(error));
