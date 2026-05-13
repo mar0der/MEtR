@@ -20,8 +20,8 @@
             <div style="font-size:36px; margin-bottom:8px;">🍎</div>
             <h3 style="margin:0 0 6px;">macOS</h3>
             <p class="muted" style="font-size:13px; margin:0 0 14px;">Apple Silicon (M1/M2/M3/M4)</p>
-            @if(isset($assets['darwin-aarch64']))
-                <a class="btn" href="/updates/{{ $assets['darwin-aarch64']->filename }}">
+            @if(isset($assets['darwin-aarch64-installer']))
+                <a class="btn" href="/updates/{{ $assets['darwin-aarch64-installer']->filename }}">
                     Download DMG
                 </a>
             @else

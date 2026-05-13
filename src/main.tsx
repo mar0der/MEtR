@@ -65,6 +65,10 @@ type SessionSummary = {
   output_tokens: number;
   cached_tokens: number;
   total_tokens: number;
+  input_cost: number | null;
+  output_cost: number | null;
+  cached_cost: number | null;
+  other_cost: number | null;
   api_equivalent_cost: number | null;
   confidence: string;
 };
@@ -243,8 +247,8 @@ function App() {
     }
   };
 
-  const refresh = async () => {
-    setLoading(true);
+  const refresh = async (showBusy = true) => {
+    if (showBusy) setLoading(true);
     try {
       const [nextSummary, nextSources, nextSubs, nextPricing, nextMissing, nextSync] = await Promise.all([
         api<DashboardSummary>("get_dashboard_summary"),
@@ -268,14 +272,14 @@ function App() {
     } catch (error) {
       setStatus(message(error));
     } finally {
-      setLoading(false);
+      if (showBusy) setLoading(false);
     }
   };
 
   useEffect(() => {
     // Defer initial data load so the UI renders first (prevents white screen on slow DB ops)
     const initTimer = window.setTimeout(() => {
-      refresh().catch((err) => {
+      refresh(false).catch((err) => {
         console.error("[MEtR] Initial refresh failed:", err);
         setStatus("Failed to load data. Try restarting the app.");
       });
@@ -286,12 +290,12 @@ function App() {
 
   useEffect(() => {
     const refreshId = window.setInterval(() => {
-      void refresh();
+      void refresh(false);
     }, 30_000);
     const rescanId = window.setInterval(async () => {
       try {
         await api("rescan_all");
-        await refresh();
+        await refresh(false);
       } catch {
         // Keep background polling quiet in the UI; manual controls still show status.
       }
@@ -362,14 +366,14 @@ function App() {
         display_name: source.display_name
       }
     });
-    await refresh();
+    await refresh(false);
   };
 
   const addManual = async () => {
     if (!manualPath.trim()) return;
     await api("add_source", { input: { path: manualPath.trim() } });
     setManualPath("");
-    await refresh();
+    await refresh(false);
   };
 
   const rescanAll = async () => {
@@ -378,7 +382,7 @@ function App() {
     try {
       const result = await api<{ imported: number }>("rescan_all");
       setStatus(`Scan complete. Imported ${result.imported} new event(s).`);
-      await refresh();
+      await refresh(false);
     } catch (error) {
       setStatus(message(error));
     } finally {
@@ -392,7 +396,7 @@ function App() {
     try {
       const result = await api<{ imported: number }>("rescan_all_full");
       setStatus(`Full rescan complete. Imported ${result.imported} new event(s).`);
-      await refresh();
+      await refresh(false);
     } catch (error) {
       setStatus(message(error));
     } finally {
@@ -411,7 +415,7 @@ function App() {
       setStatus("All data cleared. Run Full Rescan to rebuild from source files.");
       setPaginatedSessions({ sessions: [], total_count: 0 });
       setSessionPage(1);
-      await refresh();
+      await refresh(false);
     } catch (error) {
       setStatus(message(error));
     } finally {
@@ -429,7 +433,7 @@ function App() {
         billing_anchor_day: Number(subForm.billing_anchor_day)
       }
     });
-    await refresh();
+    await refresh(false);
   };
 
   const doLogin = async () => {
@@ -471,7 +475,7 @@ function App() {
       const result = await api<SyncResult>("sync_now");
       const warning = result.errors.length ? `, ${result.errors.length} warning(s)` : "";
       setStatus(`Synced ${result.uploaded} event(s), ${result.subscriptions_uploaded} subscription(s)${warning}`);
-      await refresh();
+      await refresh(false);
     } catch (error) {
       setStatus(message(error));
     } finally {
@@ -489,7 +493,7 @@ function App() {
       const result = await api<SyncResult>("full_resync");
       const warning = result.errors.length ? `, ${result.errors.length} warning(s)` : "";
       setStatus(`Full resync sent ${result.uploaded} event(s), ${result.subscriptions_uploaded} subscription(s)${warning}`);
-      await refresh();
+      await refresh(false);
     } catch (error) {
       setStatus(message(error));
     } finally {
@@ -503,7 +507,7 @@ function App() {
     try {
       const result = await api<{ pulled: number }>("pull_pricing");
       setStatus(`Pulled ${result.pulled} price(s) from server`);
-      await refresh();
+      await refresh(false);
     } catch (error) {
       setStatus(message(error));
     } finally {
@@ -545,7 +549,7 @@ function App() {
         delete next[key];
         return next;
       });
-      await refresh();
+      await refresh(false);
     } catch (error) {
       setStatus(message(error));
     } finally {
@@ -561,19 +565,19 @@ function App() {
           <p>Local LLM usage, subscriptions, and API-equivalent cost.</p>
         </div>
         <div className="actions">
-          <button className="icon-button" onClick={refresh} disabled={loading} title="Refresh">
-            <RefreshCw size={17} />
+          <button className="icon-button" onClick={() => void refresh(true)} disabled={loading} title="Refresh">
+            <RefreshCw size={17} className={loading ? "spin" : undefined} />
           </button>
           <button className="icon-button" onClick={() => void checkForUpdates(true)} disabled={loading} title="Check for Updates">
             <Download size={17} />
           </button>
           <button className="primary-button" onClick={rescanAll} disabled={loading}>
-            <Activity size={16} />
-            Scan New
+            <Activity size={16} className={loading ? "spin" : undefined} />
+            {loading ? "Working..." : "Scan New"}
           </button>
           <button className="secondary-button" onClick={fullRescanAll} disabled={loading}>
-            <Database size={16} />
-            Full Rescan
+            <Database size={16} className={loading ? "spin" : undefined} />
+            {loading ? "Updating..." : "Full Rescan"}
           </button>
         </div>
       </header>
@@ -594,7 +598,7 @@ function App() {
       </nav>
 
       <div className="status-line">
-        <span>{status}</span>
+        <span className="status-message">{loading ? <span className="spinner" /> : null}{status}</span>
         <span className="privacy">
           {syncStatus?.logged_in ? (
             <><Cloud size={14} /> Connected to {syncStatus.server_url.replace(/^https:\/\//, "")}</>
@@ -624,11 +628,11 @@ function App() {
             addSubscription={addSubscription}
             deleteSubscription={async (id) => {
               await api("delete_subscription", { id });
-              await refresh();
+              await refresh(false);
             }}
             removeSource={async (source_id) => {
               await api("remove_source", { sourceId: source_id });
-              await refresh();
+              await refresh(false);
             }}
             syncStatus={syncStatus}
             syncForm={syncForm}
@@ -721,14 +725,12 @@ function DashboardView({
   return (
     <>
       <section className="metric-grid">
+        <Metric label="Cached tokens" value={compact(cachedTotal(source.totals))} detail="Cache reads, writes, and cached input" />
+        <Metric label="Input tokens" value={compact(effectiveInputTotal(source.totals))} detail="Non-cached input" />
+        <Metric label="Output tokens" value={compact(source.totals.output_tokens)} detail="Generated tokens" />
+        <Metric label="Total tokens" value={compact(source.totals.total_tokens)} detail="Cached, input, output, and other" />
         <Metric label="API-equivalent usage" value={money(source.api)} detail="Priced local token usage" />
         <Metric label="Subscription paid" value={money(source.sub)} detail="Configured monthly amount" />
-        <Metric
-          label={source.savings >= 0 ? "Ahead vs API" : "Behind API"}
-          value={money(Math.abs(source.savings))}
-          detail={source.savings >= 0 ? "Subscription is winning" : "API would be cheaper so far"}
-        />
-        <Metric label="Total tokens" value={compact(source.totals.total_tokens)} detail="Input, output, cache, and unknown" />
       </section>
 
       <section className="split">
@@ -803,9 +805,9 @@ function DashboardView({
               <th>Project</th>
               <th>Type</th>
               <th>Model</th>
+              <th>Cached</th>
               <th>Input</th>
               <th>Output</th>
-              <th>Cached</th>
               <th>Total</th>
               <th>API Cost</th>
               <th>Confidence</th>
@@ -818,9 +820,9 @@ function DashboardView({
                 <td>{session.project_name ?? "—"}</td>
                 <td>{session.event_type ? <span className="pill info">{session.event_type}</span> : "—"}</td>
                 <td>{session.model ?? "—"}</td>
-                <td>{compact(session.effective_input_tokens)}</td>
-                <td>{compact(session.output_tokens)}</td>
-                <td>{compact(session.cached_tokens)}</td>
+                <td><TokenCell value={session.cached_tokens} cost={session.cached_cost} total={session.total_tokens} /></td>
+                <td><TokenCell value={session.effective_input_tokens} cost={session.input_cost} total={session.total_tokens} /></td>
+                <td><TokenCell value={session.output_tokens} cost={session.output_cost} total={session.total_tokens} /></td>
                 <td>{compact(session.total_tokens)}</td>
                 <td>{session.api_equivalent_cost == null ? "—" : money(session.api_equivalent_cost)}</td>
                 <td><span className={`pill ${session.confidence}`}>{session.confidence}</span></td>
@@ -828,6 +830,19 @@ function DashboardView({
             ))}
             {sessions.length === 0 && <EmptyRow colSpan={10} text="No sessions indexed yet." />}
           </tbody>
+          {sessions.length > 0 && (
+            <tfoot>
+              <tr>
+                <td colSpan={4}>Visible page total</td>
+                <td><TokenCell value={sumSessions(sessions, "cached_tokens")} cost={sumNullable(sessions, "cached_cost")} total={sumSessions(sessions, "total_tokens")} /></td>
+                <td><TokenCell value={sumSessions(sessions, "effective_input_tokens")} cost={sumNullable(sessions, "input_cost")} total={sumSessions(sessions, "total_tokens")} /></td>
+                <td><TokenCell value={sumSessions(sessions, "output_tokens")} cost={sumNullable(sessions, "output_cost")} total={sumSessions(sessions, "total_tokens")} /></td>
+                <td>{compact(sumSessions(sessions, "total_tokens"))}</td>
+                <td>{money(sessions.reduce((sum, s) => sum + (s.api_equivalent_cost ?? 0), 0))}</td>
+                <td></td>
+              </tr>
+            </tfoot>
+          )}
         </table>
         {totalSessionCount > sessionsPerPage && (
           <div style={{ marginTop: 12, display: "flex", gap: 6, justifyContent: "center", alignItems: "center" }}>
@@ -1204,11 +1219,10 @@ function Metric({ label, value, detail }: { label: string; value: string; detail
 
 function TokenBars({ totals }: { totals: UsageTotals }) {
   const safe = totals || emptyTotals();
-  const effectiveInput = Math.max(0, safe.input_tokens - safe.cached_input_tokens);
   const rows = [
-    ["Input", effectiveInput],
+    ["Cached", cachedTotal(safe)],
+    ["Input", effectiveInputTotal(safe)],
     ["Output", safe.output_tokens],
-    ["Cached", safe.cached_input_tokens + safe.cache_read_tokens + safe.cache_write_tokens],
     ["Reasoning/tool", safe.reasoning_tokens + safe.tool_tokens],
     ["Unknown", safe.unknown_tokens]
   ] as const;
@@ -1223,6 +1237,16 @@ function TokenBars({ totals }: { totals: UsageTotals }) {
         </div>
       ))}
     </div>
+  );
+}
+
+function TokenCell({ value, cost, total }: { value: number; cost: number | null; total: number }) {
+  const pct = total > 0 ? value / total : 0;
+  return (
+    <span className="token-cell">
+      <strong>{compact(value)}</strong>
+      <small>{cost == null ? "—" : money(cost)} · {percentPrecise(pct)}</small>
+    </span>
   );
 }
 
@@ -1269,6 +1293,10 @@ function percent(value: number) {
   return new Intl.NumberFormat(undefined, { style: "percent", maximumFractionDigits: 0 }).format(value);
 }
 
+function percentPrecise(value: number) {
+  return new Intl.NumberFormat(undefined, { style: "percent", maximumFractionDigits: 1 }).format(value);
+}
+
 function date(value: string | null) {
   if (!value) return "Never";
   return new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(new Date(value));
@@ -1312,9 +1340,30 @@ function folderHint(path: string | null) {
 
 function tokenMix(totals: UsageTotals) {
   const safe = totals || emptyTotals();
-  const effectiveInput = Math.max(0, safe.input_tokens - safe.cached_input_tokens);
-  const cached = safe.cached_input_tokens + safe.cache_read_tokens + safe.cache_write_tokens;
-  return `In ${compact(effectiveInput)}  Out ${compact(safe.output_tokens)}  Cached ${compact(cached)}`;
+  return `Cached ${compact(cachedTotal(safe))}  In ${compact(effectiveInputTotal(safe))}  Out ${compact(safe.output_tokens)}`;
+}
+
+function effectiveInputTotal(totals: UsageTotals) {
+  return Math.max(0, totals.input_tokens - totals.cached_input_tokens);
+}
+
+function cachedTotal(totals: UsageTotals) {
+  return totals.cached_input_tokens + totals.cache_read_tokens + totals.cache_write_tokens;
+}
+
+function sumSessions(sessions: SessionSummary[], key: "cached_tokens" | "effective_input_tokens" | "output_tokens" | "total_tokens") {
+  return sessions.reduce((sum, session) => sum + session[key], 0);
+}
+
+function sumNullable(sessions: SessionSummary[], key: "cached_cost" | "input_cost" | "output_cost" | "other_cost") {
+  let hasAny = false;
+  const total = sessions.reduce((sum, session) => {
+    const value = session[key];
+    if (value == null) return sum;
+    hasAny = true;
+    return sum + value;
+  }, 0);
+  return hasAny ? total : null;
 }
 
 function durationLabel(firstSeen: string | null, lastSeen: string | null) {

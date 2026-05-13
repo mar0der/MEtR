@@ -49,7 +49,7 @@ class DashboardTest extends TestCase
         ]);
 
         $this->actingAs($user)
-            ->get('/dashboard')
+            ->get('/dashboard?tab=all')
             ->assertOk()
             ->assertSee('$0.00')
             ->assertSee('By Device')
@@ -60,5 +60,59 @@ class DashboardTest extends TestCase
             ->assertSee('OpenAI Personal')
             ->assertSee('By Model')
             ->assertSee('openai / gpt-5.3-codex');
+    }
+
+    public function test_dashboard_provider_filter_limits_events_and_summaries(): void
+    {
+        $user = User::factory()->create();
+        Provider::factory()->create(['id' => 'openai', 'display_name' => 'OpenAI']);
+        Provider::factory()->create(['id' => 'anthropic', 'display_name' => 'Claude']);
+        $device = Device::factory()->create(['user_id' => $user->id]);
+
+        $openaiProject = Project::factory()->create([
+            'user_id' => $user->id,
+            'canonical_name' => 'OpenAI Project',
+            'slug' => 'openai-project',
+        ]);
+        $claudeProject = Project::factory()->create([
+            'user_id' => $user->id,
+            'canonical_name' => 'Claude Project',
+            'slug' => 'claude-project',
+        ]);
+
+        UsageEvent::factory()->create([
+            'user_id' => $user->id,
+            'device_id' => $device->id,
+            'provider_id' => 'openai',
+            'project_id' => $openaiProject->id,
+            'model' => 'gpt-5.3-codex',
+            'input_tokens' => 100,
+            'output_tokens' => 50,
+        ]);
+        UsageEvent::factory()->create([
+            'user_id' => $user->id,
+            'device_id' => $device->id,
+            'provider_id' => 'anthropic',
+            'project_id' => $claudeProject->id,
+            'model' => 'claude-sonnet-4-5',
+            'input_tokens' => 200,
+            'output_tokens' => 75,
+        ]);
+
+        $this->actingAs($user)
+            ->get('/dashboard?tab=events&provider_id=anthropic')
+            ->assertOk()
+            ->assertSee('Claude Project')
+            ->assertSee('claude-sonnet-4-5')
+            ->assertDontSee('<td>OpenAI Project</td>', false)
+            ->assertDontSee('>gpt-5.3-codex</td>', false);
+
+        $this->actingAs($user)
+            ->get('/dashboard?tab=all&provider_id=anthropic')
+            ->assertOk()
+            ->assertSee('Claude Project')
+            ->assertSee('anthropic / claude-sonnet-4-5')
+            ->assertDontSee('<td>OpenAI Project</td>', false)
+            ->assertDontSee('openai / gpt-5.3-codex');
     }
 }
