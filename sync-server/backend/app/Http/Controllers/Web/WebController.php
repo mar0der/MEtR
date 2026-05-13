@@ -80,6 +80,7 @@ class WebController extends Controller
 
         $summary = (clone $query)->select([
             DB::raw('SUM(input_tokens) as input_tokens'),
+            DB::raw('SUM(input_tokens - cached_input_tokens) as effective_input_tokens'),
             DB::raw('SUM(output_tokens) as output_tokens'),
             DB::raw('SUM(cached_input_tokens) as cached_input_tokens'),
             DB::raw('SUM(cache_write_tokens) as cache_write_tokens'),
@@ -87,7 +88,7 @@ class WebController extends Controller
             DB::raw('SUM(reasoning_tokens) as reasoning_tokens'),
             DB::raw('SUM(tool_tokens) as tool_tokens'),
             DB::raw('SUM(unknown_tokens) as unknown_tokens'),
-            DB::raw('SUM(input_tokens + output_tokens + cached_input_tokens + cache_write_tokens + cache_read_tokens + reasoning_tokens + tool_tokens + unknown_tokens) as total_tokens'),
+            DB::raw('SUM(input_tokens + output_tokens + cache_write_tokens + cache_read_tokens + reasoning_tokens + tool_tokens + unknown_tokens) as total_tokens'),
             DB::raw('COUNT(*) as event_count'),
             DB::raw('SUM(CASE WHEN official_api_cost_usd IS NULL THEN 1 ELSE 0 END) as unpriced_count'),
             DB::raw('SUM(CASE WHEN provider_account_id IS NULL THEN 1 ELSE 0 END) as unattributed_count'),
@@ -97,11 +98,11 @@ class WebController extends Controller
         $byDevice = (clone $query)
             ->leftJoin('devices', 'devices.id', '=', 'usage_events.device_id')
             ->select([
-                'COALESCE(devices.alias, devices.display_name) as label',
+                DB::raw("COALESCE(devices.alias, devices.display_name) as label"),
                 'devices.platform as meta',
                 DB::raw('COUNT(*) as event_count'),
                 DB::raw('SUM(official_api_cost_usd) as total_cost'),
-                DB::raw('SUM(input_tokens + output_tokens + cached_input_tokens + cache_write_tokens + cache_read_tokens + reasoning_tokens + tool_tokens + unknown_tokens) as total_tokens'),
+                DB::raw('SUM(input_tokens + output_tokens + cache_write_tokens + cache_read_tokens + reasoning_tokens + tool_tokens + unknown_tokens) as total_tokens'),
             ])
             ->groupBy('devices.id', 'devices.alias', 'devices.display_name', 'devices.platform')
             ->orderByDesc('event_count')
@@ -114,7 +115,7 @@ class WebController extends Controller
                 DB::raw("COALESCE(projects.manual_name, projects.canonical_name, 'Unknown project') as label"),
                 DB::raw('COUNT(*) as event_count'),
                 DB::raw('SUM(official_api_cost_usd) as total_cost'),
-                DB::raw('SUM(input_tokens + output_tokens + cached_input_tokens + cache_write_tokens + cache_read_tokens + reasoning_tokens + tool_tokens + unknown_tokens) as total_tokens'),
+                DB::raw('SUM(input_tokens + output_tokens + cache_write_tokens + cache_read_tokens + reasoning_tokens + tool_tokens + unknown_tokens) as total_tokens'),
             ])
             ->groupBy('projects.manual_name', 'projects.canonical_name')
             ->orderByDesc('event_count')
@@ -128,7 +129,7 @@ class WebController extends Controller
                 'usage_events.provider_id',
                 DB::raw('COUNT(*) as event_count'),
                 DB::raw('SUM(official_api_cost_usd) as total_cost'),
-                DB::raw('SUM(input_tokens + output_tokens + cached_input_tokens + cache_write_tokens + cache_read_tokens + reasoning_tokens + tool_tokens + unknown_tokens) as total_tokens'),
+                DB::raw('SUM(input_tokens + output_tokens + cache_write_tokens + cache_read_tokens + reasoning_tokens + tool_tokens + unknown_tokens) as total_tokens'),
             ])
             ->groupBy('provider_accounts.label', 'usage_events.provider_id')
             ->orderByDesc('event_count')
@@ -146,7 +147,7 @@ class WebController extends Controller
                 'model',
                 DB::raw('COUNT(*) as event_count'),
                 DB::raw('SUM(official_api_cost_usd) as total_cost'),
-                DB::raw('SUM(input_tokens + output_tokens + cached_input_tokens + cache_write_tokens + cache_read_tokens + reasoning_tokens + tool_tokens + unknown_tokens) as total_tokens'),
+                DB::raw('SUM(input_tokens + output_tokens + cache_write_tokens + cache_read_tokens + reasoning_tokens + tool_tokens + unknown_tokens) as total_tokens'),
             ])
             ->groupBy('provider_id', 'model')
             ->orderByDesc('event_count')
