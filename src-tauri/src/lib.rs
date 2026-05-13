@@ -153,6 +153,7 @@ struct SessionSummary {
     provider_id: String,
     project_name: Option<String>,
     model: Option<String>,
+    event_type: Option<String>,
     timestamp: String,
     input_tokens: i64,
     output_tokens: i64,
@@ -230,6 +231,7 @@ pub fn run() {
             rescan_all_full,
             rescan_source,
             get_dashboard_summary,
+            get_recent_sessions,
             list_subscriptions,
             create_subscription,
             delete_subscription,
@@ -427,7 +429,7 @@ fn get_dashboard_summary(state: State<AppState>) -> Result<DashboardSummary, Str
     let conn = state.db.lock().map_err(to_string)?;
     let providers = query_provider_summaries(&conn)?;
     let top_projects = query_top_projects(&conn)?;
-    let recent_sessions = query_recent_sessions(&conn)?;
+    let (recent_sessions, _) = query_recent_sessions(&conn, None, 0, 30)?;
     let totals = sum_usage(&providers);
     let subscriptions_total: f64 = providers.iter().map(|p| p.subscription_amount).sum();
     let api_equivalent_total: f64 = providers.iter().map(|p| p.api_equivalent_cost).sum();
@@ -446,6 +448,24 @@ fn get_dashboard_summary(state: State<AppState>) -> Result<DashboardSummary, Str
         top_projects,
         recent_sessions,
     })
+}
+
+#[derive(Debug, Serialize)]
+struct RecentSessionsResult {
+    sessions: Vec<SessionSummary>,
+    total_count: i64,
+}
+
+#[tauri::command]
+fn get_recent_sessions(
+    state: State<AppState>,
+    provider_id: Option<String>,
+    offset: usize,
+    limit: usize,
+) -> Result<RecentSessionsResult, String> {
+    let conn = state.db.lock().map_err(to_string)?;
+    let (sessions, total_count) = query_recent_sessions(&conn, provider_id.as_deref(), offset, limit)?;
+    Ok(RecentSessionsResult { sessions, total_count })
 }
 
 #[tauri::command]
@@ -2748,35 +2768,54 @@ fn query_top_projects(conn: &Connection) -> Result<Vec<ProjectSummary>, String> 
     rows.collect::<Result<Vec<_>, _>>().map_err(to_string)
 }
 
-fn query_recent_sessions(conn: &Connection) -> Result<Vec<SessionSummary>, String> {
-    let mut stmt = conn
-        .prepare(
-            "SELECT u.id, u.provider_id, pr.display_name, u.model, u.timestamp,
-             u.input_tokens, u.output_tokens, (u.cached_input_tokens + u.cache_write_tokens + u.cache_read_tokens),
-             (u.input_tokens + u.output_tokens + u.cached_input_tokens + u.cache_write_tokens + u.cache_read_tokens + u.reasoning_tokens + u.tool_tokens + u.unknown_tokens),
-             u.official_api_cost_usd, u.confidence
-             FROM usage_events u LEFT JOIN projects pr ON pr.id = u.project_id
-             ORDER BY u.timestamp DESC LIMIT 30",
-        )
-        .map_err(to_string)?;
-    let rows = stmt
-        .query_map([], |r| {
-            Ok(SessionSummary {
-                id: r.get(0)?,
-                provider_id: r.get(1)?,
-                project_name: r.get(2)?,
-                model: r.get(3)?,
-                timestamp: r.get(4)?,
-                input_tokens: r.get(5)?,
-                output_tokens: r.get(6)?,
-                cached_tokens: r.get(7)?,
-                total_tokens: r.get(8)?,
-                api_equivalent_cost: r.get(9)?,
-                confidence: r.get(10)?,
-            })
+fn query_recent_sessions(conn: &Connection, provider_filter: Option<&str>, offset: usize, limit: usize) -> Result<(Vec<SessionSummary>, i64), String> {
+    let where_clause = if provider_filter.is_some() { "WHERE u.provider_id = ?1" } else { "" };
+    let count_sql = format!(
+        "SELECT COUNT(*) FROM usage_events u {}",
+        where_clause
+    );
+    let total_count: i64 = if let Some(pid) = provider_filter {
+        conn.query_row(&count_sql, [pid], |r| r.get(0))
+    } else {
+        conn.query_row(&count_sql, [], |r| r.get(0))
+    }.map_err(to_string)?;
+
+    let sql = format!(
+        "SELECT u.id, u.provider_id, pr.display_name, u.model, u.event_type, u.timestamp,
+         u.input_tokens, u.output_tokens, (u.cached_input_tokens + u.cache_write_tokens + u.cache_read_tokens),
+         (u.input_tokens + u.output_tokens + u.cached_input_tokens + u.cache_write_tokens + u.cache_read_tokens + u.reasoning_tokens + u.tool_tokens + u.unknown_tokens),
+         u.official_api_cost_usd, u.confidence
+         FROM usage_events u LEFT JOIN projects pr ON pr.id = u.project_id
+         {}
+         ORDER BY u.timestamp DESC LIMIT ?{} OFFSET ?{}",
+        where_clause,
+        if provider_filter.is_some() { 2 } else { 1 },
+        if provider_filter.is_some() { 3 } else { 2 }
+    );
+    let mut stmt = conn.prepare(&sql).map_err(to_string)?;
+    let map_row = |r: &rusqlite::Row| -> rusqlite::Result<SessionSummary> {
+        Ok(SessionSummary {
+            id: r.get(0)?,
+            provider_id: r.get(1)?,
+            project_name: r.get(2)?,
+            model: r.get(3)?,
+            event_type: r.get(4)?,
+            timestamp: r.get(5)?,
+            input_tokens: r.get(6)?,
+            output_tokens: r.get(7)?,
+            cached_tokens: r.get(8)?,
+            total_tokens: r.get(9)?,
+            api_equivalent_cost: r.get(10)?,
+            confidence: r.get(11)?,
         })
-        .map_err(to_string)?;
-    rows.collect::<Result<Vec<_>, _>>().map_err(to_string)
+    };
+    let rows = if let Some(pid) = provider_filter {
+        stmt.query_map(rusqlite::params![pid, limit as i64, offset as i64], map_row)
+    } else {
+        stmt.query_map(rusqlite::params![limit as i64, offset as i64], map_row)
+    }.map_err(to_string)?;
+    let sessions = rows.collect::<Result<Vec<_>, _>>().map_err(to_string)?;
+    Ok((sessions, total_count))
 }
 
 fn sum_usage(providers: &[ProviderSummary]) -> UsageTotals {

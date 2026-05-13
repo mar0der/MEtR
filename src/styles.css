@@ -305,6 +305,11 @@ td span {
   color: #7b5d00;
 }
 
+.pill.info {
+  background: #dbeafe;
+  color: #1e40af;
+}
+
 .settings-grid {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
