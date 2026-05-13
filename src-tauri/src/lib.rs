@@ -477,8 +477,8 @@ fn create_subscription(
     state: State<AppState>,
     input: SubscriptionInput,
 ) -> Result<Subscription, String> {
-    if input.monthly_amount < 0.0 {
-        return Err("Monthly amount must be positive.".to_string());
+    if input.monthly_amount <= 0.0 {
+        return Err("Monthly amount must be greater than zero.".to_string());
     }
     if input.billing_anchor_day < 1 || input.billing_anchor_day > 28 {
         return Err("Billing anchor day must be between 1 and 28 (not all months have 29-31 days).".to_string());

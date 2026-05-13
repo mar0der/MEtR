@@ -8,3 +8,5 @@ agents.md
 *.log
 *.tmp
 .DS_Store
+.env
+.env.*
