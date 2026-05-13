@@ -71,7 +71,7 @@ class PublishUpdateRelease extends Command
                 'update_release_id' => $release->id,
                 'platform' => 'darwin-aarch64',
                 'filename' => $filename,
-                'signature' => trim(file_get_contents($sigPath)),
+                'signature' => $this->normalizeSignature(file_get_contents($sigPath)),
             ]);
 
             $this->info("Uploaded macOS updater archive: {$filename}");
@@ -104,7 +104,7 @@ class PublishUpdateRelease extends Command
                 'update_release_id' => $release->id,
                 'platform' => 'windows-x86_64',
                 'filename' => $filename,
-                'signature' => trim(file_get_contents($sigPath)),
+                'signature' => $this->normalizeSignature(file_get_contents($sigPath)),
             ]);
 
             $this->info("Uploaded Windows artifact: {$filename}");
@@ -117,5 +117,33 @@ class PublishUpdateRelease extends Command
         $this->info("Release {$version} published successfully.");
 
         return self::SUCCESS;
+    }
+
+    /**
+     * Normalize a signature file for Tauri's updater.
+     *
+     * Tauri expects the signature JSON field to be base64-encoded.
+     * macOS .sig files are raw minisign text (multi-line), while
+     * Windows .sig files from GitHub Actions are already base64-encoded.
+     * This helper detects which format we have and encodes only when needed.
+     */
+    private function normalizeSignature(string $content): string
+    {
+        $content = trim($content);
+
+        // If it contains newlines, it's raw minisign text → base64 encode it
+        if (str_contains($content, "\n")) {
+            return base64_encode($content);
+        }
+
+        // Single line: might already be base64. Try decoding it.
+        // If decoding succeeds and yields "untrusted comment", it's already base64.
+        $decoded = base64_decode($content, true);
+        if ($decoded !== false && str_contains($decoded, 'untrusted comment')) {
+            return $content; // Already base64-encoded
+        }
+
+        // Otherwise, treat as raw text and base64 encode
+        return base64_encode($content);
     }
 }

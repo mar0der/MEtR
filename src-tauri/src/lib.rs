@@ -13,7 +13,7 @@ use uuid::Uuid;
 use walkdir::WalkDir;
 
 const MAX_SCAN_FILES_PER_SOURCE: usize = 50_000;
-const PARSER_VERSION: &str = "0.1.5";
+const PARSER_VERSION: &str = "0.1.6";
 
 struct AppState {
     db: Mutex<Connection>,
@@ -172,6 +172,7 @@ struct ParsedEvent {
     message_id: Option<String>,
     request_id: Option<String>,
     model: Option<String>,
+    event_type: Option<String>,
     input_tokens: i64,
     output_tokens: i64,
     cached_input_tokens: i64,
@@ -1445,6 +1446,7 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
           raw_record_hash TEXT NOT NULL,
           confidence TEXT NOT NULL,
           warnings_json TEXT NOT NULL DEFAULT '[]',
+          event_type TEXT,
           created_at TEXT NOT NULL,
           updated_at TEXT NOT NULL
         );
@@ -1522,6 +1524,7 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     add_column_if_missing(conn, "usage_events", "synced_at", "TEXT")?;
     add_column_if_missing(conn, "usage_events", "sync_batch_id", "TEXT")?;
     add_column_if_missing(conn, "usage_events", "sync_error", "TEXT")?;
+    add_column_if_missing(conn, "usage_events", "event_type", "TEXT")?;
     Ok(())
 }
 
@@ -1585,6 +1588,7 @@ fn recalculate_event_costs(conn: &Connection) -> rusqlite::Result<()> {
                 message_id: None,
                 request_id: None,
                 model: r.get(2)?,
+                event_type: None,
                 input_tokens: r.get(3)?,
                 output_tokens: r.get(4)?,
                 cached_input_tokens: r.get(5)?,
@@ -2192,6 +2196,9 @@ fn parse_codex_value(
     }
     let detected_provider = str_field(value, &["provider", "provider_id", "providerId", "source", "source_type", "sourceType", "app", "client"])
         .or_else(|| str_field(usage, &["provider", "provider_id", "providerId", "source"]));
+    let event_type = str_field(value.get("message").unwrap_or(&Value::Null), &["type"])
+        .or_else(|| str_field(value, &["type", "event_type", "eventType", "kind"]))
+        .or_else(|| str_field(value.get("payload").unwrap_or(&Value::Null), &["type", "event_type", "eventType", "kind"]));
     Some(ParsedEvent {
         provider_id: detected_provider.unwrap_or_else(|| source.provider_id.clone()),
         product_id: None,
@@ -2210,6 +2217,7 @@ fn parse_codex_value(
                 .and_then(Value::as_str)
                 .map(str::to_string)
         }),
+        event_type,
         input_tokens: input,
         output_tokens: output,
         cached_input_tokens: cached,
@@ -2335,6 +2343,9 @@ fn parse_value(
         .or_else(|| str_field(value.get("payload").unwrap_or(&Value::Null), &["model"]))
         .or_else(|| context.and_then(|c| c.model.clone()))
         .or_else(|| default_model_for_source(source));
+    let event_type = str_field(value.get("message").unwrap_or(&Value::Null), &["type"])
+        .or_else(|| str_field(value, &["type", "event_type", "eventType", "kind"]))
+        .or_else(|| str_field(value.get("payload").unwrap_or(&Value::Null), &["type", "event_type", "eventType", "kind"]));
     let project_path = str_field(
         value,
         &[
@@ -2376,6 +2387,7 @@ fn parse_value(
         message_id: str_field(value, &["message_id", "messageId", "id"]),
         request_id: str_field(value, &["request_id", "requestId"]),
         model,
+        event_type,
         input_tokens: input,
         output_tokens: output,
         cached_input_tokens: cached,
@@ -2437,12 +2449,12 @@ fn insert_event(
         .execute(
             "INSERT OR IGNORE INTO usage_events
             (id, provider_id, product_id, source_id, parser_id, parser_version, timestamp, project_id, conversation_id,
-             message_id, request_id, model, input_tokens, output_tokens, cached_input_tokens, cache_write_tokens,
+             message_id, request_id, model, event_type, input_tokens, output_tokens, cached_input_tokens, cache_write_tokens,
              cache_read_tokens, reasoning_tokens, tool_tokens, unknown_tokens, official_api_cost_usd, pricing_catalog_id,
              pricing_match_confidence, source_file_path, source_file_modified_at, source_offset, source_hash,
              raw_record_hash, confidence, warnings_json, created_at, updated_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18,
-             ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?31)",
+             ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?32)",
             params![
                 id,
                 event.provider_id,
@@ -2456,6 +2468,7 @@ fn insert_event(
                 event.message_id,
                 event.request_id,
                 event.model,
+                event.event_type,
                 event.input_tokens,
                 event.output_tokens,
                 event.cached_input_tokens,
@@ -2817,6 +2830,10 @@ fn str_field(value: &Value, names: &[&str]) -> Option<String> {
 }
 
 fn infer_project_from_path(path: &Path) -> Option<String> {
+    // For Kimi: session folder name is MD5 of working directory
+    if let Some(project) = kimi_project_from_path(path) {
+        return Some(project);
+    }
     if let Some(project) = project_root_from_path(path) {
         return Some(project);
     }
@@ -2831,9 +2848,59 @@ fn infer_project_from_path(path: &Path) -> Option<String> {
             }
         }
     }
+    // Don't return raw parent paths for dot-tool dirs — they produce UUIDs or junk names
+    let path_str = path.to_string_lossy();
+    if path_str.contains("/.kimi/") || path_str.contains("/.codex/") || path_str.contains("/.claude/") {
+        return None;
+    }
     path.parent()
         .and_then(|p| p.to_str())
         .map(|s| s.to_string())
+}
+
+/// Kimi stores sessions at ~/.kimi/sessions/<md5(workdir)>/<conv>/wire.jsonl
+/// Read ~/.kimi/kimi.json work_dirs and map session hash -> project name.
+fn kimi_project_from_path(path: &Path) -> Option<String> {
+    let path_str = path.to_string_lossy();
+    if !path_str.contains("/.kimi/sessions/") {
+        return None;
+    }
+    // Extract session hash from path: .../.kimi/sessions/<hash>/...
+    let parts: Vec<&str> = path_str.split('/').collect();
+    let session_idx = parts.iter().position(|p| *p == ".kimi")?;
+    let sessions_idx = parts.get(session_idx + 1)?;
+    if *sessions_idx != "sessions" {
+        return None;
+    }
+    let session_hash = parts.get(session_idx + 2)?;
+    let work_dirs = kimi_work_dirs()?;
+    for work_dir in work_dirs {
+        let hash = format!("{:x}", md5::compute(&work_dir));
+        if hash == *session_hash {
+            return project_root_from_path(Path::new(&work_dir));
+        }
+    }
+    None
+}
+
+fn kimi_work_dirs() -> Option<Vec<String>> {
+    let home = dirs::home_dir()?;
+    let config_path = home.join(".kimi").join("kimi.json");
+    let content = std::fs::read_to_string(config_path).ok()?;
+    let value: Value = serde_json::from_str(&content).ok()?;
+    let mut dirs = Vec::new();
+    if let Some(work_dirs) = value.get("work_dirs").and_then(|v| v.as_array()) {
+        for entry in work_dirs {
+            if let Some(path) = entry.get("path").and_then(|v| v.as_str()) {
+                dirs.push(path.to_string());
+            }
+        }
+    }
+    if dirs.is_empty() {
+        None
+    } else {
+        Some(dirs)
+    }
 }
 
 fn find_project_root_by_markers(start_path: &Path) -> Option<String> {
