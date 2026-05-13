@@ -262,5 +262,34 @@ class WebController extends Controller
             'usedCount' => count($used),
             'unusedCount' => count($unused),
         ]);
+
+    }
+    public function settings()
+    {
+        $user = Auth::user();
+        $eventCount = UsageEvent::where('usage_events.user_id', $user->id)->count();
+        $projectCount = Project::where('user_id', $user->id)->count();
+
+        return view('settings', [
+            'eventCount' => $eventCount,
+            'projectCount' => $projectCount,
+        ]);
+    }
+
+    public function clearData(Request $request)
+    {
+        $user = Auth::user();
+
+        DB::statement('SET FOREIGN_KEY_CHECKS=0');
+        DB::table('usage_events')->where('user_id', $user->id)->delete();
+        DB::table('conversations')->where('user_id', $user->id)->delete();
+        DB::table('project_roots')->whereIn('project_id', function ($q) use ($user) {
+            $q->select('id')->from('projects')->where('user_id', $user->id);
+        })->delete();
+        DB::table('projects')->where('user_id', $user->id)->delete();
+        DB::table('sync_batches')->where('user_id', $user->id)->delete();
+        DB::statement('SET FOREIGN_KEY_CHECKS=1');
+
+        return redirect('/settings')->with('success', 'All usage data cleared from server.');
     }
 }
