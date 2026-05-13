@@ -195,6 +195,8 @@ class SyncController extends Controller
         ]);
 
         $synced = 0;
+        DB::beginTransaction();
+        try {
         foreach ($data['prices'] as $price) {
             $effectiveFrom = $price['effective_from'] ?? now()->toDateTimeString();
 
@@ -222,6 +224,11 @@ class SyncController extends Controller
 
             ModelPrice::updateOrCreate($match, $payload);
             $synced++;
+        }
+        DB::commit();
+        } catch (\Throwable $e) {
+            DB::rollBack();
+            return response()->json(['ok' => false, 'error' => $e->getMessage()], 500);
         }
 
         return response()->json([
