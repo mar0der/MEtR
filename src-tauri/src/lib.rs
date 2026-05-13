@@ -156,6 +156,7 @@ struct SessionSummary {
     event_type: Option<String>,
     timestamp: String,
     input_tokens: i64,
+    effective_input_tokens: i64,
     output_tokens: i64,
     cached_tokens: i64,
     total_tokens: i64,
@@ -2782,7 +2783,8 @@ fn query_recent_sessions(conn: &Connection, provider_filter: Option<&str>, offse
 
     let sql = format!(
         "SELECT u.id, u.provider_id, pr.display_name, u.model, u.event_type, u.timestamp,
-         u.input_tokens, u.output_tokens, (u.cached_input_tokens + u.cache_write_tokens + u.cache_read_tokens),
+         u.input_tokens, (u.input_tokens - u.cached_input_tokens), u.output_tokens,
+         (u.cached_input_tokens + u.cache_write_tokens + u.cache_read_tokens),
          (u.input_tokens + u.output_tokens + u.cached_input_tokens + u.cache_write_tokens + u.cache_read_tokens + u.reasoning_tokens + u.tool_tokens + u.unknown_tokens),
          u.official_api_cost_usd, u.confidence
          FROM usage_events u LEFT JOIN projects pr ON pr.id = u.project_id
@@ -2802,11 +2804,12 @@ fn query_recent_sessions(conn: &Connection, provider_filter: Option<&str>, offse
             event_type: r.get(4)?,
             timestamp: r.get(5)?,
             input_tokens: r.get(6)?,
-            output_tokens: r.get(7)?,
-            cached_tokens: r.get(8)?,
-            total_tokens: r.get(9)?,
-            api_equivalent_cost: r.get(10)?,
-            confidence: r.get(11)?,
+            effective_input_tokens: r.get(7)?,
+            output_tokens: r.get(8)?,
+            cached_tokens: r.get(9)?,
+            total_tokens: r.get(10)?,
+            api_equivalent_cost: r.get(11)?,
+            confidence: r.get(12)?,
         })
     };
     let rows = if let Some(pid) = provider_filter {
