@@ -28,6 +28,8 @@ Route::middleware('auth')->group(function () {
     Route::get('/subscriptions', [WebController::class, 'subscriptions']);
     Route::get('/projects', [WebController::class, 'projects']);
     Route::get('/pricing', [WebController::class, 'pricing']);
+    Route::get('/settings', [WebController::class, 'settings']);
+    Route::post('/settings/clear-data', [WebController::class, 'clearData']);
 });
 
 Route::get('/', function () {
