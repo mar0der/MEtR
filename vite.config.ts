@@ -11,7 +11,7 @@ export default defineConfig({
   envPrefix: ["VITE_", "TAURI_"],
   build: {
     target: "es2020",
-    minify: false,
+    minify: true,
     sourcemap: true
   }
 });

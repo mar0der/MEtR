@@ -1091,9 +1091,9 @@ function emptyTotals(): UsageTotals {
   };
 }
 
-function money(value: number) {
-  if (Math.abs(value) > 0 && Math.abs(value) < 0.01) return "<$0.01";
-  return new Intl.NumberFormat(undefined, { style: "currency", currency: "USD" }).format(value);
+function money(value: number, currency = "USD") {
+  if (Math.abs(value) > 0 && Math.abs(value) < 0.01) return `<${currency}0.01`;
+  return new Intl.NumberFormat(undefined, { style: "currency", currency }).format(value);
 }
 
 function price(value: number | null) {

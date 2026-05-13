@@ -636,8 +636,10 @@ fn list_missing_models(state: State<AppState>) -> Result<Vec<Value>, String> {
                  SELECT 1 FROM pricing_catalogs p
                  WHERE p.provider_id = u.provider_id
                    AND (lower(p.model) = lower(u.model)
-                        OR (json_array_length(p.aliases_json) > 0
-                            AND lower(p.aliases_json) LIKE '%' || lower(u.model) || '%'))
+                        OR EXISTS (
+                          SELECT 1 FROM json_each(p.aliases_json)
+                          WHERE lower(json_each.value) = lower(u.model)
+                        ))
                )
              GROUP BY u.provider_id, u.model
              ORDER BY event_count DESC",
