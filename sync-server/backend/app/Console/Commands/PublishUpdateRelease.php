@@ -65,7 +65,9 @@ class PublishUpdateRelease extends Command
             }
 
             $filename = basename($tgzPath);
-            $disk->putFileAs('', $tgzPath, $filename);
+            if ($disk->path($filename) !== realpath($tgzPath)) {
+                $disk->putFileAs('', $tgzPath, $filename);
+            }
 
             $platforms[] = UpdateAsset::create([
                 'update_release_id' => $release->id,
@@ -82,7 +84,15 @@ class PublishUpdateRelease extends Command
             $dmgPath = $this->option('darwin-dmg');
             if (file_exists($dmgPath)) {
                 $filename = basename($dmgPath);
-                $disk->putFileAs('', $dmgPath, $filename);
+                if ($disk->path($filename) !== realpath($dmgPath)) {
+                    $disk->putFileAs('', $dmgPath, $filename);
+                }
+                $platforms[] = UpdateAsset::create([
+                    'update_release_id' => $release->id,
+                    'platform' => 'darwin-aarch64-installer',
+                    'filename' => $filename,
+                    'signature' => '',
+                ]);
                 $this->info("Uploaded macOS installer DMG: {$filename}");
             }
         }
@@ -98,7 +108,9 @@ class PublishUpdateRelease extends Command
             }
 
             $filename = basename($msiPath);
-            $disk->putFileAs('', $msiPath, $filename);
+            if ($disk->path($filename) !== realpath($msiPath)) {
+                $disk->putFileAs('', $msiPath, $filename);
+            }
 
             $platforms[] = UpdateAsset::create([
                 'update_release_id' => $release->id,
