@@ -13,7 +13,7 @@ use uuid::Uuid;
 use walkdir::WalkDir;
 
 const MAX_SCAN_FILES_PER_SOURCE: usize = 50_000;
-const PARSER_VERSION: &str = "0.1.4";
+const PARSER_VERSION: &str = "0.1.5";
 
 struct AppState {
     db: Mutex<Connection>,
@@ -2132,7 +2132,7 @@ struct GenericParseContext {
     model: Option<String>,
 }
 
-fn update_generic_context(source: &Source, context: &mut GenericParseContext, value: &Value) {
+fn update_generic_context(_source: &Source, context: &mut GenericParseContext, value: &Value) {
     if let Some(payload) = value.get("payload") {
         if let Some(next_model) = str_field(payload, &["model"]) {
             context.model = Some(next_model);
@@ -2149,21 +2149,6 @@ fn update_generic_context(source: &Source, context: &mut GenericParseContext, va
     }
     if let Some(next_cwd) = str_field(value, &["cwd", "working_directory", "workingDirectory"]) {
         context.cwd = Some(next_cwd);
-    }
-    if source.provider_id == "kimi" {
-        if let Some(next_cwd) = infer_project_from_value(value) {
-            let root = project_root_from_path(Path::new(&next_cwd));
-            if let Some(root) = root {
-                // Only update if we don't already have a valid root, or if the new root
-                // is different and also valid (has markers). Avoid overwriting a good
-                // project root with a system path or shallow directory.
-                let has_markers = find_project_root_by_markers(Path::new(&root)).is_some();
-                let current_has_markers = context.cwd.as_ref().and_then(|c| find_project_root_by_markers(Path::new(c))).is_some();
-                if context.cwd.is_none() || (has_markers && !current_has_markers) {
-                    context.cwd = Some(root);
-                }
-            }
-        }
     }
 }
 
@@ -2369,14 +2354,6 @@ fn parse_value(
         ],
     )
     .or_else(|| str_field(value.get("payload").unwrap_or(&Value::Null), &["cwd"]))
-    .or_else(|| {
-        if source.provider_id == "kimi" {
-            infer_project_from_value(value)
-                .and_then(|p| project_root_from_path(Path::new(&p)))
-        } else {
-            None
-        }
-    })
     .or_else(|| context.and_then(|c| c.cwd.clone()))
     .or_else(|| infer_project_from_path(path));
     Some(ParsedEvent {
@@ -2955,67 +2932,6 @@ fn join_path_parts(parts: &[String]) -> String {
     } else {
         parts.join("/")
     }
-}
-
-fn infer_project_from_value(value: &Value) -> Option<String> {
-    let mut candidates = Vec::new();
-    collect_project_candidates(value, &mut candidates);
-    candidates.into_iter().next()
-}
-
-fn collect_project_candidates(value: &Value, candidates: &mut Vec<String>) {
-    match value {
-        Value::String(text) => {
-            for path in absolute_paths_in_text(text) {
-                if let Some(project) = project_root_from_path(Path::new(&path)) {
-                    if !candidates.iter().any(|c| c == &project) {
-                        candidates.push(project);
-                    }
-                }
-            }
-        }
-        Value::Array(items) => {
-            for item in items {
-                collect_project_candidates(item, candidates);
-            }
-        }
-        Value::Object(map) => {
-            for item in map.values() {
-                collect_project_candidates(item, candidates);
-            }
-        }
-        _ => {}
-    }
-}
-
-fn absolute_paths_in_text(text: &str) -> Vec<String> {
-    let mut paths = Vec::new();
-    let mut start = 0;
-    while let Some(relative) = text[start..].find("/Users/") {
-        let absolute_start = start + relative;
-        let mut absolute_end = text.len();
-        for (index, ch) in text[absolute_start..].char_indices() {
-            if matches!(
-                ch,
-                '"' | '\'' | '\n' | '\r' | '\t' | '<' | '>' | '[' | ']' | '{' | '}' | '&' | '|' | ';' | '(' | '`' | '\\' | ' '
-            ) {
-                absolute_end = absolute_start + index;
-                break;
-            }
-        }
-        let path = text[absolute_start..absolute_end]
-            .trim_end_matches(|c: char| matches!(c, ',' | ':' | ';' | ')' | '.' | '`' | '\\'))
-            .trim()
-            .to_string();
-        if !path.is_empty() && !path.contains("&&") && !path.contains("||") && !path.contains(" -name ") {
-            paths.push(path);
-        }
-        start = absolute_end.saturating_add(1);
-        if start >= text.len() {
-            break;
-        }
-    }
-    paths
 }
 
 fn provider_display_name(provider_id: &str) -> &str {
