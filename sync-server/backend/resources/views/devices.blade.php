@@ -7,7 +7,7 @@
 <div class="card">
     <table>
         <thead>
-            <tr><th>Name</th><th>Platform</th><th>UUID</th><th>Last Seen</th></tr>
+            <tr><th>Name</th><th>Platform</th><th>UUID</th><th>Last Seen</th><th></th></tr>
         </thead>
         <tbody>
             @forelse($devices as $d)
@@ -16,9 +16,15 @@
                 <td>{{ $d->platform }}</td>
                 <td class="muted">{{ $d->device_uuid }}</td>
                 <td>{{ $d->last_seen_at?->diffForHumans() ?? 'Never' }}</td>
+                <td>
+                    <form method="POST" action="/devices/{{ $d->id }}/delete" style="margin:0;" onsubmit="return confirm('Remove this device?');">
+                        @csrf
+                        <button type="submit" class="btn" style="padding:4px 10px;font-size:12px;background:#dc2626;border-color:#dc2626;color:#fff;">Remove</button>
+                    </form>
+                </td>
             </tr>
             @empty
-            <tr><td colspan="4" class="muted">No devices yet.</td></tr>
+            <tr><td colspan="5" class="muted">No devices yet.</td></tr>
             @endforelse
         </tbody>
     </table>
