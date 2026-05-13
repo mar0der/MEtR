@@ -60,6 +60,7 @@ type SessionSummary = {
   event_type: string | null;
   timestamp: string;
   input_tokens: number;
+  effective_input_tokens: number;
   output_tokens: number;
   cached_tokens: number;
   total_tokens: number;
@@ -359,6 +360,25 @@ function App() {
     }
   };
 
+  const clearAllData = async () => {
+    if (!window.confirm("WARNING: This will permanently delete all events, projects, conversations, and scan history. Your source folders and subscriptions will remain. This cannot be undone.")) {
+      return;
+    }
+    setLoading(true);
+    setStatus("Clearing all data...");
+    try {
+      await api("clear_parsed_data");
+      setStatus("All data cleared. Run Full Rescan to rebuild from source files.");
+      setPaginatedSessions({ sessions: [], total_count: 0 });
+      setSessionPage(1);
+      await refresh();
+    } catch (error) {
+      setStatus(message(error));
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const addSubscription = async () => {
     await api("create_subscription", {
       input: {
@@ -581,6 +601,7 @@ function App() {
           onPullPricing={doPullPricing}
           onPushPricing={doPushPricing}
           onAddLocalPricing={addLocalPricing}
+          onClearAllData={clearAllData}
         />
       ) : (
         <DashboardView
@@ -753,7 +774,7 @@ function DashboardView({
                 <td>{session.project_name ?? "—"}</td>
                 <td>{session.event_type ? <span className="pill info">{session.event_type}</span> : "—"}</td>
                 <td>{session.model ?? "—"}</td>
-                <td>{compact(session.input_tokens)}</td>
+                <td>{compact(session.effective_input_tokens)}</td>
                 <td>{compact(session.output_tokens)}</td>
                 <td>{compact(session.cached_tokens)}</td>
                 <td>{compact(session.total_tokens)}</td>
@@ -806,6 +827,7 @@ function SettingsView(props: {
   onPullPricing: () => void;
   onPushPricing: () => void;
   onAddLocalPricing: (providerId: string, model: string) => void;
+  onClearAllData: () => void;
 }) {
   return (
     <div className="settings-grid">
@@ -861,6 +883,15 @@ function SettingsView(props: {
             </button>
           </div>
         )}
+      </section>
+
+      <section className="panel">
+        <h2><Trash2 size={16} /> Danger Zone</h2>
+        <p className="muted">Delete all parsed events, projects, and conversations. Your source folders and subscriptions stay intact.</p>
+        <button className="secondary-button" onClick={props.onClearAllData} style={{ borderColor: "#ef4444", color: "#ef4444" }}>
+          <Trash2 size={14} />
+          Clear All Data
+        </button>
       </section>
 
       <section className="panel">
@@ -1096,8 +1127,9 @@ function Metric({ label, value, detail }: { label: string; value: string; detail
 }
 
 function TokenBars({ totals }: { totals: UsageTotals }) {
+  const effectiveInput = Math.max(0, totals.input_tokens - totals.cached_input_tokens);
   const rows = [
-    ["Input", totals.input_tokens],
+    ["Input", effectiveInput],
     ["Output", totals.output_tokens],
     ["Cached", totals.cached_input_tokens + totals.cache_read_tokens + totals.cache_write_tokens],
     ["Reasoning/tool", totals.reasoning_tokens + totals.tool_tokens],
@@ -1202,8 +1234,9 @@ function folderHint(path: string | null) {
 }
 
 function tokenMix(totals: UsageTotals) {
+  const effectiveInput = Math.max(0, totals.input_tokens - totals.cached_input_tokens);
   const cached = totals.cached_input_tokens + totals.cache_read_tokens + totals.cache_write_tokens;
-  return `In ${compact(totals.input_tokens)}  Out ${compact(totals.output_tokens)}  Cached ${compact(cached)}`;
+  return `In ${compact(effectiveInput)}  Out ${compact(totals.output_tokens)}  Cached ${compact(cached)}`;
 }
 
 function durationLabel(firstSeen: string | null, lastSeen: string | null) {
