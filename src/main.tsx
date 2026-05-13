@@ -1121,10 +1121,22 @@ function providerLabel(providerId: string) {
       return "Claude";
     case "google":
       return "Gemini";
+    case "cursor":
+      return "Cursor";
     case "cline":
       return "Cline / Roo Code";
     case "continue":
       return "Continue";
+    case "aider":
+      return "Aider";
+    case "kimi":
+      return "Kimi / Moonshot";
+    case "ollama":
+      return "Ollama";
+    case "lmstudio":
+      return "LM Studio";
+    case "generic":
+      return "Generic";
     default:
       return providerId;
   }
@@ -1148,11 +1160,12 @@ function durationLabel(firstSeen: string | null, lastSeen: string | null) {
   const end = new Date(lastSeen).getTime();
   const diff = Math.max(0, end - start);
   const days = Math.floor(diff / 86_400_000);
-  if (days >= 1) return `${days + 1} days`;
+  if (days >= 1) return `${days}d`;
   const hours = Math.floor(diff / 3_600_000);
-  if (hours >= 1) return `${hours + 1} hours`;
+  if (hours >= 1) return `${hours}h`;
   const mins = Math.floor(diff / 60_000);
-  return `${Math.max(1, mins + 1)} min`;
+  if (mins >= 1) return `${mins}m`;
+  return "< 1m";
 }
 
 function message(error: unknown) {
