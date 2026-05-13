@@ -1,10 +1,178 @@
 # MEtR — Agent Guidelines
 
-## Project Overview
+> **Last updated:** 2026-05-13  
+> **Applies to:** `/Users/petarpetkov/Developer/MEtR` and all subdirectories  
+> **Purpose:** Project conventions, deployment rules, and agent behavior guidelines for the MEtR codebase.
 
-MEtR is a Tauri desktop app (Rust + React/TypeScript) that tracks local LLM usage, subscriptions, and API-equivalent costs. It syncs to a Laravel backend at `https://metr.petarpetkov.com`.
+---
 
-## Version Numbering Convention
+## Table of Contents
+
+1. [Agent Philosophy & Clarification Rules](#1-agent-philosophy--clarification-rules)
+2. [Project Overview](#2-project-overview)
+3. [Technology Stack](#3-technology-stack)
+4. [Project Structure](#4-project-structure)
+5. [Build Commands](#5-build-commands)
+6. [Version Numbering Convention](#6-version-numbering-convention)
+7. [Deployment Workflow](#7-deployment-workflow)
+8. [Database & Migrations](#8-database--migrations)
+9. [Parser & Token Logic](#9-parser--token-logic)
+10. [Code Style & Conventions](#10-code-style--conventions)
+11. [Testing](#11-testing)
+12. [Security Considerations](#12-security-considerations)
+13. [Server Details](#13-server-details)
+14. [Apple Developer](#14-apple-developer)
+15. [Known Pitfalls & Lessons Learned](#15-known-pitfalls--lessons-learned)
+
+---
+
+## 1. Agent Philosophy & Clarification Rules
+
+### 1.1 Core Principle
+
+**If uncertainty could realistically break production, violate architecture, introduce hidden regressions, or remove important behavior — ASK FIRST instead of assuming.**
+
+The goal is NOT maximum autonomy at all costs. The goal IS safe long-term architectural evolution. A small clarification is preferable to hidden architectural drift, accidental regressions, broken deployments, or irreversible refactors.
+
+### 1.2 The Agent MUST Ask Questions When
+
+| Situation | Why |
+|-----------|-----|
+| **Multiple valid interpretations exist** | e.g., two different architectural patterns in the repo — ask which is preferred or legacy |
+| **Project rules are missing** | e.g., coding standards, deployment rules, subsystem boundaries, testing requirements are undocumented |
+| **The change could break production** | e.g., deployment changes, auth changes, billing changes, DB schema changes, infrastructure rewrites, API contract changes |
+| **Legacy code appears strange** | Strange code often exists because of hidden integrations, production edge cases, historical bugs, vendor limitations, or deployment constraints. Do NOT assume it is incorrect. |
+| **Contradictions detected** | e.g., docs say one thing, implementation says another, tests imply different behavior |
+
+### 1.3 Anti-Hallucination Rule
+
+The agent MUST NOT invent:
+- Undocumented architecture
+- Fake deployment assumptions
+- Nonexistent business rules
+- Inferred API guarantees
+- Guessed infrastructure behavior
+
+Unknown information should remain **explicitly unknown** until clarified.
+
+### 1.4 Safe Default Behavior
+
+If clarification is unavailable, the agent SHOULD:
+1. Preserve existing architecture
+2. Minimize changes
+3. Avoid broad refactors
+4. Avoid deleting unclear code
+5. Document uncertainty explicitly in `AGENTS.md` or `/docs/pitfalls.md`
+
+### 1.5 Preferred Question Style
+
+- Ask concise, targeted questions
+- Explain why clarification is needed
+- Provide possible interpretations
+- Suggest the safest default
+
+Example:
+> I found two different database access patterns: (1) Repository pattern and (2) Direct query builder access. Which should be considered canonical for new code?
+
+### 1.6 Long-Term Memory Rule
+
+If the user clarifies architectural rules, deployment assumptions, preferred patterns, or dangerous constraints, the agent MUST document them in:
+- `AGENTS.md` (this file)
+- `/docs/current-state.md` (if it exists; create if needed)
+- `/docs/pitfalls.md` (if it exists; create if needed)
+- Relevant subsystem docs
+
+This reduces future ambiguity after context resets.
+
+---
+
+## 2. Project Overview
+
+MEtR is a local-first desktop application that tracks LLM token usage from local log/history files and compares subscription spend against API-equivalent pricing. It is built as a **Tauri 2** app (Rust backend + React/TypeScript frontend) and bundles its own SQLite database. An optional cloud sync feature uploads anonymized usage events to a **Laravel** backend at `https://metr.petarpetkov.com`.
+
+The app targets **macOS** (Apple Silicon, primary dev platform) and **Windows** (x64, built via GitHub Actions). All parsed data stays in a local SQLite database; raw log files are never uploaded.
+
+---
+
+## 3. Technology Stack
+
+| Layer | Technology |
+|-------|-----------|
+| Desktop framework | Tauri 2 |
+| Frontend | React 19 + TypeScript |
+| Build tool | Vite 8 |
+| Backend language | Rust (edition 2021) |
+| Local database | SQLite via `rusqlite` (bundled feature) |
+| HTTP client | `reqwest` (blocking) |
+| Sync server | Laravel (PHP) + Docker + nginx |
+| Tests (backend) | PHPUnit |
+
+Key crates: `tauri`, `rusqlite`, `chrono`, `serde`, `walkdir`, `reqwest`, `uuid`, `sha2`, `md5`.  
+Key npm packages: `@tauri-apps/api`, `@tauri-apps/plugin-updater`, `@tauri-apps/plugin-dialog`, `lucide-react`, `clsx`.
+
+---
+
+## 4. Project Structure
+
+```
+├── src/                      # Frontend (React/TS)
+│   ├── main.tsx              # Entire UI — single 1300-line component
+│   ├── updater.ts            # Auto-update logic (cooldowns, skip versions, restart)
+│   ├── styles.css            # All app styles (no Tailwind — hand-written CSS)
+│   └── vite-env.d.ts
+├── src-tauri/                # Rust Tauri app
+│   ├── src/
+│   │   ├── main.rs           # Entry point (calls metr_lib::run)
+│   │   └── lib.rs            # ALL backend logic — 3100+ lines
+│   ├── Cargo.toml
+│   ├── tauri.conf.json       # Tauri config (window, security, updater, bundle)
+│   └── capabilities/
+├── sync-server/              # Laravel backend + Docker deployment
+│   ├── backend/              # Laravel application
+│   ├── nginx/
+│   ├── docker-compose.yml
+│   └── scripts/
+├── fixtures/                 # Synthetic parser test data
+│   ├── claude/
+│   ├── codex/
+│   ├── generic-jsonl/
+│   └── malformed/
+├── docs/
+│   ├── product_specs.md      # Full product specification (1620 lines)
+│   └── sync_backend_laravel_implementation_and_deployment.md
+├── scripts/
+│   └── build-release.sh      # macOS release build + version sync
+└── .github/workflows/
+    └── build-windows.yml     # Windows CI build
+```
+
+**Important:** The codebase is intentionally concentrated in two files:
+- `src/main.tsx` — all React components, hooks, types, and UI logic.
+- `src-tauri/src/lib.rs` — all Tauri commands, DB schema/migrations, parsing, pricing, sync, and queries.
+
+---
+
+## 5. Build Commands
+
+```bash
+# Install dependencies
+npm install
+
+# Frontend-only build
+npm run build
+
+# Run desktop app locally (dev mode)
+npm run tauri:dev
+
+# Build release installers (macOS)
+npm run tauri:build
+```
+
+**Windows build** is handled by `.github/workflows/build-windows.yml` on push to `main`. It requires `TAURI_SIGNING_PRIVATE_KEY` and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` GitHub secrets.
+
+---
+
+## 6. Version Numbering Convention
 
 **Format: `YY.WW.PATCH`**
 
@@ -12,16 +180,20 @@ MEtR is a Tauri desktop app (Rust + React/TypeScript) that tracks local LLM usag
 - `WW` = **ISO week number** (NOT a sequential feature counter)
 - `PATCH` = increment within the same week
 
-**Examples:**
-- `26.20.10` → week 20, patch 10
-- `26.20.11` → same week 20, patch 11
-- `26.21.0`  → week 21, patch 0 (only when the calendar week actually changes)
-
 **Rule:** The middle number is the week number. Do NOT increment it unless the actual calendar week has changed.
 
-## Deployment Workflow
+Version must be kept in sync across three files:
+- `package.json`
+- `src-tauri/Cargo.toml`
+- `src-tauri/tauri.conf.json`
 
-### No Local Testing Environment
+The helper script `scripts/build-release.sh` syncs the version from `tauri.conf.json` to the other two files automatically.
+
+---
+
+## 7. Deployment Workflow
+
+### 7.1 No Local Testing Environment
 
 There is **no local dev environment** for running the desktop app during development. Builds are deployed straight to the update server and tested from there.
 
@@ -32,7 +204,7 @@ There is **no local dev environment** for running the desktop app during develop
 
 **DO** build the release bundle, sign it, upload to server, and test via the actual update mechanism.
 
-### Build & Deploy Steps
+### 7.2 Build & Deploy Steps
 
 1. **Bump version** in:
    - `src-tauri/Cargo.toml`
@@ -115,7 +287,66 @@ There is **no local dev environment** for running the desktop app during develop
     curl -s "https://metr.petarpetkov.com/api/v1/update/windows/x86_64/PREVIOUS_VERSION"
     ```
 
-## Key Technical Details
+---
+
+## 8. Database & Migrations
+
+- **Local DB path:** `~/Library/Application Support/com.metr.local/metr.db` (macOS); `%APPDATA%\MEtR\metr.db` (Windows)
+- **Lock behavior:** The app holds an SQLite lock while running. Close the app before running external SQL queries.
+- **Schema migrations:** Handled in `migrate()` in `src-tauri/src/lib.rs`. Uses `CREATE TABLE IF NOT EXISTS` plus `add_column_if_missing()` for additive migrations.
+- **Default providers seeded** on first run via `seed_defaults()`.
+
+### Key Tables
+
+- `providers` — known LLM providers (openai, anthropic, cursor, google, cline, continue, aider, kimi, ollama, lmstudio, generic)
+- `log_sources` — configured source folders with parser assignment
+- `indexed_files` — tracks scanned files (size, mtime, parser version) for incremental scanning
+- `usage_events` — normalized token usage events with de-dupe SHA256 IDs
+- `projects` — detected project roots
+- `conversations` — chat/session groupings
+- `pricing_catalogs` — model pricing per provider (USD per 1M tokens)
+- `subscriptions` — user subscription costs and billing anchors
+- `sync_config` — singleton row (id = 1) for server URL, auth token, device info
+
+---
+
+## 9. Parser & Token Logic
+
+### Parser Version
+
+`PARSER_VERSION = "0.1.6"` in `src-tauri/src/lib.rs`. Bumping this triggers a full re-parse on next scan because `indexed_file_is_current()` checks parser version.
+
+### Supported Providers
+
+| Provider ID | Display Name | Default Parser | Detection Paths |
+|-------------|-------------|----------------|-----------------|
+| `openai` | OpenAI / Codex | `codex` | `~/.codex` |
+| `anthropic` | Claude | `claude` | `~/.claude` |
+| `cursor` | Cursor | `generic_jsonl` | `~/Library/Application Support/Cursor` |
+| `google` | Gemini | `gemini` | `~/.gemini` |
+| `cline` | Cline / Roo Code | `generic_jsonl` | `~/Library/Application Support/Code/User/globalStorage` |
+| `continue` | Continue | `continue` | `~/.continue` |
+| `kimi` | Kimi / Moonshot | `generic_jsonl` | `~/.kimi`, `~/.moonshot`, `~/Library/Application Support/Kimi` |
+| `ollama` | Ollama | `generic_jsonl` | `~/.ollama` |
+| `lmstudio` | LM Studio | `generic_jsonl` | `~/.lmstudio` |
+| `generic` | Generic JSONL | `generic_jsonl` | manual only |
+
+### Token Counting Semantics
+
+Different providers report input tokens differently:
+- **OpenAI/Codex:** `input_tokens` includes cached → cost calculation subtracts cached from input
+- **Anthropic:** `input_tokens` is uncached only → display as-is, no subtraction
+- **Kimi:** `input_other` is uncached only → display as-is
+
+The frontend displays `input_tokens - cached_input_tokens` as "Input" and `cached_input + cache_write + cache_read` as "Cached".
+
+### Kimi Project Detection
+
+Kimi stores sessions at `~/.kimi/sessions/<md5(workdir)>/<conv>/wire.jsonl`. The parser reads `~/.kimi/kimi.json` `work_dirs` to map session MD5 hashes to real project paths. **Do NOT** use text scraping from message content for project detection.
+
+---
+
+## 10. Code Style & Conventions
 
 ### Tauri Invoke Naming
 
@@ -123,41 +354,61 @@ Arguments passed to Tauri commands must match Rust **snake_case** exactly:
 - ✅ `provider_id: provider || null`
 - ❌ `providerId: provider || null`
 
-### Database
+### React Patterns
 
-- **Local DB path:** `~/Library/Application Support/com.metr.local/metr.db`
-- **Lock behavior:** The app holds an SQLite lock while running. Close the app before running external SQL queries.
-- **Schema migrations:** Handled in `migrate()` in `src-tauri/src/lib.rs`
+- **Stale closure prevention:** `useEffect(() => { setInterval(refresh, 30000) }, [])` captures the **initial** `refresh` function. The app uses React refs (`activeTabRef`, `sessionPageRef`) for state read inside intervals.
+- **Deferred initial load:** Data fetching is deferred with `setTimeout(..., 100)` so the UI renders first and avoids a white screen on slow DB ops.
 
-### Parser Version
+### Rust Patterns
 
-`PARSER_VERSION = "0.1.6"` in `src-tauri/src/lib.rs`. Bumping this triggers a full re-parse on next scan because `indexed_file_is_current()` checks parser version.
+- All DB access goes through `AppState { db: Mutex<Connection> }`.
+- Errors are converted to strings with `to_string()` (a generic `|e| e.to_string()` closure).
+- Timestamps are stored as RFC 3339 strings via `Utc::now().to_rfc3339()`.
+- SHA256 hashes are used for IDs (events, projects, conversations, indexed files).
 
-### Signature Format Rule
+---
 
-- **macOS `.sig`**: Raw minisign multi-line text → must be `base64_encode()`'d before storing in DB
-- **Windows `.sig`**: Already base64 single-line from GitHub Actions → store as-is
+## 11. Testing
 
-The `PublishUpdateRelease.php` `normalizeSignature()` method handles this automatically.
+### Frontend / Desktop
+There is **no automated test suite** for the frontend or Rust desktop layer. Testing is done manually by:
+1. Adding `fixtures/` folders as sources in Settings
+2. Running Scan/Rescan to verify parser output
+3. Checking dashboard metrics and session tables
 
-### Kimi Project Detection
+### Backend (Laravel)
+The sync-server backend has PHPUnit tests:
+```bash
+cd sync-server/backend
+php artisan test
+```
 
-Kimi stores sessions at `~/.kimi/sessions/<md5(workdir)>/<conv>/wire.jsonl`. The parser reads `~/.kimi/kimi.json` `work_dirs` to map session MD5 hashes to real project paths. **Do NOT** use text scraping from message content for project detection.
+Test files:
+- `tests/Feature/AuthTest.php`
+- `tests/Feature/SyncTest.php`
+- `tests/Feature/DashboardTest.php`
+- `tests/Feature/DeviceTest.php`
+- `tests/Feature/AttributionRuleTest.php`
+- `tests/Feature/ProjectMergeTest.php`
+- `tests/Unit/NormalizeProjectRootTest.php`
+- `tests/Unit/ResolveModelPriceTest.php`
 
-### Token Counting Semantics
+---
 
-Different providers report input tokens differently:
-- **OpenAI/Codex:** `input_tokens` includes cached → display as `input - cached_input`
-- **Anthropic:** `input_tokens` is uncached only → display as-is
-- **Kimi:** `input_other` is uncached only → display as-is
+## 12. Security Considerations
 
-The frontend should always display `input_tokens - cached_input_tokens` as "Input" and `cached_input + cache_write + cache_read` as "Cached".
+- **Local-first:** Raw log files never leave the device. Only parsed, anonymized usage events are optionally synced.
+- **CSP:** Configured in `tauri.conf.json` with restrictive policy. `connect-src` is limited to `'self'` and `https://metr.petarpetkov.com`.
+- **Signing:** macOS app is signed with `Developer ID Application: Petar Petkov (TG94VNPLAA)`. Windows MSI is signed in CI via Tauri's updater signing key.
+- **Updater signatures:**
+  - **macOS `.sig`:** Raw minisign multi-line text → must be `base64_encode()`'d before storing in DB
+  - **Windows `.sig`:** Already base64 single-line from GitHub Actions → store as-is
+  - The `PublishUpdateRelease.php` `normalizeSignature()` method handles this automatically.
+- **Auth tokens:** Stored in local SQLite (`sync_config.auth_token`). Sent as `Authorization: Bearer <token>` to the sync server.
 
-### Stale Closure Lesson
+---
 
-`useEffect(() => { setInterval(refresh, 30000) }, [])` captures the **initial** `refresh` function. If `refresh` reads state from closures (not refs), it uses stale values forever. Use React refs (`activeTabRef`, `sessionPageRef`) for state read inside intervals.
-
-## Server Details
+## 13. Server Details
 
 - **Server:** `the18th` (SSH as `root`)
 - **Deploy path:** `/opt/metr-sync/site`
@@ -166,10 +417,44 @@ The frontend should always display `input_tokens - cached_input_tokens` as "Inpu
 - **Public releases URL:** `https://metr.petarpetkov.com/updates/`
 - **Update API:** `/api/v1/update/{target}/{arch}/{current_version}`
 
-## Apple Developer
+---
+
+## 14. Apple Developer
 
 - **Developer:** Petar Petkov
 - **Team ID:** `TG94VNPLAA`
 - **Signing identity:** `Developer ID Application: Petar Petkov (TG94VNPLAA)`
 - **Private key:** `~/.tauri/metr.key` (base64-encoded minisign secret key)
 - **Notarization:** Skipped (no `APPLE_ID`/`APPLE_PASSWORD` env vars set)
+
+---
+
+## 15. Known Pitfalls & Lessons Learned
+
+### Stale Closures in React
+`useEffect(() => { setInterval(refresh, 30000) }, [])` captures the initial `refresh` function. State must be read via refs (`activeTabRef`, `sessionPageRef`) inside the interval callback.
+
+### `putFileAs` Self-Destruct Bug
+Laravel's `Storage::putFileAs` opens the destination in write mode (truncating) before reading the source. If paths are identical, the file becomes 0 bytes. **Guard:** compare `realpath($source)` with `$disk->path($filename)` before calling `putFileAs`.
+
+### Tauri Signing on macOS
+`rsign` fails with "Device not configured" when trying to prompt for a password on macOS. The workaround is to decode the base64 key files and use `expect` or set `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` as an env var before building.
+
+### Token Semantics: OpenAI vs Anthropic
+OpenAI/Codex reports `input_tokens` that **includes** cached tokens. Effective non-cached input = `input_tokens - cached_input_tokens`. Anthropic reports `input_tokens` as **only** uncached tokens. The cost calculation and display logic must handle both.
+
+### Version Convention Trap
+The middle digit is the **ISO week number**, not a sequential feature counter. Bumping it incorrectly (e.g., `26.21.0` when it's week 20) breaks consistency. Always check the actual calendar week.
+
+### DB Path on macOS
+The local DB is at `~/Library/Application Support/com.metr.local/metr.db`. The app must be closed before running external SQLite queries because it holds a file lock.
+
+### Server Cost Double-Counting
+The server's `CalculateUsageCost` must subtract `cached_input` from `input` for OpenAI-style providers (where input includes cached). Otherwise cached tokens are charged at both the full input rate and the cached rate. The desktop app already handles this correctly; the server must match.
+
+### macOS Startup Hang
+`recalculate_event_costs` iterates through ALL usage_events on startup. For large databases (8000+ events), this blocks the main thread and causes a white screen. **Fix:** run expensive maintenance in a background thread so the UI loads first.
+
+---
+
+*If you discover a new pitfall, architectural rule, or deployment constraint, add it to this file immediately.*
