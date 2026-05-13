@@ -132,7 +132,9 @@ class IngestUsageEvents
         if ($model) {
             $price = $this->resolveModelPrice->handle($providerId, $model, $timestamp);
             if ($price) {
-                $costData = $this->calculateUsageCost->handle($price, $tokens);
+                // Server recalculates using the same provider-aware logic as the desktop app.
+                // Keep in sync with src-tauri/src/lib.rs calculate_cost()
+                $costData = $this->calculateUsageCost->handle($price, $tokens, $providerId);
             } elseif (($tokens['unknown'] ?? 0) === 0 && isset($event['client_cost']['official_api_cost_usd'])) {
                 $costData = [
                     'cost' => (float) $event['client_cost']['official_api_cost_usd'],

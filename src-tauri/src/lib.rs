@@ -215,10 +215,16 @@ pub fn run() {
             let conn = Connection::open(db_path.join("metr.db"))?;
             migrate(&conn)?;
             seed_defaults(&conn)?;
-            cleanup_known_bad_imports(&conn)?;
-            recalculate_event_costs(&conn)?;
             app.manage(AppState {
                 db: Mutex::new(conn),
+            });
+            // Run expensive maintenance in background so UI loads instantly
+            let maint_db_path = db_path.join("metr.db");
+            std::thread::spawn(move || {
+                if let Ok(conn) = Connection::open(&maint_db_path) {
+                    let _ = cleanup_known_bad_imports(&conn);
+                    let _ = recalculate_event_costs(&conn);
+                }
             });
             Ok(())
         })
@@ -2436,6 +2442,8 @@ fn insert_event(
     source_hash: &str,
     event: ParsedEvent,
 ) -> Result<bool, String> {
+    ensure_provider(conn, &event.provider_id, provider_display_name(&event.provider_id))
+        .map_err(to_string)?;
     let project_id = match &event.project_path {
         Some(path) => Some(upsert_project(
             conn,

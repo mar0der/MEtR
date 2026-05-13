@@ -305,8 +305,15 @@ function App() {
       : summary.top_projects.filter((p) => p.provider_id === activeTab);
 
   useEffect(() => {
+    // Clear stale sessions immediately when switching providers, then fetch page 1
+    setPaginatedSessions({ sessions: [], total_count: 0 });
+    setSessionPage(1);
+    fetchSessions(1, activeTab === "all" || activeTab === "settings" ? undefined : activeTab);
+  }, [activeTab]);
+
+  useEffect(() => {
     fetchSessions(sessionPage, activeTab === "all" || activeTab === "settings" ? undefined : activeTab);
-  }, [sessionPage, activeTab]);
+  }, [sessionPage]);
 
   const runDetection = async () => {
     setLoading(true);
