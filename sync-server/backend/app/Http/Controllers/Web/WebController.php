@@ -158,12 +158,31 @@ class WebController extends Controller
                 return $row;
             });
 
+        // Recent events with pagination (50 per page)
+        $eventsQuery = UsageEvent::where('usage_events.user_id', $user->id)
+            ->leftJoin('projects', 'projects.id', '=', 'usage_events.project_id')
+            ->select([
+                'usage_events.*',
+                DB::raw("COALESCE(projects.manual_name, projects.canonical_name, 'Unknown') as project_name"),
+            ])
+            ->orderByDesc('usage_events.timestamp');
+
+        if ($request->filled('from')) {
+            $eventsQuery->where('usage_events.timestamp', '>=', $request->input('from'));
+        }
+        if ($request->filled('to')) {
+            $eventsQuery->where('usage_events.timestamp', '<=', $request->input('to'));
+        }
+
+        $events = $eventsQuery->paginate(50)->withQueryString();
+
         return view('dashboard', [
             'summary' => $summary,
             'byDevice' => $byDevice,
             'byProject' => $byProject,
             'byProviderAccount' => $byProviderAccount,
             'byModel' => $byModel,
+            'events' => $events,
         ]);
     }
 
@@ -188,10 +207,14 @@ class WebController extends Controller
         ]);
     }
 
-    public function projects()
+    public function projects(Request $request)
     {
         return view('projects', [
-            'projects' => Project::where('user_id', Auth::id())->withCount('projectRoots')->get(),
+            'projects' => Project::where('user_id', Auth::id())
+                ->withCount('projectRoots')
+                ->orderByDesc('last_seen_at')
+                ->paginate(20)
+                ->withQueryString(),
         ]);
     }
 
@@ -200,7 +223,7 @@ class WebController extends Controller
         $user = Auth::user();
 
         // Models this user actually has events for
-        $usedModels = UsageEvent::where('user_id', $user->id)
+        $usedModels = UsageEvent::where('usage_events.user_id', $user->id)
             ->whereNotNull('model')
             ->select('provider_id', 'model')
             ->distinct()

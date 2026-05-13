@@ -74,7 +74,7 @@ class AccountAttributionRuleController extends Controller
         $user = $request->user();
         $attributor = app(AttributeProviderAccount::class);
 
-        $events = UsageEvent::where('user_id', $user->id)
+        $events = UsageEvent::where('usage_events.user_id', $user->id)
             ->where('account_attribution_confidence', '!=', 'manual')
             ->get();
 

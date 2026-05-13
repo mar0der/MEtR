@@ -71,23 +71,31 @@ There is **no local dev environment** for running the desktop app during develop
    gh run download RUN_ID --name windows-sig --dir /tmp/windows-sig
    ```
 
-8. **Upload all artifacts to the server:**
+8. **Upload artifacts to the server:**
+   
+   Only `.dmg` and `.msi` (human installers) go to `/storage/releases/`. The `.tar.gz` updater archives go **straight to Laravel storage** — do NOT leave them in the public releases directory.
+   
    ```bash
+   # Human installers → public releases dir
    scp src-tauri/target/release/bundle/dmg/MEtR_VERSION_aarch64.dmg \
        root@the18th:/opt/metr-sync/site/storage/releases/
-   scp src-tauri/target/release/bundle/macos/MEtR.app.tar.gz \
-       root@the18th:/opt/metr-sync/site/storage/releases/MEtR_VERSION_aarch64.app.tar.gz
-   scp src-tauri/target/release/bundle/macos/MEtR.app.tar.gz.sig \
-       root@the18th:/opt/metr-sync/site/storage/releases/MEtR_VERSION_aarch64.app.tar.gz.sig
    scp /tmp/windows-msi/MEtR_VERSION_x64_en-US.msi \
        root@the18th:/opt/metr-sync/site/storage/releases/
+   
+   # Updater archives → Laravel storage directly
+   scp src-tauri/target/release/bundle/macos/MEtR.app.tar.gz \
+       root@the18th:/opt/metr-sync/site/backend/storage/app/updates/MEtR_VERSION_aarch64.app.tar.gz
+   scp src-tauri/target/release/bundle/macos/MEtR.app.tar.gz.sig \
+       root@the18th:/opt/metr-sync/site/backend/storage/app/updates/MEtR_VERSION_aarch64.app.tar.gz.sig
    scp /tmp/windows-sig/MEtR_VERSION_x64_en-US.msi.sig \
-       root@the18th:/opt/metr-sync/site/storage/releases/
+       root@the18th:/opt/metr-sync/site/backend/storage/app/updates/MEtR_VERSION_x64_en-US.msi.sig
    ```
 
-9. **Copy to backend storage and publish:**
+9. **Copy installer to backend storage and publish:**
    ```bash
-   ssh root@the18th "cp /opt/metr-sync/site/storage/releases/MEtR_VERSION* \
+   ssh root@the18th "cp /opt/metr-sync/site/storage/releases/MEtR_VERSION_aarch64.dmg \
+       /opt/metr-sync/site/backend/storage/app/updates/ && \
+    cp /opt/metr-sync/site/storage/releases/MEtR_VERSION_x64_en-US.msi \
        /opt/metr-sync/site/backend/storage/app/updates/"
 
    ssh root@the18th "docker exec metr-sync-php php artisan metr:release:publish \
