@@ -350,9 +350,11 @@ Kimi stores sessions at `~/.kimi/sessions/<md5(workdir)>/<conv>/wire.jsonl`. The
 
 ### Tauri Invoke Naming
 
-Arguments passed to Tauri commands must match Rust **snake_case** exactly:
-- ✅ `provider_id: provider || null`
-- ❌ `providerId: provider || null`
+Top-level arguments passed to `#[tauri::command]` functions use Tauri's default **camelCase** conversion unless the Rust command explicitly sets `#[tauri::command(rename_all = "snake_case")]`:
+- ✅ `providerId: provider || null` for Rust parameter `provider_id`
+- ❌ `provider_id: provider || null` silently deserializes as `None` for `Option<String>` direct parameters
+
+Nested struct payloads still use Serde's field names unless the struct has its own rename attributes, so payloads like `{ input: { provider_id: "openai" } }` are valid for `Deserialize` structs with `provider_id` fields.
 
 ### React Patterns
 
@@ -435,7 +437,7 @@ Test files:
 `useEffect(() => { setInterval(refresh, 30000) }, [])` captures the initial `refresh` function. State must be read via refs (`activeTabRef`, `sessionPageRef`) inside the interval callback.
 
 ### Stale Session Responses Across Provider Tabs
-Provider-tab session requests can race with older unfiltered `All` refresh requests. Guard paginated session responses by request id, selected provider, and page before updating UI state; otherwise a late `All` response can repaint Claude/OpenAI tabs with Kimi-heavy global results.
+Provider-tab session requests can race with older unfiltered `All` refresh requests. Guard paginated session responses by request id, selected provider, and page before updating UI state; otherwise a late `All` response can repaint Claude/OpenAI tabs with Kimi-heavy global results. Also verify the provider filter reaches Rust as `providerId` for direct Tauri command parameters; sending `provider_id` to an `Option<String>` parameter silently becomes `None`.
 
 ### `putFileAs` Self-Destruct Bug
 Laravel's `Storage::putFileAs` opens the destination in write mode (truncating) before reading the source. If paths are identical, the file becomes 0 bytes. **Guard:** compare `realpath($source)` with `$disk->path($filename)` before calling `putFileAs`.

@@ -225,7 +225,7 @@ function App() {
     const requestedProvider = provider ?? null;
     try {
       const result = await api<PaginatedSessions>("get_recent_sessions", {
-        provider_id: requestedProvider,
+        providerId: requestedProvider,
         offset: (page - 1) * SESSIONS_PER_PAGE,
         limit: SESSIONS_PER_PAGE,
       });
