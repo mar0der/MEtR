@@ -480,8 +480,8 @@ fn create_subscription(
     if input.monthly_amount < 0.0 {
         return Err("Monthly amount must be positive.".to_string());
     }
-    if input.billing_anchor_day < 1 || input.billing_anchor_day > 31 {
-        return Err("Billing anchor day must be between 1 and 31.".to_string());
+    if input.billing_anchor_day < 1 || input.billing_anchor_day > 28 {
+        return Err("Billing anchor day must be between 1 and 28 (not all months have 29-31 days).".to_string());
     }
     let conn = state.db.lock().map_err(to_string)?;
     ensure_provider(
@@ -954,6 +954,14 @@ fn perform_sync(conn: &Connection, force_all: bool) -> Result<SyncResult, String
         )
         .unwrap_or_else(|_| format!("{}-unknown", std::env::consts::OS));
 
+    let os_version = {
+        let d = whoami::distro();
+        if d.is_empty() {
+            whoami::platform().to_string()
+        } else {
+            d
+        }
+    };
     let reg_resp = client
         .post(format!("{}/api/v1/devices/register", base_url))
         .header("Authorization", &auth_header)
@@ -963,7 +971,7 @@ fn perform_sync(conn: &Connection, force_all: bool) -> Result<SyncResult, String
             "display_name": device_name,
             "platform": std::env::consts::OS,
             "hostname_hash": hash(&whoami::fallible::hostname().unwrap_or_else(|_| "unknown".to_string())),
-            "os_version": whoami::distro(),
+            "os_version": os_version,
             "app_version": env!("CARGO_PKG_VERSION"),
         }))
         .send()
