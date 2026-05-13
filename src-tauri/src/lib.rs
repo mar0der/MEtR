@@ -13,7 +13,7 @@ use uuid::Uuid;
 use walkdir::WalkDir;
 
 const MAX_SCAN_FILES_PER_SOURCE: usize = 50_000;
-const PARSER_VERSION: &str = "0.1.2";
+const PARSER_VERSION: &str = "0.1.3";
 
 struct AppState {
     db: Mutex<Connection>,
@@ -2020,6 +2020,7 @@ fn parse_content(source: &Source, path: &Path, content: &str) -> Vec<ParsedEvent
     let mut events = Vec::new();
     let mut offset = 0i64;
     let mut codex_context = CodexParseContext::default();
+    let mut generic_context = GenericParseContext::default();
     for line in content.lines() {
         let trimmed = line.trim();
         parse_line_into_events(
@@ -2028,6 +2029,7 @@ fn parse_content(source: &Source, path: &Path, content: &str) -> Vec<ParsedEvent
             trimmed,
             Some(offset),
             &mut codex_context,
+            &mut generic_context,
             &mut events,
         );
         offset += line.len() as i64 + 1;
@@ -2046,6 +2048,7 @@ fn parse_file_streaming(source: &Source, path: &Path) -> Result<Vec<ParsedEvent>
     let mut events = Vec::new();
     let mut offset = 0i64;
     let mut codex_context = CodexParseContext::default();
+    let mut generic_context = GenericParseContext::default();
 
     for line in reader.lines() {
         let line = line.map_err(to_string)?;
@@ -2056,6 +2059,7 @@ fn parse_file_streaming(source: &Source, path: &Path) -> Result<Vec<ParsedEvent>
             trimmed,
             Some(offset),
             &mut codex_context,
+            &mut generic_context,
             &mut events,
         );
         offset += line.len() as i64 + 1;
@@ -2070,6 +2074,7 @@ fn parse_line_into_events(
     trimmed: &str,
     offset: Option<i64>,
     codex_context: &mut CodexParseContext,
+    generic_context: &mut GenericParseContext,
     events: &mut Vec<ParsedEvent>,
 ) {
     if trimmed.is_empty() {
@@ -2077,10 +2082,11 @@ fn parse_line_into_events(
     }
     if let Ok(value) = serde_json::from_str::<Value>(trimmed) {
         update_codex_context(codex_context, &value);
+        update_generic_context(source, generic_context, &value);
         let parsed = if source.parser_id == "codex" {
             parse_codex_value(source, path, &value, offset, trimmed, codex_context)
         } else {
-            parse_value(source, path, &value, offset, trimmed)
+            parse_value(source, path, &value, offset, trimmed, Some(generic_context))
         };
         if let Some(event) = parsed {
             events.push(event);
@@ -2116,6 +2122,45 @@ fn update_codex_context(context: &mut CodexParseContext, value: &Value) {
         .and_then(Value::as_str)
     {
         context.model = Some(model.to_string());
+    }
+}
+
+#[derive(Default)]
+struct GenericParseContext {
+    cwd: Option<String>,
+    session_id: Option<String>,
+    model: Option<String>,
+}
+
+fn update_generic_context(source: &Source, context: &mut GenericParseContext, value: &Value) {
+    if let Some(payload) = value.get("payload") {
+        if let Some(next_model) = str_field(payload, &["model"]) {
+            context.model = Some(next_model);
+        }
+        if let Some(next_cwd) = str_field(payload, &["cwd"]) {
+            context.cwd = Some(next_cwd);
+        }
+        if let Some(next_session) = str_field(payload, &["id", "session_id", "sessionId"]) {
+            context.session_id = Some(next_session);
+        }
+    }
+    if let Some(next_model) = str_field(value, &["model", "model_name", "modelName"]) {
+        context.model = Some(next_model);
+    }
+    if let Some(next_cwd) = str_field(value, &["cwd", "working_directory", "workingDirectory"]) {
+        context.cwd = Some(next_cwd);
+    }
+    if source.provider_id == "kimi" {
+        if let Some(next_cwd) = infer_project_from_value(value) {
+            context.cwd = Some(next_cwd);
+        }
+    }
+}
+
+fn default_model_for_source(source: &Source) -> Option<String> {
+    match source.provider_id.as_str() {
+        "kimi" => Some("kimi-for-coding".to_string()),
+        _ => None,
     }
 }
 
@@ -2190,7 +2235,7 @@ fn parse_codex_value(
 }
 
 fn collect_json_events(source: &Source, path: &Path, value: &Value, events: &mut Vec<ParsedEvent>) {
-    if let Some(event) = parse_value(source, path, value, None, &value.to_string()) {
+    if let Some(event) = parse_value(source, path, value, None, &value.to_string(), None) {
         events.push(event);
     }
     match value {
@@ -2216,6 +2261,7 @@ fn parse_value(
     value: &Value,
     source_offset: Option<i64>,
     raw: &str,
+    context: Option<&GenericParseContext>,
 ) -> Option<ParsedEvent> {
     // Look for usage in various nested locations
     let usage = value.get("usage")
@@ -2223,6 +2269,8 @@ fn parse_value(
         .or_else(|| value.get("api_usage"))
         .or_else(|| value.get("tokens"))
         .or_else(|| value.get("usage_stats"))
+        .or_else(|| value.pointer("/message/payload/token_usage"))
+        .or_else(|| value.pointer("/payload/token_usage"))
         .unwrap_or(value);
     let input = int_field(
         usage,
@@ -2231,6 +2279,10 @@ fn parse_value(
             "prompt_tokens",
             "inputTokens",
             "promptTokens",
+            "input_other",
+            "prompt_eval_count",
+            "prompt_eval_tokens",
+            "num_prompt_tokens",
         ],
     );
     let output = int_field(
@@ -2240,6 +2292,10 @@ fn parse_value(
             "completion_tokens",
             "outputTokens",
             "completionTokens",
+            "output",
+            "eval_count",
+            "eval_tokens",
+            "num_completion_tokens",
         ],
     );
     let cached = int_field(
@@ -2252,6 +2308,7 @@ fn parse_value(
             "cache_creation_input_tokens",
             "cache_write_tokens",
             "cacheWriteTokens",
+            "input_cache_creation",
         ],
     );
     let cache_read = int_field(
@@ -2260,6 +2317,7 @@ fn parse_value(
             "cache_read_input_tokens",
             "cache_read_tokens",
             "cacheReadTokens",
+            "input_cache_read",
         ],
     );
     let reasoning = int_field(usage, &["reasoning_tokens", "reasoningTokens"]);
@@ -2277,7 +2335,11 @@ fn parse_value(
     .or_else(|| str_field(usage, &["timestamp", "created_at", "createdAt", "start_time", "startTime"]))
     .unwrap_or_else(now);
     let model = str_field(value, &["model", "model_name", "modelName", "model_id", "modelId", "model_version", "modelVersion"])
-        .or_else(|| str_field(usage, &["model", "model_id", "modelId"]));
+        .or_else(|| str_field(usage, &["model", "model_id", "modelId"]))
+        .or_else(|| str_field(value.get("message").unwrap_or(&Value::Null), &["model"]))
+        .or_else(|| str_field(value.get("payload").unwrap_or(&Value::Null), &["model"]))
+        .or_else(|| context.and_then(|c| c.model.clone()))
+        .or_else(|| default_model_for_source(source));
     let project_path = str_field(
         value,
         &[
@@ -2296,6 +2358,15 @@ fn parse_value(
             "workspacePath",
         ],
     )
+    .or_else(|| str_field(value.get("payload").unwrap_or(&Value::Null), &["cwd"]))
+    .or_else(|| {
+        if source.provider_id == "kimi" {
+            infer_project_from_value(value)
+        } else {
+            None
+        }
+    })
+    .or_else(|| context.and_then(|c| c.cwd.clone()))
     .or_else(|| infer_project_from_path(path));
     Some(ParsedEvent {
         provider_id: source.provider_id.clone(),
@@ -2311,7 +2382,9 @@ fn parse_value(
                 "sessionId",
                 "chat_id",
             ],
-        ),
+        )
+        .or_else(|| str_field(value.get("payload").unwrap_or(&Value::Null), &["id", "session_id", "sessionId"]))
+        .or_else(|| context.and_then(|c| c.session_id.clone())),
         message_id: str_field(value, &["message_id", "messageId", "id"]),
         request_id: str_field(value, &["request_id", "requestId"]),
         model,
@@ -2756,6 +2829,9 @@ fn str_field(value: &Value, names: &[&str]) -> Option<String> {
 }
 
 fn infer_project_from_path(path: &Path) -> Option<String> {
+    if let Some(project) = project_root_from_path(path) {
+        return Some(project);
+    }
     let parts: Vec<_> = path
         .components()
         .map(|c| c.as_os_str().to_string_lossy().to_string())
@@ -2772,6 +2848,109 @@ fn infer_project_from_path(path: &Path) -> Option<String> {
         .map(|s| s.to_string())
 }
 
+fn project_root_from_path(path: &Path) -> Option<String> {
+    let parts: Vec<_> = path
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().to_string())
+        .collect();
+    if parts.iter().any(|p| {
+        p.eq_ignore_ascii_case(".kimi")
+            || p.eq_ignore_ascii_case(".codex")
+            || p.eq_ignore_ascii_case(".claude")
+    }) {
+        return None;
+    }
+    for marker in [
+        "Developer",
+        "iDeveloper",
+        "projects",
+        "project",
+        "workspaces",
+        "workspace",
+    ] {
+        if let Some(index) = parts.iter().position(|p| p.eq_ignore_ascii_case(marker)) {
+            if parts.get(index + 1).is_some() {
+                return Some(join_path_parts(&parts[..=index + 1]));
+            }
+        }
+    }
+    if parts.len() >= 4 && parts[1] == "Users" {
+        let first = &parts[3];
+        if !first.starts_with('.') && first != "Library" && first != "Downloads" {
+            return Some(join_path_parts(&parts[..=3]));
+        }
+    }
+    None
+}
+
+fn join_path_parts(parts: &[String]) -> String {
+    if parts.first().is_some_and(|p| p == "/") {
+        format!("/{}", parts[1..].join("/"))
+    } else {
+        parts.join("/")
+    }
+}
+
+fn infer_project_from_value(value: &Value) -> Option<String> {
+    let mut candidates = Vec::new();
+    collect_project_candidates(value, &mut candidates);
+    candidates.into_iter().next()
+}
+
+fn collect_project_candidates(value: &Value, candidates: &mut Vec<String>) {
+    match value {
+        Value::String(text) => {
+            for path in absolute_paths_in_text(text) {
+                if let Some(project) = project_root_from_path(Path::new(&path)) {
+                    if !candidates.iter().any(|c| c == &project) {
+                        candidates.push(project);
+                    }
+                }
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                collect_project_candidates(item, candidates);
+            }
+        }
+        Value::Object(map) => {
+            for item in map.values() {
+                collect_project_candidates(item, candidates);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn absolute_paths_in_text(text: &str) -> Vec<String> {
+    let mut paths = Vec::new();
+    let mut start = 0;
+    while let Some(relative) = text[start..].find("/Users/") {
+        let absolute_start = start + relative;
+        let mut absolute_end = text.len();
+        for (index, ch) in text[absolute_start..].char_indices() {
+            if matches!(
+                ch,
+                '"' | '\'' | '\n' | '\r' | '\t' | '<' | '>' | '[' | ']' | '{' | '}'
+            ) {
+                absolute_end = absolute_start + index;
+                break;
+            }
+        }
+        let path = text[absolute_start..absolute_end]
+            .trim_end_matches(|c: char| matches!(c, ',' | ':' | ';' | ')' | '.'))
+            .to_string();
+        if !path.is_empty() {
+            paths.push(path);
+        }
+        start = absolute_end.saturating_add(1);
+        if start >= text.len() {
+            break;
+        }
+    }
+    paths
+}
+
 fn provider_display_name(provider_id: &str) -> &str {
     match provider_id {
         "openai" => "OpenAI / Codex",
@@ -2781,6 +2960,9 @@ fn provider_display_name(provider_id: &str) -> &str {
         "cline" => "Cline / Roo Code",
         "continue" => "Continue",
         "aider" => "Aider",
+        "kimi" => "Kimi / Moonshot",
+        "ollama" => "Ollama",
+        "lmstudio" => "LM Studio",
         _ => "Generic JSONL",
     }
 }
@@ -2857,3 +3039,4 @@ fn json_f64(value: Option<&Value>) -> Option<f64> {
         _ => None,
     }
 }
+
