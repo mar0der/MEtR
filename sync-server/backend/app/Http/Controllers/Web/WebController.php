@@ -186,6 +186,12 @@ class WebController extends Controller
         ]);
     }
 
+    public function deleteDevice($id)
+    {
+        DB::table("devices")->where("id", $id)->where("user_id", Auth::id())->delete();
+        return redirect("/devices")->with("success", "Device removed.");
+    }
+
     public function devices()
     {
         return view('devices', [

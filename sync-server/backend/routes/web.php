@@ -24,6 +24,7 @@ Route::middleware('auth')->group(function () {
     Route::post('/logout', [WebController::class, 'logout']);
     Route::get('/dashboard', [WebController::class, 'dashboard']);
     Route::get('/devices', [WebController::class, 'devices']);
+    Route::post('/devices/{id}/delete', [WebController::class, 'deleteDevice']);
     Route::get('/provider-accounts', [WebController::class, 'providerAccounts']);
     Route::get('/subscriptions', [WebController::class, 'subscriptions']);
     Route::get('/projects', [WebController::class, 'projects']);
