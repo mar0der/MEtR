@@ -235,7 +235,6 @@ pub fn run() {
             list_pricing_catalog,
             clear_parsed_data,
             open_project_path,
-            list_pricing_catalog,
             list_missing_models,
             add_pricing,
             pull_pricing,
@@ -1692,6 +1691,18 @@ fn candidate_sources() -> Vec<CandidateSource> {
             display_name: "Kimi / Moonshot",
             path: home.join(".moonshot"),
         });
+        candidates.push(CandidateSource {
+            provider_id: "ollama",
+            parser_id: "generic_jsonl",
+            display_name: "Ollama",
+            path: home.join(".ollama"),
+        });
+        candidates.push(CandidateSource {
+            provider_id: "lmstudio",
+            parser_id: "generic_jsonl",
+            display_name: "LM Studio",
+            path: home.join(".lmstudio"),
+        });
     }
     candidates
 }
@@ -1703,7 +1714,7 @@ fn count_candidate_files(path: &Path) -> usize {
         .filter_map(Result::ok)
         .filter(|e| e.file_type().is_file())
         .filter(|e| is_candidate_file(e.path()))
-        .take(501)
+        .take(5_001)
         .count()
 }
 
@@ -2107,12 +2118,24 @@ fn parse_codex_value(
     context: &CodexParseContext,
 ) -> Option<ParsedEvent> {
     let usage = value.pointer("/payload/info/last_token_usage")?;
-    let input = int_field(usage, &["input_tokens"]);
-    let output = int_field(usage, &["output_tokens"]);
-    let cached = int_field(usage, &["cached_input_tokens"]);
+    let input = int_field(usage, &["input_tokens", "prompt_tokens"]);
+    let output = int_field(usage, &["output_tokens", "completion_tokens"]);
+    // Look for cached tokens at top level or nested in details objects
+    let cached = {
+        let v = int_field(usage, &["cached_input_tokens", "cached_tokens"]);
+        if v > 0 {
+            v
+        } else {
+            usage.pointer("/prompt_tokens_details/cached_tokens")
+                .and_then(Value::as_i64)
+                .unwrap_or(0)
+        }
+    };
+    let cache_write = int_field(usage, &["cache_creation_input_tokens", "cache_write_tokens"]);
+    let cache_read = int_field(usage, &["cache_read_input_tokens", "cache_read_tokens"]);
     let reasoning = int_field(usage, &["reasoning_output_tokens", "reasoning_tokens"]);
     let total = int_field(usage, &["total_tokens"]);
-    let known = input + output + cached + reasoning;
+    let known = input + output + cached + cache_write + cache_read + reasoning;
     let unknown = if known == 0 { total } else { 0 };
     if known == 0 && unknown == 0 {
         return None;
@@ -2140,8 +2163,8 @@ fn parse_codex_value(
         input_tokens: input,
         output_tokens: output,
         cached_input_tokens: cached,
-        cache_write_tokens: 0,
-        cache_read_tokens: 0,
+        cache_write_tokens: cache_write,
+        cache_read_tokens: cache_read,
         reasoning_tokens: reasoning,
         tool_tokens: 0,
         unknown_tokens: unknown,
