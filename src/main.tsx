@@ -163,6 +163,10 @@ type SubscriptionForm = {
   billing_anchor_day: string;
 };
 
+function providerForTab(tab: Tab): string | undefined {
+  return tab === "all" || tab === "settings" ? undefined : tab;
+}
+
 const demoSummary: DashboardSummary = {
   providers: [],
   totals: emptyTotals(),
@@ -212,13 +216,27 @@ function App() {
   activeTabRef.current = activeTab;
   sessionPageRef.current = sessionPage;
 
+  // Ref to guard against out-of-order fetchSessions responses
+  const sessionRequestIdRef = React.useRef(0);
+  const previousSessionTabRef = React.useRef(activeTab);
+
   const fetchSessions = async (page: number, provider?: string) => {
+    const requestId = ++sessionRequestIdRef.current;
+    const requestedProvider = provider ?? null;
     try {
       const result = await api<PaginatedSessions>("get_recent_sessions", {
-        provider_id: provider || null,
+        provider_id: requestedProvider,
         offset: (page - 1) * SESSIONS_PER_PAGE,
         limit: SESSIONS_PER_PAGE,
       });
+      // Ignore stale responses that no longer match the visible tab/page.
+      if (
+        sessionRequestIdRef.current !== requestId ||
+        requestedProvider !== (providerForTab(activeTabRef.current) ?? null) ||
+        page !== sessionPageRef.current
+      ) {
+        return;
+      }
       setPaginatedSessions(result);
     } catch (error) {
       setStatus(message(error));
@@ -245,7 +263,7 @@ function App() {
       if (nextSync.logged_in && nextSync.server_url) {
         setSyncForm((s) => ({ ...s, server_url: nextSync.server_url }));
       }
-      await fetchSessions(sessionPageRef.current, activeTabRef.current === "all" || activeTabRef.current === "settings" ? undefined : activeTabRef.current);
+      await fetchSessions(sessionPageRef.current, providerForTab(activeTabRef.current));
       setStatus("Data refreshed");
     } catch (error) {
       setStatus(message(error));
@@ -305,15 +323,22 @@ function App() {
       : summary.top_projects.filter((p) => p.provider_id === activeTab);
 
   useEffect(() => {
-    // Clear stale sessions immediately when switching providers, then fetch page 1
-    setPaginatedSessions({ sessions: [], total_count: 0 });
-    setSessionPage(1);
-    fetchSessions(1, activeTab === "all" || activeTab === "settings" ? undefined : activeTab);
-  }, [activeTab]);
+    if (activeTab === "settings") {
+      return;
+    }
 
-  useEffect(() => {
-    fetchSessions(sessionPage, activeTab === "all" || activeTab === "settings" ? undefined : activeTab);
-  }, [sessionPage]);
+    if (previousSessionTabRef.current !== activeTab) {
+      previousSessionTabRef.current = activeTab;
+      sessionRequestIdRef.current += 1;
+      setPaginatedSessions({ sessions: [], total_count: 0 });
+      if (sessionPage !== 1) {
+        setSessionPage(1);
+        return;
+      }
+    }
+
+    fetchSessions(sessionPage, providerForTab(activeTab));
+  }, [activeTab, sessionPage]);
 
   const runDetection = async () => {
     setLoading(true);
