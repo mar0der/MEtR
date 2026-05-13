@@ -126,7 +126,7 @@ class SyncController extends Controller
 
         // Only send model prices for models this user actually has events for.
         // For new users with no events, fall back to all active prices.
-        $usedModels = \App\Models\UsageEvent::where('user_id', $user->id)
+        $usedModels = \App\Models\UsageEvent::where('usage_events.user_id', $user->id)
             ->whereNotNull('model')
             ->select('provider_id', 'model')
             ->distinct()
@@ -195,8 +195,6 @@ class SyncController extends Controller
         ]);
 
         $synced = 0;
-        DB::beginTransaction();
-        try {
         foreach ($data['prices'] as $price) {
             $effectiveFrom = $price['effective_from'] ?? now()->toDateTimeString();
 
@@ -224,11 +222,6 @@ class SyncController extends Controller
 
             ModelPrice::updateOrCreate($match, $payload);
             $synced++;
-        }
-        DB::commit();
-        } catch (\Throwable $e) {
-            DB::rollBack();
-            return response()->json(['ok' => false, 'error' => $e->getMessage()], 500);
         }
 
         return response()->json([
