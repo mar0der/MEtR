@@ -97,13 +97,13 @@ class WebController extends Controller
         $byDevice = (clone $query)
             ->leftJoin('devices', 'devices.id', '=', 'usage_events.device_id')
             ->select([
-                'devices.display_name as label',
+                'COALESCE(devices.alias, devices.display_name) as label',
                 'devices.platform as meta',
                 DB::raw('COUNT(*) as event_count'),
                 DB::raw('SUM(official_api_cost_usd) as total_cost'),
                 DB::raw('SUM(input_tokens + output_tokens + cached_input_tokens + cache_write_tokens + cache_read_tokens + reasoning_tokens + tool_tokens + unknown_tokens) as total_tokens'),
             ])
-            ->groupBy('devices.id', 'devices.display_name', 'devices.platform')
+            ->groupBy('devices.id', 'devices.alias', 'devices.display_name', 'devices.platform')
             ->orderByDesc('event_count')
             ->limit(10)
             ->get();
@@ -184,6 +184,13 @@ class WebController extends Controller
             'byModel' => $byModel,
             'events' => $events,
         ]);
+    }
+
+    public function updateDeviceAlias(Request $request, $id)
+    {
+        $validated = $request->validate(["alias" => ["nullable", "string", "max:255"]]);
+        DB::table("devices")->where("id", $id)->where("user_id", Auth::id())->update(["alias" => $validated["alias"] ?? null]);
+        return redirect("/devices")->with("success", "Device alias updated.");
     }
 
     public function deleteDevice($id)
