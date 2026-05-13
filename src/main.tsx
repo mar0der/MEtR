@@ -57,6 +57,7 @@ type SessionSummary = {
   provider_id: string;
   project_name: string | null;
   model: string | null;
+  event_type: string | null;
   timestamp: string;
   input_tokens: number;
   output_tokens: number;
@@ -64,6 +65,11 @@ type SessionSummary = {
   total_tokens: number;
   api_equivalent_cost: number | null;
   confidence: string;
+};
+
+type PaginatedSessions = {
+  sessions: SessionSummary[];
+  total_count: number;
 };
 
 type DashboardSummary = {
@@ -194,6 +200,22 @@ function App() {
   const [pricingLoading, setPricingLoading] = useState(false);
   const [appVersion, setAppVersion] = useState<string>("");
   const [newPriceForm, setNewPriceForm] = useState<Record<string, { input: string; output: string }>>({});
+  const [paginatedSessions, setPaginatedSessions] = useState<PaginatedSessions>({ sessions: [], total_count: 0 });
+  const [sessionPage, setSessionPage] = useState(1);
+  const SESSIONS_PER_PAGE = 50;
+
+  const fetchSessions = async (page: number, provider?: string) => {
+    try {
+      const result = await api<PaginatedSessions>("get_recent_sessions", {
+        providerId: provider || null,
+        offset: (page - 1) * SESSIONS_PER_PAGE,
+        limit: SESSIONS_PER_PAGE,
+      });
+      setPaginatedSessions(result);
+    } catch (error) {
+      setStatus(message(error));
+    }
+  };
 
   const refresh = async () => {
     setLoading(true);
@@ -215,6 +237,7 @@ function App() {
       if (nextSync.logged_in && nextSync.server_url) {
         setSyncForm((s) => ({ ...s, server_url: nextSync.server_url }));
       }
+      await fetchSessions(sessionPage, activeTab === "all" || activeTab === "settings" ? undefined : activeTab);
       setStatus("Data refreshed");
     } catch (error) {
       setStatus(message(error));
@@ -265,10 +288,10 @@ function App() {
     activeTab === "all" || activeTab === "settings"
       ? summary.top_projects
       : summary.top_projects.filter((p) => p.provider_id === activeTab);
-  const filteredSessions =
-    activeTab === "all" || activeTab === "settings"
-      ? summary.recent_sessions
-      : summary.recent_sessions.filter((s) => s.provider_id === activeTab);
+
+  useEffect(() => {
+    fetchSessions(sessionPage, activeTab === "all" || activeTab === "settings" ? undefined : activeTab);
+  }, [sessionPage, activeTab]);
 
   const runDetection = async () => {
     setLoading(true);
@@ -558,7 +581,11 @@ function App() {
           summary={summary}
           provider={activeProvider}
           projects={filteredProjects}
-          sessions={filteredSessions}
+          sessions={paginatedSessions.sessions}
+          totalSessionCount={paginatedSessions.total_count}
+          sessionPage={sessionPage}
+          sessionsPerPage={SESSIONS_PER_PAGE}
+          onPageChange={setSessionPage}
           empty={sources.length === 0 && summary.totals.total_tokens === 0}
           goSettings={() => setActiveTab("settings")}
         />
@@ -572,6 +599,10 @@ function DashboardView({
   provider,
   projects,
   sessions,
+  totalSessionCount,
+  sessionPage,
+  sessionsPerPage,
+  onPageChange,
   empty,
   goSettings
 }: {
@@ -579,6 +610,10 @@ function DashboardView({
   provider?: ProviderSummary;
   projects: ProjectSummary[];
   sessions: SessionSummary[];
+  totalSessionCount: number;
+  sessionPage: number;
+  sessionsPerPage: number;
+  onPageChange: (page: number) => void;
   empty: boolean;
   goSettings: () => void;
 }) {
@@ -689,16 +724,18 @@ function DashboardView({
       </section>
 
       <section className="panel">
-        <h2>Recent Sessions</h2>
+        <h2>Recent Sessions ({totalSessionCount} total)</h2>
         <table>
           <thead>
             <tr>
               <th>Time</th>
               <th>Project</th>
+              <th>Type</th>
               <th>Model</th>
               <th>Input</th>
               <th>Output</th>
               <th>Cached</th>
+              <th>Total</th>
               <th>API Cost</th>
               <th>Confidence</th>
             </tr>
@@ -707,18 +744,27 @@ function DashboardView({
             {sessions.map((session) => (
               <tr key={session.id}>
                 <td>{date(session.timestamp)}</td>
-                <td>{session.project_name ?? "Unknown"}</td>
-                <td>{session.model ?? "Unknown"}</td>
+                <td>{session.project_name ?? "—"}</td>
+                <td>{session.event_type ? <span className="pill info">{session.event_type}</span> : "—"}</td>
+                <td>{session.model ?? "—"}</td>
                 <td>{compact(session.input_tokens)}</td>
                 <td>{compact(session.output_tokens)}</td>
                 <td>{compact(session.cached_tokens)}</td>
-                <td>{session.api_equivalent_cost == null ? "Unknown" : money(session.api_equivalent_cost)}</td>
+                <td>{compact(session.total_tokens)}</td>
+                <td>{session.api_equivalent_cost == null ? "—" : money(session.api_equivalent_cost)}</td>
                 <td><span className={`pill ${session.confidence}`}>{session.confidence}</span></td>
               </tr>
             ))}
-            {sessions.length === 0 && <EmptyRow colSpan={8} text="No sessions indexed yet." />}
+            {sessions.length === 0 && <EmptyRow colSpan={10} text="No sessions indexed yet." />}
           </tbody>
         </table>
+        {totalSessionCount > sessionsPerPage && (
+          <div style={{ marginTop: 12, display: "flex", gap: 6, justifyContent: "center", alignItems: "center" }}>
+            <button className="secondary-button" disabled={sessionPage <= 1} onClick={() => onPageChange(sessionPage - 1)}>← Prev</button>
+            <span className="muted">Page {sessionPage} of {Math.ceil(totalSessionCount / sessionsPerPage)}</span>
+            <button className="secondary-button" disabled={sessionPage * sessionsPerPage >= totalSessionCount} onClick={() => onPageChange(sessionPage + 1)}>Next →</button>
+          </div>
+        )}
       </section>
     </>
   );
