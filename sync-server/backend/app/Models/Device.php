@@ -14,6 +14,7 @@ class Device extends Model
         'user_id',
         'device_uuid',
         'display_name',
+        'alias',
         'platform',
         'hostname_hash',
         'os_version',

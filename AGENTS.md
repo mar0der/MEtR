@@ -437,7 +437,10 @@ Test files:
 `useEffect(() => { setInterval(refresh, 30000) }, [])` captures the initial `refresh` function. State must be read via refs (`activeTabRef`, `sessionPageRef`) inside the interval callback.
 
 ### Stale Session Responses Across Provider Tabs
-Provider-tab session requests can race with older unfiltered `All` refresh requests. Guard paginated session responses by request id, selected provider, and page before updating UI state; otherwise a late `All` response can repaint Claude/OpenAI tabs with Kimi-heavy global results. Also verify the provider filter reaches Rust as `providerId` for direct Tauri command parameters; sending `provider_id` to an `Option<String>` parameter silently becomes `None`.
+Provider-tab session requests can race with older unfiltered `All` refresh requests. Guard paginated session responses by request id before updating UI state; otherwise a late `All` response can repaint Claude/OpenAI tabs with Kimi-heavy global results.
+
+### Tauri camelCase Silent Failure
+Tauri converts direct `#[tauri::command]` parameters to **camelCase** by default. Sending `provider_id` from the frontend to a Rust parameter named `provider_id: Option<String>` silently deserializes as `None` because Tauri expects the key `providerId`. Always match the frontend key to Tauri’s camelCase expectation, or explicitly add `#[tauri::command(rename_all = "snake_case")]` to the handler.
 
 ### `putFileAs` Self-Destruct Bug
 Laravel's `Storage::putFileAs` opens the destination in write mode (truncating) before reading the source. If paths are identical, the file becomes 0 bytes. **Guard:** compare `realpath($source)` with `$disk->path($filename)` before calling `putFileAs`.

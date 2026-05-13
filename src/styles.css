@@ -163,7 +163,7 @@ button:disabled {
 
 .metric-grid {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(6, minmax(0, 1fr));
   gap: 12px;
   margin-bottom: 12px;
 }
@@ -256,6 +256,61 @@ button:disabled {
 td:nth-child(n + 3),
 th:nth-child(n + 3) {
   text-align: right;
+}
+
+.status-message,
+.token-cell {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.spinner {
+  width: 14px;
+  height: 14px;
+  border: 2px solid #cfd6df;
+  border-top-color: #174a7c;
+  border-radius: 999px;
+  animation: spin 0.8s linear infinite;
+}
+
+.spin {
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.token-cell {
+  justify-content: flex-end;
+  width: 100%;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.token-cell strong,
+.token-cell small {
+  display: block;
+  width: 100%;
+  text-align: right;
+  white-space: nowrap;
+}
+
+.token-cell small {
+  color: #657386;
+  font-size: 11px;
+}
+
+tfoot td {
+  font-weight: 700;
+  background: #f8fafc;
+}
+
+tfoot .token-cell small {
+  font-weight: 500;
 }
 
 table {
@@ -447,6 +502,19 @@ input {
   .progress-track,
   .bar-row div {
     background: #26313e;
+  }
+
+  .spinner {
+    border-color: #2a3542;
+    border-top-color: #8bbdec;
+  }
+
+  .token-cell small {
+    color: #9ca8b7;
+  }
+
+  tfoot td {
+    background: #141a22;
   }
 
   .empty-state h2 {

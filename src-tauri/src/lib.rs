@@ -160,6 +160,10 @@ struct SessionSummary {
     output_tokens: i64,
     cached_tokens: i64,
     total_tokens: i64,
+    input_cost: Option<f64>,
+    output_cost: Option<f64>,
+    cached_cost: Option<f64>,
+    other_cost: Option<f64>,
     api_equivalent_cost: Option<f64>,
     confidence: String,
 }
@@ -2638,6 +2642,11 @@ fn row_to_pricing(row: &rusqlite::Row<'_>) -> rusqlite::Result<Pricing> {
 }
 
 fn calculate_cost(event: &ParsedEvent, pricing: &Pricing) -> f64 {
+    let parts = calculate_cost_parts(event, pricing);
+    parts.0 + parts.1 + parts.2 + parts.3
+}
+
+fn calculate_cost_parts(event: &ParsedEvent, pricing: &Pricing) -> (f64, f64, f64, f64) {
     let million = 1_000_000.0;
 
     // Provider-specific token counting semantics:
@@ -2663,12 +2672,12 @@ fn calculate_cost(event: &ParsedEvent, pricing: &Pricing) -> f64 {
         event.input_tokens
     };
 
-    (effective_input as f64 / million) * pricing.input_per_1m.unwrap_or(0.0)
-        + (event.output_tokens as f64 / million) * pricing.output_per_1m.unwrap_or(0.0)
-        + (event.cached_input_tokens as f64 / million)
-            * pricing
-                .cached_input_per_1m
-                .unwrap_or(pricing.input_per_1m.unwrap_or(0.0))
+    let input_cost = (effective_input as f64 / million) * pricing.input_per_1m.unwrap_or(0.0);
+    let output_cost = (event.output_tokens as f64 / million) * pricing.output_per_1m.unwrap_or(0.0);
+    let cached_cost = (event.cached_input_tokens as f64 / million)
+        * pricing
+            .cached_input_per_1m
+            .unwrap_or(pricing.input_per_1m.unwrap_or(0.0))
         + (event.cache_write_tokens as f64 / million)
             * pricing
                 .cache_write_per_1m
@@ -2676,15 +2685,17 @@ fn calculate_cost(event: &ParsedEvent, pricing: &Pricing) -> f64 {
         + (event.cache_read_tokens as f64 / million)
             * pricing
                 .cache_read_per_1m
-                .unwrap_or(pricing.cached_input_per_1m.unwrap_or(0.0))
-        + (event.reasoning_tokens as f64 / million)
-            * pricing
-                .reasoning_per_1m
-                .unwrap_or(pricing.output_per_1m.unwrap_or(0.0))
+                .unwrap_or(pricing.cached_input_per_1m.unwrap_or(0.0));
+    let other_cost = (event.reasoning_tokens as f64 / million)
+        * pricing
+            .reasoning_per_1m
+            .unwrap_or(pricing.output_per_1m.unwrap_or(0.0))
         + (event.tool_tokens as f64 / million)
             * pricing
                 .tool_per_1m
-                .unwrap_or(pricing.input_per_1m.unwrap_or(0.0))
+                .unwrap_or(pricing.input_per_1m.unwrap_or(0.0));
+
+    (input_cost, output_cost, cached_cost, other_cost)
 }
 
 fn query_provider_summaries(conn: &Connection) -> Result<Vec<ProviderSummary>, String> {
@@ -2793,8 +2804,9 @@ fn query_recent_sessions(conn: &Connection, provider_filter: Option<&str>, offse
         "SELECT u.id, u.provider_id, pr.display_name, u.model, u.event_type, u.timestamp,
          u.input_tokens, (u.input_tokens - u.cached_input_tokens), u.output_tokens,
          (u.cached_input_tokens + u.cache_write_tokens + u.cache_read_tokens),
-         (u.input_tokens + u.output_tokens + u.cached_input_tokens + u.cache_write_tokens + u.cache_read_tokens + u.reasoning_tokens + u.tool_tokens + u.unknown_tokens),
-         u.official_api_cost_usd, u.confidence
+         ((CASE WHEN u.cache_read_tokens > 0 OR u.cache_write_tokens > 0 THEN u.input_tokens ELSE max(u.input_tokens - u.cached_input_tokens, 0) END) + u.output_tokens + u.cached_input_tokens + u.cache_write_tokens + u.cache_read_tokens + u.reasoning_tokens + u.tool_tokens + u.unknown_tokens),
+         u.official_api_cost_usd, u.confidence,
+         u.cached_input_tokens, u.cache_write_tokens, u.cache_read_tokens, u.reasoning_tokens, u.tool_tokens, u.unknown_tokens
          FROM usage_events u LEFT JOIN projects pr ON pr.id = u.project_id
          {}
          ORDER BY u.timestamp DESC LIMIT ?{} OFFSET ?{}",
@@ -2804,18 +2816,53 @@ fn query_recent_sessions(conn: &Connection, provider_filter: Option<&str>, offse
     );
     let mut stmt = conn.prepare(&sql).map_err(to_string)?;
     let map_row = |r: &rusqlite::Row| -> rusqlite::Result<SessionSummary> {
+        let provider_id: String = r.get(1)?;
+        let model: Option<String> = r.get(3)?;
+        let event = ParsedEvent {
+            provider_id: provider_id.clone(),
+            product_id: None,
+            timestamp: r.get(5)?,
+            project_path: None,
+            conversation_id: None,
+            message_id: None,
+            request_id: None,
+            model: model.clone(),
+            event_type: r.get(4)?,
+            input_tokens: r.get(6)?,
+            output_tokens: r.get(8)?,
+            cached_input_tokens: r.get(13)?,
+            cache_write_tokens: r.get(14)?,
+            cache_read_tokens: r.get(15)?,
+            reasoning_tokens: r.get(16)?,
+            tool_tokens: r.get(17)?,
+            unknown_tokens: r.get(18)?,
+            source_offset: None,
+            raw_record_hash: String::new(),
+            confidence: String::new(),
+            warnings: vec![],
+        };
+        let cost_parts = find_pricing_sql(conn, &provider_id, model.as_deref())
+            .ok()
+            .flatten()
+            .map(|pricing| calculate_cost_parts(&event, &pricing));
         Ok(SessionSummary {
             id: r.get(0)?,
-            provider_id: r.get(1)?,
+            provider_id,
             project_name: r.get(2)?,
-            model: r.get(3)?,
+            model,
             event_type: r.get(4)?,
             timestamp: r.get(5)?,
             input_tokens: r.get(6)?,
-            effective_input_tokens: r.get(7)?,
+            effective_input_tokens: (event.input_tokens
+                - if event.cache_read_tokens > 0 || event.cache_write_tokens > 0 { 0 } else { event.cached_input_tokens })
+                .max(0),
             output_tokens: r.get(8)?,
             cached_tokens: r.get(9)?,
             total_tokens: r.get(10)?,
+            input_cost: cost_parts.map(|parts| parts.0),
+            output_cost: cost_parts.map(|parts| parts.1),
+            cached_cost: cost_parts.map(|parts| parts.2),
+            other_cost: cost_parts.map(|parts| parts.3),
             api_equivalent_cost: r.get(11)?,
             confidence: r.get(12)?,
         })
@@ -2846,7 +2893,7 @@ fn sum_usage(providers: &[ProviderSummary]) -> UsageTotals {
 
 impl UsageTotals {
     fn with_total(mut self) -> Self {
-        self.total_tokens = self.input_tokens
+        self.total_tokens = (self.input_tokens - self.cached_input_tokens).max(0)
             + self.output_tokens
             + self.cached_input_tokens
             + self.cache_write_tokens
@@ -3139,4 +3186,3 @@ fn json_f64(value: Option<&Value>) -> Option<f64> {
         _ => None,
     }
 }
-

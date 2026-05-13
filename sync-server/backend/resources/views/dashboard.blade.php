@@ -3,7 +3,17 @@
 @section('title', 'Dashboard - MEtR Sync')
 
 @section('content')
-<h1>Dashboard</h1>
+@php
+    $tabQuery = fn (string $tab) => url('/dashboard').'?'.http_build_query(array_merge(request()->except('page'), ['tab' => $tab]));
+@endphp
+
+<div class="page-heading">
+    <div>
+        <h1>Dashboard</h1>
+        <div class="muted">Server-side usage analytics across synced devices.</div>
+    </div>
+    <a class="btn secondary" href="/dashboard">Reset</a>
+</div>
 
 <div class="grid stats-grid">
     {{-- Row 1: Cost, Events, Total Tokens --}}
@@ -33,123 +43,154 @@
         <div class="value">{{ number_format($summary['output_tokens'] ?? 0) }}</div>
         <div class="label">Output Tokens</div>
     </div>
-</div><div class="card">
+</div>
+
+<div class="card">
     <h3 style="margin-top:0;">Filters</h3>
-    <form method="GET" action="/dashboard" style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;">
+    <form method="GET" action="/dashboard" class="filters">
+        <input type="hidden" name="tab" value="{{ $activeTab }}">
         <div>
             <label>From</label>
-            <input type="date" name="from" value="{{ request('from') }}" style="width:160px;margin:0;">
+            <input type="date" name="from" value="{{ request('from') }}">
         </div>
         <div>
             <label>To</label>
-            <input type="date" name="to" value="{{ request('to') }}" style="width:160px;margin:0;">
+            <input type="date" name="to" value="{{ request('to') }}">
         </div>
         <div>
-            <button class="btn" style="margin:0;">Apply</button>
+            <label>Provider</label>
+            <select name="provider_id">
+                <option value="">All providers</option>
+                @foreach($filterOptions['providers'] as $provider)
+                    <option value="{{ $provider->id }}" @selected(request('provider_id') === $provider->id)>{{ $provider->display_name }}</option>
+                @endforeach
+            </select>
+        </div>
+        <div>
+            <label>Device</label>
+            <select name="device_id">
+                <option value="">All devices</option>
+                @foreach($filterOptions['devices'] as $device)
+                    <option value="{{ $device->id }}" @selected(request('device_id') === $device->id)>{{ $device->alias ?: $device->display_name }}</option>
+                @endforeach
+            </select>
+        </div>
+        <div>
+            <label>Project</label>
+            <select name="project_id">
+                <option value="">All projects</option>
+                @foreach($filterOptions['projects'] as $project)
+                    <option value="{{ $project->id }}" @selected(request('project_id') === $project->id)>{{ $project->manual_name ?: $project->canonical_name }}</option>
+                @endforeach
+            </select>
+        </div>
+        <div>
+            <label>Account</label>
+            <select name="provider_account_id">
+                <option value="">All accounts</option>
+                <option value="__none__" @selected(request('provider_account_id') === '__none__')>Unattributed</option>
+                @foreach($filterOptions['accounts'] as $account)
+                    <option value="{{ $account->id }}" @selected(request('provider_account_id') === $account->id)>{{ $account->label }}</option>
+                @endforeach
+            </select>
+        </div>
+        <div>
+            <label>Model</label>
+            <select name="model">
+                <option value="">All models</option>
+                @foreach($filterOptions['models'] as $model)
+                    <option value="{{ $model }}" @selected(request('model') === $model)>{{ $model }}</option>
+                @endforeach
+            </select>
+        </div>
+        <div>
+            <label>Rows</label>
+            <select name="per_page">
+                @foreach([10, 25, 50, 100] as $size)
+                    <option value="{{ $size }}" @selected((int) request('per_page', 50) === $size)>{{ $size }}</option>
+                @endforeach
+            </select>
+        </div>
+        <div class="wide">
+            <label>Search</label>
+            <input type="search" name="q" value="{{ request('q') }}" placeholder="Model, project, or source event id">
+        </div>
+        <div>
+            <button class="btn">Apply</button>
         </div>
     </form>
 </div>
 
 <div class="tabs">
-    <button class="tab-btn active" onclick="switchTab(event, 'tab-devices')">Devices & Projects</button>
-    <button class="tab-btn" onclick="switchTab(event, 'tab-accounts')">Accounts & Models</button>
-    <button class="tab-btn" onclick="switchTab(event, 'tab-events')">Recent Events</button>
-    <button class="tab-btn" onclick="switchTab(event, 'tab-all')">All Tables</button>
+    <a class="tab-btn {{ $activeTab === 'devices' ? 'active' : '' }}" href="{{ $tabQuery('devices') }}">Devices & Projects</a>
+    <a class="tab-btn {{ $activeTab === 'accounts' ? 'active' : '' }}" href="{{ $tabQuery('accounts') }}">Accounts & Models</a>
+    <a class="tab-btn {{ $activeTab === 'events' ? 'active' : '' }}" href="{{ $tabQuery('events') }}">Recent Events</a>
+    <a class="tab-btn {{ $activeTab === 'all' ? 'active' : '' }}" href="{{ $tabQuery('all') }}">All Tables</a>
 </div>
 
-<div id="tab-devices" class="tab-content" style="display:block;">
+@if($activeTab === 'devices')
     @include('partials.dashboard-table', ['title' => 'By Device', 'rows' => $byDevice])
     @include('partials.dashboard-table', ['title' => 'By Project', 'rows' => $byProject])
-</div>
+@endif
 
-<div id="tab-accounts" class="tab-content" style="display:none;">
+@if($activeTab === 'accounts')
     @include('partials.dashboard-table', ['title' => 'By Provider Account', 'rows' => $byProviderAccount])
     @include('partials.dashboard-table', ['title' => 'By Model', 'rows' => $byModel])
-</div>
+@endif
 
-<div id="tab-events" class="tab-content" style="display:none;">
+@if($activeTab === 'events')
     <div class="card">
-        <h3 style="margin-top:0;">Recent Events ({{ $events->total() }} total)</h3>
-        <table>
-            <thead>
-                <tr>
-                    <th>Time</th>
-                    <th>Project</th>
-                    <th>Type</th>
-                    <th>Provider</th>
-                    <th>Model</th>
-                    <th style="text-align:right;">Tokens</th>
-                    <th style="text-align:right;">Cost</th>
-                </tr>
-            </thead>
-            <tbody>
-                @forelse($events as $e)
-                <tr>
-                    <td style="white-space:nowrap;font-size:12px;">{{ \Carbon\Carbon::parse($e->timestamp)->format('M j, g:i A') }}</td>
-                    <td>{{ $e->project_name ?? '—' }}</td>
-                    <td>
-                        @if($e->event_type)
-                            <span style="font-size:11px;background:var(--accent-soft);color:var(--accent);padding:2px 6px;border-radius:4px;font-weight:600;">{{ $e->event_type }}</span>
-                        @else
-                            <span class="muted">—</span>
-                        @endif
-                    </td>
-                    <td style="font-size:12px;">{{ $e->provider_id }}</td>
-                    <td style="font-size:12px;max-width:140px;overflow:hidden;text-overflow:ellipsis;">{{ $e->model ?? '—' }}</td>
-                    <td style="text-align:right;white-space:nowrap;font-size:13px;">
-                        {{ number_format($e->input_tokens + $e->output_tokens + $e->cache_write_tokens + $e->cache_read_tokens + $e->reasoning_tokens + $e->tool_tokens + $e->unknown_tokens) }}
-                    </td>
-                    <td style="text-align:right;white-space:nowrap;font-size:13px;">
-                        {{ $e->official_api_cost_usd !== null ? '$'.number_format((float) $e->official_api_cost_usd, 4) : '—' }}
-                    </td>
-                </tr>
-                @empty
-                <tr>
-                    <td colspan="7" class="muted">No synced usage yet.</td>
-                </tr>
-                @endforelse
-            </tbody>
-        </table>
-
-        @if($events->hasPages())
-        <div style="margin-top:16px;display:flex;justify-content:center;gap:6px;flex-wrap:wrap;">
-            @if($events->onFirstPage())
-                <span class="btn secondary" style="opacity:0.5;cursor:default;">← Prev</span>
-            @else
-                <a href="{{ $events->previousPageUrl() }}" class="btn secondary">← Prev</a>
-            @endif
-
-            @foreach($events->getUrlRange(1, $events->lastPage()) as $page => $url)
-                @if($page == $events->currentPage())
-                    <span class="btn" style="min-width:36px;padding:6px 10px;">{{ $page }}</span>
-                @else
-                    <a href="{{ $url }}" class="btn secondary" style="min-width:36px;padding:6px 10px;">{{ $page }}</a>
-                @endif
-            @endforeach
-
-            @if($events->hasMorePages())
-                <a href="{{ $events->nextPageUrl() }}" class="btn secondary">Next →</a>
-            @else
-                <span class="btn secondary" style="opacity:0.5;cursor:default;">Next →</span>
-            @endif
+        <div class="table-meta">
+            <h3 style="margin:0;">Recent Events</h3>
+            <span class="muted">{{ number_format($events->total()) }} matching events</span>
         </div>
-        @endif
-    </div>
-</div>
+        <div class="table-wrap">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Time</th>
+                        <th>Project</th>
+                        <th>Device</th>
+                        <th>Account</th>
+                        <th>Provider</th>
+                        <th>Model</th>
+                        <th style="text-align:right;">Tokens</th>
+                        <th style="text-align:right;">Cost</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @forelse($events as $e)
+                    <tr>
+                        <td style="white-space:nowrap;font-size:12px;">{{ \Carbon\Carbon::parse($e->timestamp)->format('M j, g:i A') }}</td>
+                        <td>{{ $e->project_name ?? '—' }}</td>
+                        <td>{{ $e->device_name ?? '—' }}</td>
+                        <td>{{ $e->provider_account_name ?? 'Unattributed' }}</td>
+                        <td style="font-size:12px;">{{ $e->provider_id }}</td>
+                        <td style="font-size:12px;max-width:180px;overflow:hidden;text-overflow:ellipsis;">{{ $e->model ?? '—' }}</td>
+                        <td style="text-align:right;white-space:nowrap;font-size:13px;">
+                            {{ number_format($e->input_tokens + $e->output_tokens + $e->cached_input_tokens + $e->cache_write_tokens + $e->cache_read_tokens + $e->reasoning_tokens + $e->tool_tokens + $e->unknown_tokens) }}
+                        </td>
+                        <td style="text-align:right;white-space:nowrap;font-size:13px;">
+                            {{ $e->official_api_cost_usd !== null ? '$'.number_format((float) $e->official_api_cost_usd, 4) : '—' }}
+                        </td>
+                    </tr>
+                    @empty
+                    <tr>
+                        <td colspan="8" class="muted">No synced usage matches these filters.</td>
+                    </tr>
+                    @endforelse
+                </tbody>
+            </table>
+        </div>
 
-<div id="tab-all" class="tab-content" style="display:none;">
+        {{ $events->onEachSide(1)->links('partials.pagination') }}
+    </div>
+@endif
+
+@if($activeTab === 'all')
     @include('partials.dashboard-table', ['title' => 'By Device', 'rows' => $byDevice])
     @include('partials.dashboard-table', ['title' => 'By Project', 'rows' => $byProject])
     @include('partials.dashboard-table', ['title' => 'By Provider Account', 'rows' => $byProviderAccount])
     @include('partials.dashboard-table', ['title' => 'By Model', 'rows' => $byModel])
-</div>
-
-<script>
-function switchTab(evt, tabId) {
-    document.querySelectorAll('.tab-content').forEach(el => el.style.display = 'none');
-    document.querySelectorAll('.tab-btn').forEach(el => el.classList.remove('active'));
-    document.getElementById(tabId).style.display = 'block';
-    evt.currentTarget.classList.add('active');
-}
-</script>
+@endif
 @endsection
