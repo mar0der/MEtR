@@ -434,6 +434,9 @@ Test files:
 ### Stale Closures in React
 `useEffect(() => { setInterval(refresh, 30000) }, [])` captures the initial `refresh` function. State must be read via refs (`activeTabRef`, `sessionPageRef`) inside the interval callback.
 
+### Stale Session Responses Across Provider Tabs
+Provider-tab session requests can race with older unfiltered `All` refresh requests. Guard paginated session responses by request id, selected provider, and page before updating UI state; otherwise a late `All` response can repaint Claude/OpenAI tabs with Kimi-heavy global results.
+
 ### `putFileAs` Self-Destruct Bug
 Laravel's `Storage::putFileAs` opens the destination in write mode (truncating) before reading the source. If paths are identical, the file becomes 0 bytes. **Guard:** compare `realpath($source)` with `$disk->path($filename)` before calling `putFileAs`.
 
