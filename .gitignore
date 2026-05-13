@@ -3,8 +3,6 @@ dist
 src-tauri/target
 src-tauri/gen
 .agents
-AGENTS.md
-agents.md
 *.log
 *.tmp
 .DS_Store
