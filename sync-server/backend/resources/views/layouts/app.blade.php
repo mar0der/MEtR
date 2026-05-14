@@ -63,6 +63,7 @@
         }
         nav a { color: var(--text); text-decoration: none; font-weight: 500; font-size: 14px; transition: color .15s; }
         nav a:hover { color: var(--accent); }
+        nav a.active { color: var(--accent); }
         nav .left { display: flex; gap: 20px; align-items: center; }
         .logo {
             display: flex;
@@ -216,12 +217,102 @@
             opacity: .45;
             pointer-events: none;
         }
+        .range-presets {
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+            margin-bottom: 16px;
+        }
+        .range-presets .btn {
+            padding: 7px 12px;
+            font-size: 13px;
+        }
+        .range-presets .btn.active,
+        .mode-toggle .btn.active {
+            background: var(--accent);
+            border-color: var(--accent);
+            color: #fff;
+        }
+        .chart-card {
+            padding-bottom: 8px;
+        }
+        .chart-legend {
+            display: flex;
+            gap: 14px;
+            flex-wrap: wrap;
+            margin-bottom: 16px;
+            color: var(--muted);
+            font-size: 13px;
+        }
+        .legend-item {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .legend-swatch {
+            width: 10px;
+            height: 10px;
+            border-radius: 3px;
+        }
+        .report-chart {
+            display: grid;
+            gap: 12px;
+        }
+        .report-row {
+            display: grid;
+            grid-template-columns: 118px minmax(0, 1fr) 120px;
+            gap: 12px;
+            align-items: center;
+        }
+        .report-date {
+            color: var(--muted);
+            font-size: 13px;
+            white-space: nowrap;
+        }
+        .report-bar-track {
+            height: 28px;
+            border-radius: 8px;
+            background: rgba(107, 114, 128, .12);
+            overflow: hidden;
+        }
+        .report-bar-fill {
+            display: flex;
+            height: 100%;
+            min-width: 2px;
+            border-radius: 8px;
+            overflow: hidden;
+        }
+        .report-segment {
+            height: 100%;
+            min-width: 1px;
+        }
+        .segment-cached { background: #2563eb; }
+        .segment-input { background: #10b981; }
+        .segment-output { background: #f59e0b; }
+        .segment-other { background: #9ca3af; }
+        .report-value {
+            text-align: right;
+            white-space: nowrap;
+            font-weight: 600;
+        }
+        .report-value small {
+            display: block;
+            color: var(--muted);
+            font-weight: 500;
+        }
+        .mode-toggle {
+            display: inline-flex;
+            gap: 6px;
+            flex-wrap: wrap;
+        }
         .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; }
         .grid.two-col { grid-template-columns: repeat(2, minmax(0, 1fr)); }
         .grid.stats-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
         @media (max-width: 768px) {
             .grid.two-col { grid-template-columns: 1fr; }
             .grid.stats-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+            .report-row { grid-template-columns: 1fr; gap: 6px; }
+            .report-value { text-align: left; }
         }
         .stat { position: relative; overflow: hidden; }
         .stat .value { font-size: 26px; font-weight: 700; letter-spacing: -0.02em; }
@@ -298,6 +389,7 @@
             </a>
             @auth
                 <a href="/devices">Devices</a>
+                <a href="/reports" @class(['active' => request()->is('reports')])>Reports</a>
                 <a href="/provider-accounts">Accounts</a>
                 <a href="/subscriptions">Subscriptions</a>
                 <a href="/projects">Projects</a>

@@ -184,6 +184,62 @@ class WebController extends Controller
         ]);
     }
 
+    public function reports(Request $request)
+    {
+        $user = Auth::user();
+        $dateRange = $this->reportDateRange($request);
+        $metric = in_array($request->query('metric'), ['cost', 'tokens'], true)
+            ? $request->query('metric')
+            : 'cost';
+
+        $query = $this->filteredUsageQuery($request, $user->id, $dateRange);
+
+        $summaryRaw = (clone $query)->select([
+            DB::raw('SUM(input_tokens) as input_tokens'),
+            DB::raw('SUM(output_tokens) as output_tokens'),
+            DB::raw('SUM(cached_input_tokens) as cached_input_tokens'),
+            DB::raw('SUM(cache_write_tokens) as cache_write_tokens'),
+            DB::raw('SUM(cache_read_tokens) as cache_read_tokens'),
+            DB::raw('SUM(reasoning_tokens) as reasoning_tokens'),
+            DB::raw('SUM(tool_tokens) as tool_tokens'),
+            DB::raw('SUM(unknown_tokens) as unknown_tokens'),
+            DB::raw('COUNT(*) as event_count'),
+            DB::raw('SUM(official_api_cost_usd) as total_cost'),
+        ])->first();
+        $summary = $this->reportTotals($summaryRaw);
+
+        $dailyRows = (clone $query)
+            ->select([
+                DB::raw('DATE(usage_events.timestamp) as bucket'),
+                DB::raw('SUM(input_tokens) as input_tokens'),
+                DB::raw('SUM(output_tokens) as output_tokens'),
+                DB::raw('SUM(cached_input_tokens) as cached_input_tokens'),
+                DB::raw('SUM(cache_write_tokens) as cache_write_tokens'),
+                DB::raw('SUM(cache_read_tokens) as cache_read_tokens'),
+                DB::raw('SUM(reasoning_tokens) as reasoning_tokens'),
+                DB::raw('SUM(tool_tokens) as tool_tokens'),
+                DB::raw('SUM(unknown_tokens) as unknown_tokens'),
+                DB::raw('COUNT(*) as event_count'),
+                DB::raw('SUM(official_api_cost_usd) as total_cost'),
+            ])
+            ->groupBy(DB::raw('DATE(usage_events.timestamp)'))
+            ->orderBy('bucket')
+            ->get()
+            ->map(fn ($row) => $this->reportChartRow($row, $metric));
+
+        $maxValue = max(1, (float) $dailyRows->max('value'));
+
+        return view('reports', [
+            'summary' => $summary,
+            'rows' => $dailyRows,
+            'maxValue' => $maxValue,
+            'metric' => $metric,
+            'dateRange' => $dateRange,
+            'filterOptions' => $this->dashboardFilterOptions($user->id),
+            'presets' => $this->reportPresets(),
+        ]);
+    }
+
     public function updateDeviceAlias(Request $request, $id)
     {
         $validated = $request->validate(["alias" => ["nullable", "string", "max:255"]]);
@@ -405,21 +461,24 @@ class WebController extends Controller
         return redirect('/settings')->with('success', 'All usage data cleared from server.');
     }
 
-    private function filteredUsageQuery(Request $request, int $userId): Builder
+    private function filteredUsageQuery(Request $request, int $userId, ?array $dateRange = null): Builder
     {
         $query = UsageEvent::where('usage_events.user_id', $userId);
-        $this->applyUsageFilters($query, $request);
+        $this->applyUsageFilters($query, $request, $dateRange);
 
         return $query;
     }
 
-    private function applyUsageFilters(Builder $query, Request $request): void
+    private function applyUsageFilters(Builder $query, Request $request, ?array $dateRange = null): void
     {
-        if ($request->filled('from')) {
-            $query->where('usage_events.timestamp', '>=', Carbon::parse($request->input('from'))->startOfDay());
+        $from = $dateRange['from'] ?? ($request->filled('from') ? Carbon::parse($request->input('from'))->startOfDay() : null);
+        $to = $dateRange['to'] ?? ($request->filled('to') ? Carbon::parse($request->input('to'))->endOfDay() : null);
+
+        if ($from) {
+            $query->where('usage_events.timestamp', '>=', $from);
         }
-        if ($request->filled('to')) {
-            $query->where('usage_events.timestamp', '<=', Carbon::parse($request->input('to'))->endOfDay());
+        if ($to) {
+            $query->where('usage_events.timestamp', '<=', $to);
         }
         if ($request->filled('provider_id')) {
             $query->where('usage_events.provider_id', $request->input('provider_id'));
@@ -469,6 +528,140 @@ class WebController extends Controller
                 ->distinct()
                 ->orderBy('model')
                 ->pluck('model'),
+        ];
+    }
+
+    private function reportPresets(): array
+    {
+        return [
+            'today' => 'Today',
+            'yesterday' => 'Yesterday',
+            'this_week' => 'This week',
+            'last_week' => 'Last week',
+            'this_month' => 'This month',
+            'custom' => 'Custom',
+        ];
+    }
+
+    /**
+     * @return array{preset: string, from: Carbon, to: Carbon}
+     */
+    private function reportDateRange(Request $request): array
+    {
+        $preset = array_key_exists($request->query('preset', 'this_week'), $this->reportPresets())
+            ? $request->query('preset', 'this_week')
+            : 'this_week';
+        $now = now();
+
+        return match ($preset) {
+            'today' => [
+                'preset' => $preset,
+                'from' => $now->copy()->startOfDay(),
+                'to' => $now->copy()->endOfDay(),
+            ],
+            'yesterday' => [
+                'preset' => $preset,
+                'from' => $now->copy()->subDay()->startOfDay(),
+                'to' => $now->copy()->subDay()->endOfDay(),
+            ],
+            'last_week' => [
+                'preset' => $preset,
+                'from' => $now->copy()->subWeek()->startOfWeek(),
+                'to' => $now->copy()->subWeek()->endOfWeek(),
+            ],
+            'this_month' => [
+                'preset' => $preset,
+                'from' => $now->copy()->startOfMonth(),
+                'to' => $now->copy()->endOfDay(),
+            ],
+            'custom' => [
+                'preset' => $preset,
+                'from' => $this->parseReportDate($request->query('from'), $now->copy()->startOfMonth(), false),
+                'to' => $this->parseReportDate($request->query('to'), $now->copy()->endOfDay(), true),
+            ],
+            default => [
+                'preset' => 'this_week',
+                'from' => $now->copy()->startOfWeek(),
+                'to' => $now->copy()->endOfDay(),
+            ],
+        };
+    }
+
+    private function parseReportDate(?string $value, Carbon $fallback, bool $endOfDay): Carbon
+    {
+        if (! $value) {
+            return $fallback;
+        }
+
+        try {
+            $date = Carbon::parse($value);
+
+            return $endOfDay ? $date->endOfDay() : $date->startOfDay();
+        } catch (\Throwable) {
+            return $fallback;
+        }
+    }
+
+    /**
+     * @return array<string, int|float>
+     */
+    private function reportTotals(object $row): array
+    {
+        $input = (int) ($row->input_tokens ?? 0);
+        $cachedInput = (int) ($row->cached_input_tokens ?? 0);
+        $cacheWrite = (int) ($row->cache_write_tokens ?? 0);
+        $cacheRead = (int) ($row->cache_read_tokens ?? 0);
+        $output = (int) ($row->output_tokens ?? 0);
+        $reasoning = (int) ($row->reasoning_tokens ?? 0);
+        $tool = (int) ($row->tool_tokens ?? 0);
+        $unknown = (int) ($row->unknown_tokens ?? 0);
+        $effectiveInput = max(0, $input - $cachedInput);
+        $cached = $cachedInput + $cacheWrite + $cacheRead;
+        $other = $reasoning + $tool + $unknown;
+
+        return [
+            'cost' => (float) ($row->total_cost ?? 0),
+            'events' => (int) ($row->event_count ?? 0),
+            'cached' => $cached,
+            'input' => $effectiveInput,
+            'output' => $output,
+            'other' => $other,
+            'total_tokens' => $cached + $effectiveInput + $output + $other,
+        ];
+    }
+
+    private function reportChartRow(object $row, string $metric): array
+    {
+        $totals = $this->reportTotals($row);
+        $tokenBase = max(1, $totals['total_tokens']);
+        $cost = (float) $totals['cost'];
+        $isCost = $metric === 'cost';
+
+        $segments = collect([
+            ['key' => 'cached', 'label' => 'Cached', 'tokens' => $totals['cached']],
+            ['key' => 'input', 'label' => 'Input', 'tokens' => $totals['input']],
+            ['key' => 'output', 'label' => 'Output', 'tokens' => $totals['output']],
+            ['key' => 'other', 'label' => 'Other', 'tokens' => $totals['other']],
+        ])->map(function ($segment) use ($tokenBase, $cost, $isCost) {
+            $share = $segment['tokens'] / $tokenBase;
+
+            return [
+                'key' => $segment['key'],
+                'label' => $segment['label'],
+                'tokens' => $segment['tokens'],
+                'share' => $share,
+                'value' => $isCost ? $cost * $share : $segment['tokens'],
+            ];
+        })->all();
+
+        return [
+            'bucket' => $row->bucket,
+            'label' => Carbon::parse($row->bucket)->format('M j'),
+            'events' => $totals['events'],
+            'cost' => $cost,
+            'total_tokens' => $totals['total_tokens'],
+            'value' => $isCost ? $cost : $totals['total_tokens'],
+            'segments' => $segments,
         ];
     }
 
