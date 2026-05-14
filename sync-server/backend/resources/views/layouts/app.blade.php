@@ -128,7 +128,7 @@
         .btn.secondary:hover { background: rgba(0,0,0,0.03); }
         @media (prefers-color-scheme: dark) { .btn.secondary:hover { background: rgba(255,255,255,0.05); } }
         form label { display: block; font-size: 13px; font-weight: 600; margin-bottom: 4px; color: var(--muted); }
-        form input, form select {
+        form input, form select, .favorite-select {
             width: 100%;
             padding: 10px 12px;
             border: 1px solid var(--border);
@@ -140,7 +140,7 @@
             font-family: inherit;
             transition: border-color .15s, box-shadow .15s;
         }
-        form input:focus, form select:focus {
+        form input:focus, form select:focus, .favorite-select:focus {
             outline: none;
             border-color: var(--accent);
             box-shadow: 0 0 0 3px var(--accent-soft);
@@ -304,6 +304,22 @@
             display: inline-flex;
             gap: 6px;
             flex-wrap: wrap;
+        }
+        .favorite-tools {
+            display: flex;
+            align-items: end;
+            gap: 8px;
+            flex-wrap: wrap;
+            margin-bottom: 16px;
+        }
+        .favorite-tools form {
+            margin: 0;
+        }
+        .favorite-select {
+            min-width: 260px;
+        }
+        .inline-delete {
+            display: inline-flex;
         }
         .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; }
         .grid.two-col { grid-template-columns: repeat(2, minmax(0, 1fr)); }
