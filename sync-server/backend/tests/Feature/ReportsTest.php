@@ -5,6 +5,7 @@ namespace Tests\Feature;
 use App\Models\Device;
 use App\Models\Project;
 use App\Models\Provider;
+use App\Models\ReportFavorite;
 use App\Models\UsageEvent;
 use App\Models\User;
 use Carbon\Carbon;
@@ -98,5 +99,41 @@ class ReportsTest extends TestCase
             ->assertSee('$0.25');
 
         Carbon::setTestNow();
+    }
+
+    public function test_report_filters_can_be_saved_loaded_and_deleted_as_favorites(): void
+    {
+        $user = User::factory()->create();
+        Provider::factory()->create(['id' => 'openai', 'display_name' => 'OpenAI']);
+
+        $this->actingAs($user)
+            ->post('/reports/favorites', [
+                'favorite_name' => 'Daily OpenAI Cost',
+                'preset' => 'today',
+                'provider_id' => 'openai',
+                'metric' => 'cost',
+            ])
+            ->assertRedirect('/reports?preset=today&provider_id=openai&metric=cost');
+
+        $favorite = ReportFavorite::where('user_id', $user->id)->firstOrFail();
+        $this->assertSame('Daily OpenAI Cost', $favorite->name);
+        $this->assertSame('today', $favorite->query_json['preset']);
+        $this->assertSame('openai', $favorite->query_json['provider_id']);
+
+        $this->actingAs($user)
+            ->get('/reports/favorites/'.$favorite->id)
+            ->assertRedirect('/reports?preset=today&provider_id=openai&metric=cost&favorite_id='.$favorite->id);
+
+        $this->actingAs($user)
+            ->get('/reports?favorite_id='.$favorite->id)
+            ->assertOk()
+            ->assertSee('Daily OpenAI Cost')
+            ->assertSee('Delete Favorite');
+
+        $this->actingAs($user)
+            ->delete('/reports/favorites/'.$favorite->id)
+            ->assertRedirect('/reports');
+
+        $this->assertDatabaseMissing('report_favorites', ['id' => $favorite->id]);
     }
 }

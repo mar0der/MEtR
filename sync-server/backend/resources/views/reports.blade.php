@@ -24,6 +24,41 @@
     @endforeach
 </div>
 
+<div class="favorite-tools">
+    <div>
+        <label style="display:block;font-size:13px;font-weight:600;margin-bottom:4px;color:var(--muted);">Favorites</label>
+        <select class="favorite-select" onchange="if (this.value) window.location.href = this.value;">
+            <option value="">Choose a saved report...</option>
+            @foreach($favorites as $favorite)
+                <option value="/reports/favorites/{{ $favorite->id }}" @selected($activeFavoriteId === $favorite->id)>{{ $favorite->name }}</option>
+            @endforeach
+        </select>
+    </div>
+    <form id="save-favorite-form" method="POST" action="/reports/favorites" onsubmit="return nameReportFavorite(this);">
+        @csrf
+        <input type="hidden" name="favorite_name" value="">
+        @foreach(request()->only(['preset', 'from', 'to', 'provider_id', 'device_id', 'project_id', 'provider_account_id', 'model', 'metric', 'q']) as $key => $value)
+            @if($value !== null && $value !== '')
+                <input type="hidden" name="{{ $key }}" value="{{ $value }}">
+            @endif
+        @endforeach
+        @if(!request()->has('preset'))
+            <input type="hidden" name="preset" value="{{ $dateRange['preset'] }}">
+        @endif
+        @if(!request()->has('metric'))
+            <input type="hidden" name="metric" value="{{ $metric }}">
+        @endif
+        <button class="btn" type="submit">Save to Favorites</button>
+    </form>
+    @if($activeFavoriteId)
+        <form class="inline-delete" method="POST" action="/reports/favorites/{{ $activeFavoriteId }}" onsubmit="return confirm('Delete this report favorite?');">
+            @csrf
+            @method('DELETE')
+            <button class="btn secondary" type="submit">Delete Favorite</button>
+        </form>
+    @endif
+</div>
+
 <div class="grid stats-grid">
     <div class="card stat stat-accent">
         <div class="value" style="color:var(--accent);">${{ number_format((float) $summary['cost'], 2) }}</div>
@@ -36,18 +71,6 @@
     <div class="card stat stat-success">
         <div class="value" style="color:var(--success);">{{ number_format($summary['total_tokens']) }}</div>
         <div class="label">Total Tokens</div>
-    </div>
-    <div class="card stat">
-        <div class="value">{{ number_format($summary['cached']) }}</div>
-        <div class="label">Cached Tokens</div>
-    </div>
-    <div class="card stat">
-        <div class="value">{{ number_format($summary['input']) }}</div>
-        <div class="label">Real Input Tokens</div>
-    </div>
-    <div class="card stat">
-        <div class="value">{{ number_format($summary['output']) }}</div>
-        <div class="label">Output Tokens</div>
     </div>
 </div>
 
@@ -222,4 +245,15 @@
         </table>
     </div>
 </div>
+
+<script>
+function nameReportFavorite(form) {
+    const name = window.prompt('Name this report favorite');
+    if (!name || !name.trim()) {
+        return false;
+    }
+    form.querySelector('input[name="favorite_name"]').value = name.trim();
+    return true;
+}
+</script>
 @endsection

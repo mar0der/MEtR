@@ -24,6 +24,9 @@ Route::middleware('auth')->group(function () {
     Route::post('/logout', [WebController::class, 'logout']);
     Route::get('/dashboard', [WebController::class, 'dashboard']);
     Route::get('/reports', [WebController::class, 'reports']);
+    Route::post('/reports/favorites', [WebController::class, 'storeReportFavorite']);
+    Route::get('/reports/favorites/{id}', [WebController::class, 'loadReportFavorite']);
+    Route::delete('/reports/favorites/{id}', [WebController::class, 'deleteReportFavorite']);
     Route::get('/devices', [WebController::class, 'devices']);
     Route::post('/devices/{id}/alias', [WebController::class, 'updateDeviceAlias']);
     Route::post('/devices/{id}/delete', [WebController::class, 'deleteDevice']);

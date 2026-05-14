@@ -9,6 +9,7 @@ use App\Models\ModelPrice;
 use App\Models\Project;
 use App\Models\ProviderAccount;
 use App\Models\Provider;
+use App\Models\ReportFavorite;
 use App\Models\Subscription;
 use App\Models\UpdateRelease;
 use App\Models\UsageEvent;
@@ -237,7 +238,44 @@ class WebController extends Controller
             'dateRange' => $dateRange,
             'filterOptions' => $this->dashboardFilterOptions($user->id),
             'presets' => $this->reportPresets(),
+            'favorites' => ReportFavorite::where('user_id', $user->id)->orderBy('name')->get(),
+            'activeFavoriteId' => $request->query('favorite_id'),
         ]);
+    }
+
+    public function storeReportFavorite(Request $request)
+    {
+        $data = $request->validate([
+            'favorite_name' => ['required', 'string', 'max:80'],
+        ]);
+
+        $query = collect($request->except(['_token', 'favorite_name', 'favorite_id']))
+            ->filter(fn ($value) => $value !== null && $value !== '')
+            ->only($this->reportFavoriteKeys())
+            ->all();
+
+        ReportFavorite::create([
+            'user_id' => Auth::id(),
+            'name' => $data['favorite_name'],
+            'query_json' => $query,
+        ]);
+
+        return redirect('/reports?'.http_build_query($query))->with('success', 'Report favorite saved.');
+    }
+
+    public function loadReportFavorite($id)
+    {
+        $favorite = ReportFavorite::where('user_id', Auth::id())->findOrFail($id);
+        $query = array_merge($favorite->query_json ?? [], ['favorite_id' => $favorite->id]);
+
+        return redirect('/reports?'.http_build_query($query));
+    }
+
+    public function deleteReportFavorite($id)
+    {
+        ReportFavorite::where('user_id', Auth::id())->where('id', $id)->delete();
+
+        return redirect('/reports')->with('success', 'Report favorite deleted.');
     }
 
     public function updateDeviceAlias(Request $request, $id)
@@ -540,6 +578,22 @@ class WebController extends Controller
             'last_week' => 'Last week',
             'this_month' => 'This month',
             'custom' => 'Custom',
+        ];
+    }
+
+    private function reportFavoriteKeys(): array
+    {
+        return [
+            'preset',
+            'from',
+            'to',
+            'provider_id',
+            'device_id',
+            'project_id',
+            'provider_account_id',
+            'model',
+            'metric',
+            'q',
         ];
     }
 
