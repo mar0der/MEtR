@@ -108,7 +108,7 @@ class WebController extends Controller
                 DB::raw('SUM(input_tokens + output_tokens + cached_input_tokens + cache_write_tokens + cache_read_tokens + reasoning_tokens + tool_tokens + unknown_tokens) as total_tokens'),
             ])
             ->groupBy('devices.id', 'devices.alias', 'devices.display_name', 'devices.platform')
-            ->orderByDesc('event_count')
+            ->tap(fn (Builder $q) => $this->applyDashboardTableSort($q, $request, 'device', 'label'))
             ->limit(10)
             ->get();
 
@@ -124,7 +124,7 @@ class WebController extends Controller
                 DB::raw('SUM(input_tokens + output_tokens + cached_input_tokens + cache_write_tokens + cache_read_tokens + reasoning_tokens + tool_tokens + unknown_tokens) as total_tokens'),
             ])
             ->groupBy('projects.id', 'projects.manual_name', 'projects.canonical_name')
-            ->orderByDesc('event_count')
+            ->tap(fn (Builder $q) => $this->applyDashboardTableSort($q, $request, 'project', 'label'))
             ->limit(10)
             ->get();
 
@@ -141,7 +141,7 @@ class WebController extends Controller
                 DB::raw('SUM(input_tokens + output_tokens + cached_input_tokens + cache_write_tokens + cache_read_tokens + reasoning_tokens + tool_tokens + unknown_tokens) as total_tokens'),
             ])
             ->groupBy('provider_accounts.label', 'usage_events.provider_id')
-            ->orderByDesc('event_count')
+            ->tap(fn (Builder $q) => $this->applyDashboardTableSort($q, $request, 'account', 'provider_accounts.label'))
             ->limit(10)
             ->get()
             ->map(function ($row) {
@@ -162,7 +162,7 @@ class WebController extends Controller
                 DB::raw('SUM(input_tokens + output_tokens + cached_input_tokens + cache_write_tokens + cache_read_tokens + reasoning_tokens + tool_tokens + unknown_tokens) as total_tokens'),
             ])
             ->groupBy('provider_id', 'model')
-            ->orderByDesc('event_count')
+            ->tap(fn (Builder $q) => $this->applyDashboardTableSort($q, $request, 'model', 'model'))
             ->limit(10)
             ->get()
             ->map(function ($row) {
@@ -560,6 +560,35 @@ class WebController extends Controller
                     });
             });
         }
+    }
+
+    private function applyDashboardTableSort(Builder $query, Request $request, string $tableKey, string $nameColumn): Builder
+    {
+        [$sort, $direction] = $this->dashboardTableSort($request, $tableKey);
+
+        return match ($sort) {
+            'name' => $query->orderBy($nameColumn, $direction)->orderByDesc('event_count'),
+            'tokens' => $query->orderBy('total_tokens', $direction)->orderBy($nameColumn, 'asc'),
+            'avg_cache' => $query->orderByRaw('SUM(cached_input_tokens + cache_write_tokens + cache_read_tokens) / NULLIF(COUNT(*), 0) '.$direction)->orderByDesc('event_count'),
+            'avg_input' => $query->orderByRaw('SUM(input_tokens - cached_input_tokens) / NULLIF(COUNT(*), 0) '.$direction)->orderByDesc('event_count'),
+            'avg_output' => $query->orderByRaw('SUM(output_tokens) / NULLIF(COUNT(*), 0) '.$direction)->orderByDesc('event_count'),
+            'cost' => $query->orderBy('total_cost', $direction)->orderByDesc('event_count'),
+            'avg_cost' => $query->orderByRaw('SUM(official_api_cost_usd) / NULLIF(COUNT(*), 0) '.$direction)->orderByDesc('event_count'),
+            default => $query->orderBy('event_count', $direction)->orderBy($nameColumn, 'asc'),
+        };
+    }
+
+    private function dashboardTableSort(Request $request, string $tableKey): array
+    {
+        $allowed = ['name', 'events', 'tokens', 'avg_cache', 'avg_input', 'avg_output', 'cost', 'avg_cost'];
+        $sort = $request->query($tableKey.'_sort', 'events');
+        $direction = strtolower((string) $request->query($tableKey.'_dir', 'desc')) === 'asc' ? 'asc' : 'desc';
+
+        if (! in_array($sort, $allowed, true)) {
+            $sort = 'events';
+        }
+
+        return [$sort, $direction];
     }
 
     private function dashboardFilterOptions(int $userId): array

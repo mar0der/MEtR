@@ -100,6 +100,22 @@
         table { width: 100%; border-collapse: collapse; font-size: 14px; }
         th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--border); }
         th { font-weight: 600; color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .06em; }
+        .sortable-header {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            color: inherit;
+            text-decoration: none;
+            white-space: nowrap;
+        }
+        .sortable-header.active,
+        .sortable-header:hover { color: var(--accent); }
+        .sort-indicator {
+            display: inline-block;
+            width: 8px;
+            color: var(--accent);
+            font-size: 10px;
+        }
         .table-wrap { width: 100%; overflow-x: auto; }
         .muted { color: var(--muted); }
         .btn {
