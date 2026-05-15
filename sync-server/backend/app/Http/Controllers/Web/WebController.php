@@ -102,6 +102,9 @@ class WebController extends Controller
                 'devices.platform as meta',
                 DB::raw('COUNT(*) as event_count'),
                 DB::raw('SUM(official_api_cost_usd) as total_cost'),
+                DB::raw('SUM(cached_input_tokens + cache_write_tokens + cache_read_tokens) as cached_tokens'),
+                DB::raw('SUM(input_tokens - cached_input_tokens) as effective_input_tokens'),
+                DB::raw('SUM(output_tokens) as output_tokens'),
                 DB::raw('SUM(input_tokens + output_tokens + cached_input_tokens + cache_write_tokens + cache_read_tokens + reasoning_tokens + tool_tokens + unknown_tokens) as total_tokens'),
             ])
             ->groupBy('devices.id', 'devices.alias', 'devices.display_name', 'devices.platform')
@@ -115,6 +118,9 @@ class WebController extends Controller
                 DB::raw("COALESCE(projects.manual_name, projects.canonical_name, 'Unknown project') as label"),
                 DB::raw('COUNT(*) as event_count'),
                 DB::raw('SUM(official_api_cost_usd) as total_cost'),
+                DB::raw('SUM(cached_input_tokens + cache_write_tokens + cache_read_tokens) as cached_tokens'),
+                DB::raw('SUM(input_tokens - cached_input_tokens) as effective_input_tokens'),
+                DB::raw('SUM(output_tokens) as output_tokens'),
                 DB::raw('SUM(input_tokens + output_tokens + cached_input_tokens + cache_write_tokens + cache_read_tokens + reasoning_tokens + tool_tokens + unknown_tokens) as total_tokens'),
             ])
             ->groupBy('projects.id', 'projects.manual_name', 'projects.canonical_name')
@@ -129,6 +135,9 @@ class WebController extends Controller
                 'usage_events.provider_id',
                 DB::raw('COUNT(*) as event_count'),
                 DB::raw('SUM(official_api_cost_usd) as total_cost'),
+                DB::raw('SUM(cached_input_tokens + cache_write_tokens + cache_read_tokens) as cached_tokens'),
+                DB::raw('SUM(input_tokens - cached_input_tokens) as effective_input_tokens'),
+                DB::raw('SUM(output_tokens) as output_tokens'),
                 DB::raw('SUM(input_tokens + output_tokens + cached_input_tokens + cache_write_tokens + cache_read_tokens + reasoning_tokens + tool_tokens + unknown_tokens) as total_tokens'),
             ])
             ->groupBy('provider_accounts.label', 'usage_events.provider_id')
@@ -147,6 +156,9 @@ class WebController extends Controller
                 'model',
                 DB::raw('COUNT(*) as event_count'),
                 DB::raw('SUM(official_api_cost_usd) as total_cost'),
+                DB::raw('SUM(cached_input_tokens + cache_write_tokens + cache_read_tokens) as cached_tokens'),
+                DB::raw('SUM(input_tokens - cached_input_tokens) as effective_input_tokens'),
+                DB::raw('SUM(output_tokens) as output_tokens'),
                 DB::raw('SUM(input_tokens + output_tokens + cached_input_tokens + cache_write_tokens + cache_read_tokens + reasoning_tokens + tool_tokens + unknown_tokens) as total_tokens'),
             ])
             ->groupBy('provider_id', 'model')
