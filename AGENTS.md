@@ -451,6 +451,9 @@ Laravel's `Storage::putFileAs` opens the destination in write mode (truncating) 
 ### Token Semantics: OpenAI vs Anthropic
 OpenAI/Codex reports `input_tokens` that **includes** cached tokens. Effective non-cached input = `input_tokens - cached_input_tokens`. Anthropic reports `input_tokens` as **only** uncached tokens. The cost calculation and display logic must handle both.
 
+### Kimi Numeric Timestamps
+Kimi `wire.jsonl` records can store `timestamp` as numeric Unix seconds with fractional microseconds (for example `1777317104.005388`). The parser must normalize numeric timestamps to RFC 3339 instead of falling back to scan time, otherwise a reimport assigns historical Kimi usage to the reindex day.
+
 ### Version Convention Trap
 The middle digit is the **ISO week number**, not a sequential feature counter. Bumping it incorrectly (e.g., `26.21.0` when it's week 20) breaks consistency. Always check the actual calendar week.
 

@@ -13,7 +13,7 @@ use uuid::Uuid;
 use walkdir::WalkDir;
 
 const MAX_SCAN_FILES_PER_SOURCE: usize = 50_000;
-const PARSER_VERSION: &str = "0.1.6";
+const PARSER_VERSION: &str = "0.1.7";
 
 struct AppState {
     db: Mutex<Connection>,
@@ -1932,6 +1932,7 @@ fn scan_source(conn: &Connection, source: &Source, full_scan: bool) -> Result<us
             };
             parse_content(source, entry.path(), &content)
         };
+        replace_events_for_file(conn, source, entry.path())?;
         for event in events {
             if insert_event(conn, source, entry.path(), &modified, &source_hash, event)? {
                 imported += 1;
@@ -1975,6 +1976,15 @@ fn scan_source(conn: &Connection, source: &Source, full_scan: bool) -> Result<us
     )
     .map_err(to_string)?;
     Ok(imported)
+}
+
+fn replace_events_for_file(conn: &Connection, source: &Source, path: &Path) -> Result<(), String> {
+    conn.execute(
+        "DELETE FROM usage_events WHERE source_id = ?1 AND source_file_path = ?2",
+        params![source.id, path.to_string_lossy().to_string()],
+    )
+    .map_err(to_string)?;
+    Ok(())
 }
 
 fn indexed_file_is_current(
@@ -2233,7 +2243,7 @@ fn parse_codex_value(
     Some(ParsedEvent {
         provider_id: detected_provider.unwrap_or_else(|| source.provider_id.clone()),
         product_id: None,
-        timestamp: str_field(value, &["timestamp"]).unwrap_or_else(now),
+        timestamp: timestamp_field(value, &["timestamp"]).unwrap_or_else(now),
         project_path: context
             .cwd
             .clone()
@@ -2362,11 +2372,11 @@ fn parse_value(
     if known == 0 && unknown == 0 {
         return None;
     }
-    let timestamp = str_field(
+    let timestamp = timestamp_field(
         value,
         &["timestamp", "created_at", "createdAt", "time", "date", "start_time", "startTime", "started_at", "startedAt", "end_time", "endTime", "ended_at", "endedAt"],
     )
-    .or_else(|| str_field(usage, &["timestamp", "created_at", "createdAt", "start_time", "startTime"]))
+    .or_else(|| timestamp_field(usage, &["timestamp", "created_at", "createdAt", "start_time", "startTime"]))
     .unwrap_or_else(now);
     let model = str_field(value, &["model", "model_name", "modelName", "model_id", "modelId", "model_version", "modelVersion"])
         .or_else(|| str_field(usage, &["model", "model_id", "modelId"]))
@@ -2924,6 +2934,79 @@ fn str_field(value: &Value, names: &[&str]) -> Option<String> {
         }
     }
     None
+}
+
+fn timestamp_field(value: &Value, names: &[&str]) -> Option<String> {
+    for name in names {
+        let Some(field) = value.get(*name) else {
+            continue;
+        };
+        match field {
+            Value::String(text) => {
+                if let Some(timestamp) = parse_unix_timestamp(text.parse::<f64>().ok()) {
+                    return Some(timestamp);
+                }
+                if !text.trim().is_empty() {
+                    return Some(text.to_string());
+                }
+            }
+            Value::Number(number) => {
+                if let Some(timestamp) = parse_unix_timestamp(number.as_f64()) {
+                    return Some(timestamp);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn parse_unix_timestamp(value: Option<f64>) -> Option<String> {
+    let mut seconds = value?;
+    if !seconds.is_finite() || seconds <= 0.0 {
+        return None;
+    }
+    if seconds > 1_000_000_000_000_000.0 {
+        seconds /= 1_000_000.0;
+    } else if seconds > 1_000_000_000_000.0 {
+        seconds /= 1000.0;
+    }
+
+    let mut whole_seconds = seconds.floor() as i64;
+    let mut nanos = (((seconds - whole_seconds as f64) * 1_000_000.0).round() as u32) * 1000;
+    if nanos >= 1_000_000_000 {
+        whole_seconds += 1;
+        nanos = 0;
+    }
+
+    Utc.timestamp_opt(whole_seconds, nanos)
+        .single()
+        .map(|timestamp| timestamp.to_rfc3339())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn timestamp_field_accepts_unix_seconds_with_fraction() {
+        let value = json!({"timestamp": 1777317104.005388});
+
+        let timestamp = timestamp_field(&value, &["timestamp"]).unwrap();
+
+        assert!(timestamp.starts_with("2026-04-27T19:11:44.005388"));
+    }
+
+    #[test]
+    fn timestamp_field_accepts_unix_milliseconds() {
+        let value = json!({"timestamp": 1777317104005.0});
+
+        assert_eq!(
+            timestamp_field(&value, &["timestamp"]),
+            Some("2026-04-27T19:11:44.005+00:00".to_string())
+        );
+    }
 }
 
 fn infer_project_from_path(path: &Path) -> Option<String> {
