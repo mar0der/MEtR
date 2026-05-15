@@ -119,4 +119,45 @@ class DashboardTest extends TestCase
             ->assertDontSee('<td>OpenAI Project</td>', false)
             ->assertDontSee('openai / gpt-5.3-codex');
     }
+
+    public function test_dashboard_summary_headers_sort_tables(): void
+    {
+        $user = User::factory()->create();
+        Provider::factory()->create(['id' => 'openai', 'display_name' => 'OpenAI']);
+        $device = Device::factory()->create(['user_id' => $user->id]);
+
+        UsageEvent::factory()->create([
+            'user_id' => $user->id,
+            'device_id' => $device->id,
+            'provider_id' => 'openai',
+            'model' => 'low-cost-model',
+            'input_tokens' => 100,
+            'output_tokens' => 50,
+            'official_api_cost_usd' => 0.01,
+        ]);
+        UsageEvent::factory()->create([
+            'user_id' => $user->id,
+            'device_id' => $device->id,
+            'provider_id' => 'openai',
+            'model' => 'high-cost-model',
+            'input_tokens' => 100,
+            'output_tokens' => 50,
+            'official_api_cost_usd' => 5.00,
+        ]);
+
+        $response = $this->actingAs($user)
+            ->get('/dashboard?tab=accounts&model_sort=cost&model_dir=desc')
+            ->assertOk()
+            ->assertSee('model_sort=cost')
+            ->assertSee('model_dir=asc')
+            ->assertSee('sortable-header active');
+
+        $modelTable = strstr($response->getContent(), 'By Model');
+
+        $this->assertNotFalse($modelTable);
+        $this->assertLessThan(
+            strpos($modelTable, 'openai / low-cost-model'),
+            strpos($modelTable, 'openai / high-cost-model')
+        );
+    }
 }

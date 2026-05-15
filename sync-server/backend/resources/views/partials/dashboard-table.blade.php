@@ -1,3 +1,30 @@
+@php
+    $tableKey = $tableKey ?? 'table';
+    $sortParam = $tableKey.'_sort';
+    $dirParam = $tableKey.'_dir';
+    $activeSort = request($sortParam, 'events');
+    $activeDir = request($dirParam, 'desc') === 'asc' ? 'asc' : 'desc';
+    $headers = [
+        'name' => 'Name',
+        'events' => 'Events',
+        'tokens' => 'Tokens',
+        'avg_cache' => 'Avg Cache',
+        'avg_input' => 'Avg Input',
+        'avg_output' => 'Avg Output',
+        'cost' => 'Cost',
+        'avg_cost' => 'Avg Cost/Event',
+    ];
+    $sortUrl = function (string $column) use ($sortParam, $dirParam, $activeSort, $activeDir) {
+        $defaultDir = $column === 'name' ? 'asc' : 'desc';
+        $nextDir = $activeSort === $column ? ($activeDir === 'asc' ? 'desc' : 'asc') : $defaultDir;
+
+        return request()->fullUrlWithQuery([
+            $sortParam => $column,
+            $dirParam => $nextDir,
+        ]);
+    };
+@endphp
+
 <div class="card">
     <div class="table-meta">
         <h3 style="margin:0;">{{ $title }}</h3>
@@ -7,14 +34,18 @@
         <table>
             <thead>
                 <tr>
-                    <th>Name</th>
-                    <th>Events</th>
-                    <th>Tokens</th>
-                    <th>Avg Cache</th>
-                    <th>Avg Input</th>
-                    <th>Avg Output</th>
-                    <th>Cost</th>
-                    <th>Avg Cost/Event</th>
+                    @foreach($headers as $column => $label)
+                        @php
+                            $isActive = $activeSort === $column;
+                            $indicator = $isActive ? ($activeDir === 'asc' ? '^' : 'v') : '';
+                        @endphp
+                        <th>
+                            <a class="sortable-header {{ $isActive ? 'active' : '' }}" href="{{ $sortUrl($column) }}">
+                                <span>{{ $label }}</span>
+                                <span class="sort-indicator">{{ $indicator }}</span>
+                            </a>
+                        </th>
+                    @endforeach
                 </tr>
             </thead>
             <tbody>

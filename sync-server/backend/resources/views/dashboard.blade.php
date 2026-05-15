@@ -129,13 +129,13 @@
 </div>
 
 @if($activeTab === 'devices')
-    @include('partials.dashboard-table', ['title' => 'By Device', 'rows' => $byDevice])
-    @include('partials.dashboard-table', ['title' => 'By Project', 'rows' => $byProject])
+    @include('partials.dashboard-table', ['title' => 'By Device', 'rows' => $byDevice, 'tableKey' => 'device'])
+    @include('partials.dashboard-table', ['title' => 'By Project', 'rows' => $byProject, 'tableKey' => 'project'])
 @endif
 
 @if($activeTab === 'accounts')
-    @include('partials.dashboard-table', ['title' => 'By Provider Account', 'rows' => $byProviderAccount])
-    @include('partials.dashboard-table', ['title' => 'By Model', 'rows' => $byModel])
+    @include('partials.dashboard-table', ['title' => 'By Provider Account', 'rows' => $byProviderAccount, 'tableKey' => 'account'])
+    @include('partials.dashboard-table', ['title' => 'By Model', 'rows' => $byModel, 'tableKey' => 'model'])
 @endif
 
 @if($activeTab === 'events')
@@ -188,9 +188,9 @@
 @endif
 
 @if($activeTab === 'all')
-    @include('partials.dashboard-table', ['title' => 'By Device', 'rows' => $byDevice])
-    @include('partials.dashboard-table', ['title' => 'By Project', 'rows' => $byProject])
-    @include('partials.dashboard-table', ['title' => 'By Provider Account', 'rows' => $byProviderAccount])
-    @include('partials.dashboard-table', ['title' => 'By Model', 'rows' => $byModel])
+    @include('partials.dashboard-table', ['title' => 'By Device', 'rows' => $byDevice, 'tableKey' => 'device'])
+    @include('partials.dashboard-table', ['title' => 'By Project', 'rows' => $byProject, 'tableKey' => 'project'])
+    @include('partials.dashboard-table', ['title' => 'By Provider Account', 'rows' => $byProviderAccount, 'tableKey' => 'account'])
+    @include('partials.dashboard-table', ['title' => 'By Model', 'rows' => $byModel, 'tableKey' => 'model'])
 @endif
 @endsection
