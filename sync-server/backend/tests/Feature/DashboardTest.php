@@ -60,7 +60,9 @@ class DashboardTest extends TestCase
             ->assertSee('OpenAI Personal')
             ->assertSee('By Model')
             ->assertSee('openai / gpt-5.3-codex')
-            ->assertSee('Avg Tokens/Event')
+            ->assertSee('Avg Cache')
+            ->assertSee('Avg Input')
+            ->assertSee('Avg Output')
             ->assertSee('Avg Cost/Event');
     }
 
