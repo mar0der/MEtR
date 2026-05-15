@@ -59,7 +59,9 @@ class DashboardTest extends TestCase
             ->assertSee('By Provider Account')
             ->assertSee('OpenAI Personal')
             ->assertSee('By Model')
-            ->assertSee('openai / gpt-5.3-codex');
+            ->assertSee('openai / gpt-5.3-codex')
+            ->assertSee('Avg Tokens/Event')
+            ->assertSee('Avg Cost/Event');
     }
 
     public function test_dashboard_provider_filter_limits_events_and_summaries(): void
