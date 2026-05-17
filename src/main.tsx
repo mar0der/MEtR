@@ -1297,9 +1297,15 @@ function percentPrecise(value: number) {
   return new Intl.NumberFormat(undefined, { style: "percent", maximumFractionDigits: 1 }).format(value);
 }
 
+const DISPLAY_TIME_ZONE = "Asia/Dubai";
+
 function date(value: string | null) {
   if (!value) return "Never";
-  return new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(new Date(value));
+  return new Intl.DateTimeFormat(undefined, {
+    dateStyle: "medium",
+    timeStyle: "short",
+    timeZone: DISPLAY_TIME_ZONE,
+  }).format(new Date(value));
 }
 
 function providerLabel(providerId: string) {

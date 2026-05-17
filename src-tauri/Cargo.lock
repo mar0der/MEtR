@@ -2062,7 +2062,7 @@ dependencies = [
 
 [[package]]
 name = "metr"
-version = "26.20.16"
+version = "26.20.17"
 dependencies = [
  "chrono",
  "dirs",

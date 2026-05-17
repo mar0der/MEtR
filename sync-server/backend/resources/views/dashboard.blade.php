@@ -5,6 +5,7 @@
 @section('content')
 @php
     $tabQuery = fn (string $tab) => url('/dashboard').'?'.http_build_query(array_merge(request()->except('page'), ['tab' => $tab]));
+    $otherTokens = (int) (($summary['reasoning_tokens'] ?? 0) + ($summary['tool_tokens'] ?? 0) + ($summary['unknown_tokens'] ?? 0));
 @endphp
 
 <div class="page-heading">
@@ -42,6 +43,20 @@
     <div class="card stat">
         <div class="value">{{ number_format($summary['output_tokens'] ?? 0) }}</div>
         <div class="label">Output Tokens</div>
+    </div>
+
+    {{-- Row 3: Cache reads/writes and other buckets so totals are auditable --}}
+    <div class="card stat">
+        <div class="value">{{ number_format($summary['cache_read_tokens'] ?? 0) }}</div>
+        <div class="label">Cache Read Tokens</div>
+    </div>
+    <div class="card stat">
+        <div class="value">{{ number_format($summary['cache_write_tokens'] ?? 0) }}</div>
+        <div class="label">Cache Write Tokens</div>
+    </div>
+    <div class="card stat">
+        <div class="value">{{ number_format($otherTokens) }}</div>
+        <div class="label">Other Tokens</div>
     </div>
 </div>
 
@@ -168,7 +183,7 @@
                         <td style="font-size:12px;">{{ $e->provider_id }}</td>
                         <td style="font-size:12px;max-width:180px;overflow:hidden;text-overflow:ellipsis;">{{ $e->model ?? '—' }}</td>
                         <td style="text-align:right;white-space:nowrap;font-size:13px;">
-                            {{ number_format($e->input_tokens + $e->output_tokens + $e->cached_input_tokens + $e->cache_write_tokens + $e->cache_read_tokens + $e->reasoning_tokens + $e->tool_tokens + $e->unknown_tokens) }}
+                            {{ number_format(max($e->input_tokens - $e->cached_input_tokens, 0) + $e->output_tokens + $e->cached_input_tokens + $e->cache_write_tokens + $e->cache_read_tokens + $e->reasoning_tokens + $e->tool_tokens + $e->unknown_tokens) }}
                         </td>
                         <td style="text-align:right;white-space:nowrap;font-size:13px;">
                             {{ $e->official_api_cost_usd !== null ? '$'.number_format((float) $e->official_api_cost_usd, 4) : '—' }}
