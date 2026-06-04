@@ -406,6 +406,27 @@
         .login-card h1 { text-align: center; font-size: 20px; margin-bottom: 4px; }
         .login-card .subtitle { text-align: center; margin-bottom: 24px; }
         .login-card .btn { width: 100%; margin-top: 4px; padding: 10px; font-size: 15px; }
+        .remember-row {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin: 4px 0 16px;
+            cursor: pointer;
+            user-select: none;
+        }
+        .remember-row input[type="checkbox"] {
+            width: 16px;
+            height: 16px;
+            margin: 0;
+            accent-color: var(--accent);
+            flex: 0 0 auto;
+        }
+        .remember-row span {
+            color: var(--muted);
+            font-size: 13px;
+            font-weight: 600;
+            line-height: 1.2;
+        }
         .stat-accent { border-left: 3px solid var(--accent); }
         .stat-success { border-left: 3px solid var(--success); }
         .stat-warning { border-left: 3px solid var(--warning); }

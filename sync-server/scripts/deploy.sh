@@ -36,6 +36,7 @@ if ! $PROXY_ONLY; then
     --exclude='.env' \
     --exclude='vendor/' \
     --exclude='node_modules/' \
+    --exclude='bootstrap/cache/' \
     --exclude='storage/logs/' \
     --exclude='storage/framework/cache/' \
     --exclude='storage/framework/sessions/' \
@@ -45,6 +46,7 @@ if ! $PROXY_ONLY; then
 
   echo "[1/3] Refreshing route + config cache..."
   ssh "${SSH_OPTS[@]}" "$SERVER" "docker exec metr-sync-php sh -lc 'cd /var/www/html && \
+    php artisan optimize:clear && \
     php artisan migrate --force && \
     php artisan config:cache && \
     php artisan route:cache'"

@@ -20,10 +20,15 @@
         <form method="POST" action="/login">
             @csrf
             <label>Username or Email</label>
-            <input type="text" name="login" required autofocus placeholder="you@example.com">
+            <input type="text" name="login" required autofocus placeholder="you@example.com" value="{{ old('login') }}">
 
             <label>Password</label>
             <input type="password" name="password" required placeholder="••••••••">
+
+            <label class="remember-row">
+                <input type="checkbox" name="remember" value="1" @checked(old('remember'))>
+                <span>Remember me</span>
+            </label>
 
             <button class="btn" style="width:100%;margin-top:4px;padding:10px;font-size:15px;">Sign In</button>
         </form>
