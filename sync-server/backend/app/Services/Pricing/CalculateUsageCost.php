@@ -9,6 +9,12 @@ class CalculateUsageCost
     /**
      * Calculate API-equivalent cost in USD.
      *
+     * @param  array<string, int>  $tokens
+     * @return array{cost: float|null, pricing_match_confidence: string}
+     */
+    /**
+     * Calculate API-equivalent cost in USD.
+     *
      * NOTE: Keep in sync with src-tauri/src/lib.rs calculate_cost()
      * Token semantics:
      *   - Anthropic/Claude: input_tokens is ALREADY uncached (cache_read/cache_write are separate)

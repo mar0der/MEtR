@@ -8,3 +8,6 @@ src-tauri/gen
 .DS_Store
 .env
 .env.*
+*.orig
+*.post-sync-*
+sync-server/storage/
