@@ -381,7 +381,7 @@ function App() {
     setStatus("Scanning new and changed files...");
     try {
       const result = await api<{ imported: number }>("rescan_all");
-      setStatus(`Scan complete. Imported ${result.imported} new event(s).`);
+      setStatus(`Scan complete. Imported ${result.imported} new model call(s).`);
       await refresh(false);
     } catch (error) {
       setStatus(message(error));
@@ -395,7 +395,7 @@ function App() {
     setStatus("Full rescan running...");
     try {
       const result = await api<{ imported: number }>("rescan_all_full");
-      setStatus(`Full rescan complete. Imported ${result.imported} new event(s).`);
+      setStatus(`Full rescan complete. Imported ${result.imported} new model call(s).`);
       await refresh(false);
     } catch (error) {
       setStatus(message(error));
@@ -405,7 +405,7 @@ function App() {
   };
 
   const clearAllData = async () => {
-    if (!window.confirm("WARNING: This will permanently delete all events, projects, conversations, and scan history. Your source folders and subscriptions will remain. This cannot be undone.")) {
+    if (!window.confirm("WARNING: This will permanently delete all model calls, projects, conversations, and scan history. Your source folders and subscriptions will remain. This cannot be undone.")) {
       return;
     }
     setLoading(true);
@@ -474,7 +474,7 @@ function App() {
     try {
       const result = await api<SyncResult>("sync_now");
       const warning = result.errors.length ? `, ${result.errors.length} warning(s)` : "";
-      setStatus(`Synced ${result.uploaded} event(s), ${result.subscriptions_uploaded} subscription(s)${warning}`);
+      setStatus(`Synced ${result.uploaded} model call(s), ${result.subscriptions_uploaded} subscription(s)${warning}`);
       await refresh(false);
     } catch (error) {
       setStatus(message(error));
@@ -484,7 +484,7 @@ function App() {
   };
 
   const doFullResync = async () => {
-    if (!window.confirm("Full resync will re-upload local events to repair server-side project, model, and cost fields. Continue?")) {
+    if (!window.confirm("Full resync will re-upload local model calls to repair server-side project, model, and cost fields. Continue?")) {
       return;
     }
     setSyncLoading(true);
@@ -797,7 +797,7 @@ function DashboardView({
       </section>
 
       <section className="panel">
-        <h2>Recent Sessions ({totalSessionCount} total)</h2>
+        <h2>Recent Model Calls ({totalSessionCount} total)</h2>
         <table>
           <thead>
             <tr>
@@ -828,7 +828,7 @@ function DashboardView({
                 <td><span className={`pill ${session.confidence}`}>{session.confidence}</span></td>
               </tr>
             ))}
-            {sessions.length === 0 && <EmptyRow colSpan={10} text="No sessions indexed yet." />}
+            {sessions.length === 0 && <EmptyRow colSpan={10} text="No model calls indexed yet." />}
           </tbody>
           {sessions.length > 0 && (
             <tfoot>
@@ -898,7 +898,7 @@ function SettingsView(props: {
             <p><strong>Server:</strong> {props.syncStatus.server_url}</p>
             <p><strong>Device:</strong> {props.syncStatus.device_name}</p>
             <p><strong>Last sync:</strong> {date(props.syncStatus.last_sync_at)}</p>
-            <p><strong>Pending events:</strong> {props.syncStatus.pending_events}</p>
+            <p><strong>Pending model calls:</strong> {props.syncStatus.pending_events}</p>
             <div className="form-row">
               <button className="primary-button" onClick={props.onSync} disabled={props.syncLoading}>
                 <RefreshCw size={14} />
@@ -946,7 +946,7 @@ function SettingsView(props: {
 
       <section className="panel">
         <h2><Trash2 size={16} /> Danger Zone</h2>
-        <p className="muted">Delete all parsed events, projects, and conversations. Your source folders and subscriptions stay intact.</p>
+        <p className="muted">Delete all parsed model calls, projects, and conversations. Your source folders and subscriptions stay intact.</p>
         <button className="secondary-button" onClick={props.onClearAllData} style={{ borderColor: "#ef4444", color: "#ef4444" }}>
           <Trash2 size={14} />
           Clear All Data
@@ -1084,7 +1084,7 @@ function SettingsView(props: {
                 <tr>
                   <th>Provider</th>
                   <th>Model</th>
-                  <th>Events</th>
+                  <th>Model Calls</th>
                   <th>Input / 1M</th>
                   <th>Output / 1M</th>
                   <th></th>

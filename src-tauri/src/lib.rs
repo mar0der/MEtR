@@ -1953,7 +1953,7 @@ fn scan_source(conn: &Connection, source: &Source, full_scan: bool) -> Result<us
         params![
             now(),
             format!(
-                "{} {scanned_files} file(s), imported {imported} new events{}{}.",
+                "{} {scanned_files} file(s), imported {imported} new model calls{}{}.",
                 if full_scan {
                     "Full scanned"
                 } else {

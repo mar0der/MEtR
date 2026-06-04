@@ -469,3 +469,25 @@ The server's `CalculateUsageCost` must subtract `cached_input` from `input` for 
 ---
 
 *If you discover a new pitfall, architectural rule, or deployment constraint, add it to this file immediately.*
+
+## Server editing discipline
+
+**Never edit files directly on `the18th`.** Edit locally, commit, deploy via `sync-server/scripts/deploy.sh`.
+
+If you must SSH and hot-fix something, back-sync the change to the repo the same day. See `~/Developer/the18th/SERVER_EDITING_RULES.md` for the full rule, the persistent-state boundary, and the recovery recipes.
+
+
+## Analytics & SEO data (shared toolkit)
+
+For real Google Search Console, GA4, and AdSense data on this or any sister site, use the shared toolkit at `~/Developer/google-tools/` (private repo `mar0der/google-tools`). Do NOT rebuild analytics per project. Read-only.
+
+```bash
+cd ~/Developer/google-tools
+./venv/bin/python gtools.py dashboard 28          # overview of all sites
+./venv/bin/python gtools.py ga4 <site> 28         # GA4 for one site
+./venv/bin/python gtools.py gsc-pages <site> 28   # Search Console pages
+```
+
+See that repo's AGENTS.md for the full command list and the two-account model.
+
+> Live dashboard (all sites, charts, login): https://seo.petarpetkov.com
