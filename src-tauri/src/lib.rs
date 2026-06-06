@@ -13,7 +13,7 @@ use uuid::Uuid;
 use walkdir::WalkDir;
 
 const MAX_SCAN_FILES_PER_SOURCE: usize = 50_000;
-const PARSER_VERSION: &str = "0.1.8";
+const PARSER_VERSION: &str = "0.1.9";
 
 struct AppState {
     db: Mutex<Connection>,
@@ -2479,15 +2479,29 @@ fn insert_event(
     } else {
         (None, None, "missing".to_string())
     };
-    let id = hash(&format!(
-        "{}|{}|{:?}|{:?}|{:?}|{}",
-        source.provider_id,
-        file_path.to_string_lossy(),
-        event.source_offset,
-        event.request_id,
-        event.message_id,
-        event.raw_record_hash
-    ));
+    // Deduplicate: when request_id or message_id is present, use them as the
+    // stable key instead of raw_record_hash. This prevents duplicate events
+    // when a provider logs the same API call multiple times with different
+    // content (e.g. Claude Code text + tool_use split across two JSONL lines).
+    let id = if event.request_id.is_some() || event.message_id.is_some() {
+        hash(&format!(
+            "{}|{}|{:?}|{:?}",
+            source.provider_id,
+            file_path.to_string_lossy(),
+            event.request_id,
+            event.message_id,
+        ))
+    } else {
+        hash(&format!(
+            "{}|{}|{:?}|{:?}|{:?}|{}",
+            source.provider_id,
+            file_path.to_string_lossy(),
+            event.source_offset,
+            event.request_id,
+            event.message_id,
+            event.raw_record_hash
+        ))
+    };
     let now = now();
     let changed = conn
         .execute(
