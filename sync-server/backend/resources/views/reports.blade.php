@@ -246,6 +246,13 @@
     </div>
 </div>
 
+<div style="display:flex;flex-direction:column;gap:16px;margin-top:16px;">
+    @include('partials.report-group-table', ['title' => 'By Project', 'rows' => $byProject])
+    @include('partials.report-group-table', ['title' => 'By Provider', 'rows' => $byProvider])
+    @include('partials.report-group-table', ['title' => 'By Device', 'rows' => $byDevice])
+    @include('partials.report-group-table', ['title' => 'By Model', 'rows' => $byModel])
+</div>
+
 <script>
 function nameReportFavorite(form) {
     const name = window.prompt('Name this report favorite');
