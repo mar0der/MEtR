@@ -7,8 +7,8 @@ use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::Mutex;
-use tauri::{Manager, State};
+use std::sync::{Arc, Mutex};
+use tauri::{Emitter, Manager, State};
 use uuid::Uuid;
 use walkdir::WalkDir;
 
@@ -16,7 +16,7 @@ const MAX_SCAN_FILES_PER_SOURCE: usize = 50_000;
 const PARSER_VERSION: &str = "0.1.9";
 
 struct AppState {
-    db: Mutex<Connection>,
+    db: Arc<Mutex<Connection>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -220,7 +220,7 @@ pub fn run() {
             migrate(&conn)?;
             seed_defaults(&conn)?;
             app.manage(AppState {
-                db: Mutex::new(conn),
+                db: Arc::new(Mutex::new(conn)),
             });
             // Run expensive maintenance in background so UI loads instantly
             let maint_db_path = db_path.join("metr.db");
@@ -927,24 +927,69 @@ fn get_sync_status(state: State<AppState>) -> Result<SyncStatus, String> {
 }
 
 #[tauri::command]
-fn sync_now(state: State<AppState>) -> Result<SyncResult, String> {
-    let conn = state.db.lock().map_err(to_string)?;
-    let result = perform_sync(&conn, false)?;
-    let _ = pull_pricing_from_server(&conn);
-    recalculate_event_costs(&conn).map_err(to_string)?;
+async fn sync_now(state: State<'_, AppState>, app: tauri::AppHandle) -> Result<SyncResult, String> {
+    let db = state.db.clone();
+    let (progress_tx, progress_rx) = std::sync::mpsc::channel::<(usize, usize)>();
+    let progress_tx_clone = progress_tx.clone();
+
+    let sync_task = tauri::async_runtime::spawn_blocking(move || {
+        let conn = db.lock().map_err(to_string)?;
+        let result = perform_sync(&conn, false, |uploaded, total| {
+            let _ = progress_tx_clone.send((uploaded, total));
+        })?;
+        let _ = pull_pricing_from_server(&conn);
+        Ok::<_, String>(result)
+    });
+
+    let emit_task = tauri::async_runtime::spawn(async move {
+        while let Ok((uploaded, total)) = progress_rx.recv() {
+            let _ = app.emit(
+                "sync-progress",
+                serde_json::json!({ "uploaded": uploaded, "total": total }),
+            );
+        }
+    });
+
+    let result = sync_task.await.map_err(|e| format!("Sync task failed: {:?}", e))??;
+    drop(progress_tx);
+    let _ = emit_task.await;
     Ok(result)
 }
 
 #[tauri::command]
-fn full_resync(state: State<AppState>) -> Result<SyncResult, String> {
-    let conn = state.db.lock().map_err(to_string)?;
-    let result = perform_sync(&conn, true)?;
-    let _ = pull_pricing_from_server(&conn);
-    recalculate_event_costs(&conn).map_err(to_string)?;
+async fn full_resync(state: State<'_, AppState>, app: tauri::AppHandle) -> Result<SyncResult, String> {
+    let db = state.db.clone();
+    let (progress_tx, progress_rx) = std::sync::mpsc::channel::<(usize, usize)>();
+    let progress_tx_clone = progress_tx.clone();
+
+    let sync_task = tauri::async_runtime::spawn_blocking(move || {
+        let conn = db.lock().map_err(to_string)?;
+        let result = perform_sync(&conn, true, |uploaded, total| {
+            let _ = progress_tx_clone.send((uploaded, total));
+        })?;
+        let _ = pull_pricing_from_server(&conn);
+        Ok::<_, String>(result)
+    });
+
+    let emit_task = tauri::async_runtime::spawn(async move {
+        while let Ok((uploaded, total)) = progress_rx.recv() {
+            let _ = app.emit(
+                "sync-progress",
+                serde_json::json!({ "uploaded": uploaded, "total": total }),
+            );
+        }
+    });
+
+    let result = sync_task.await.map_err(|e| format!("Sync task failed: {:?}", e))??;
+    drop(progress_tx);
+    let _ = emit_task.await;
     Ok(result)
 }
 
-fn perform_sync(conn: &Connection, force_all: bool) -> Result<SyncResult, String> {
+fn perform_sync<F>(conn: &Connection, force_all: bool, mut progress: F) -> Result<SyncResult, String>
+where
+    F: FnMut(usize, usize),
+{
     ensure_sync_config(conn)?;
 
     let (token, server_url, device_uuid): (String, String, Option<String>) = conn
@@ -1031,6 +1076,14 @@ fn perform_sync(conn: &Connection, force_all: bool) -> Result<SyncResult, String
         )
         .map_err(to_string)?;
     }
+
+    let total_pending: usize = conn
+        .query_row(
+            "SELECT COUNT(*) FROM usage_events WHERE synced_at IS NULL",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
 
     let mut total_uploaded = 0usize;
     let mut batch_count = 0usize;
@@ -1146,6 +1199,7 @@ fn perform_sync(conn: &Connection, force_all: bool) -> Result<SyncResult, String
 
             total_uploaded += events.len();
             batch_count += 1;
+            progress(total_uploaded, total_pending);
         } else {
             let body = resp.text().unwrap_or_default();
             errors.push(format!("Batch {} failed: {}", batch_count + 1, body));
