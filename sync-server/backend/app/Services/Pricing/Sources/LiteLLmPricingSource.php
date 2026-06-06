@@ -82,6 +82,8 @@ class LiteLLmPricingSource extends AbstractPricingSource
                 'input_per_1m' => (float) $input * 1_000_000,
                 'output_per_1m' => (float) $output * 1_000_000,
                 'cached_input_per_1m' => $this->extractCachedInput($entry),
+                'cache_write_per_1m' => $this->extractCacheWrite($entry),
+                'cache_read_per_1m' => $this->extractCacheRead($entry),
                 'currency' => 'USD',
                 'aliases_json' => $this->buildAliases($model, $internalProvider),
             ];
@@ -112,6 +114,20 @@ class LiteLLmPricingSource extends AbstractPricingSource
         $cached = $entry['cache_read_input_token_cost'] ?? $entry['cached_input_cost_per_token'] ?? null;
 
         return $cached !== null ? (float) $cached * 1_000_000 : null;
+    }
+
+    private function extractCacheWrite(array $entry): ?float
+    {
+        $cost = $entry['cache_creation_input_token_cost'] ?? null;
+
+        return $cost !== null ? (float) $cost * 1_000_000 : null;
+    }
+
+    private function extractCacheRead(array $entry): ?float
+    {
+        $cost = $entry['cache_read_input_token_cost'] ?? null;
+
+        return $cost !== null ? (float) $cost * 1_000_000 : null;
     }
 
     /**
