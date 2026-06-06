@@ -13,7 +13,7 @@ use uuid::Uuid;
 use walkdir::WalkDir;
 
 const MAX_SCAN_FILES_PER_SOURCE: usize = 50_000;
-const PARSER_VERSION: &str = "0.1.7";
+const PARSER_VERSION: &str = "0.1.8";
 
 struct AppState {
     db: Mutex<Connection>,
@@ -2313,6 +2313,7 @@ fn parse_value(
         .or_else(|| value.get("api_usage"))
         .or_else(|| value.get("tokens"))
         .or_else(|| value.get("usage_stats"))
+        .or_else(|| value.pointer("/message/usage"))
         .or_else(|| value.pointer("/message/payload/token_usage"))
         .or_else(|| value.pointer("/payload/token_usage"))
         .unwrap_or(value);
