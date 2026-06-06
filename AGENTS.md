@@ -193,21 +193,33 @@ The helper script `scripts/build-release.sh` syncs the version from `tauri.conf.
 
 ## 7. Deployment Workflow
 
-### 7.1 Desktop App Deployments Are Fully Automated via GitHub Actions
+### 7.1 Deployment Decision Tree
 
-**Rule:** All desktop app releases (macOS, Windows, Linux) are built, signed, and deployed by `.github/workflows/release.yml`. Do NOT perform manual builds, manual signing, or manual SCP uploads for releases.
+Use this table to decide which workflow runs. **Never** deploy desktop apps manually.
 
-The workflow triggers on **tag push** matching `v*.*.*`:
+| What changed | How to deploy | Workflow triggered |
+|---|---|---|
+| Desktop app code (`src/`, `src-tauri/`) | Push a version tag | `.github/workflows/release.yml` |
+| Backend code (`sync-server/backend/`) | Push to `main` | `.github/workflows/deploy-backend.yml` |
+| Both desktop + backend in same release | Bump version, push tag, then backend changes merge to `main` | Both workflows run |
+| Emergency backend fix | Push to `main` | `deploy-backend.yml` |
+| Emergency backend fix when workflow is broken | SCP single file + cache clear (see 7.4) | Manual fallback only |
+
+### 7.2 Desktop App Deployments Are Fully Automated
+
+**Rule:** All desktop app releases (macOS, Windows, Linux) are built, signed, and deployed by `.github/workflows/release.yml`. Do NOT perform manual builds, manual signing, or manual SCP/RSYNC uploads for desktop releases.
+
+**Trigger:** Tag push matching `v*.*.*`:
 ```bash
 git tag v26.24.0
 git push origin v26.24.0
 ```
 
-What the workflow does:
+**What the workflow does:**
 1. Builds macOS on `macos-latest` (Apple code-signed with `APPLE_CERTIFICATE` secret)
 2. Builds Windows on `windows-latest` (MSI + Tauri updater signature)
 3. Builds Linux on `ubuntu-latest` (`.deb` + `.AppImage`)
-4. Creates a GitHub Release with all artifacts
+4. Creates a GitHub Release with changelog (`generate_release_notes: true`)
 5. Connects to Tailscale and deploys artifacts to `the18th`
 6. Runs `php artisan metr:release:publish` to activate the updater
 
@@ -217,15 +229,15 @@ What the workflow does:
 - `TAILSCALE_AUTH_KEY`
 - `DEPLOY_HOST`, `DEPLOY_USER`, `DEPLOY_SSH_KEY`
 
-### 7.2 Manual Testing via Workflow Dispatch
+### 7.3 Manual Testing via Workflow Dispatch
 
 You can trigger the workflow manually from GitHub Actions (`workflow_dispatch`) to test the build/deploy pipeline without creating a real release. Manual runs **do not** create a GitHub Release — they only build and deploy to the update server. Use this to verify CI changes before pushing a tag.
 
-### 7.3 Web Dashboard / Laravel Backend Deployments
+### 7.4 Web Dashboard / Laravel Backend Deployments
 
-Backend deploys are handled by `.github/workflows/deploy-backend.yml`. It triggers automatically on push to `main` when files under `sync-server/backend/**` change.
+Backend deploys are handled by `.github/workflows/deploy-backend.yml`. It triggers automatically on push to `main` when files under `sync-server/backend/**` or `.github/workflows/deploy-backend.yml` change.
 
-What the workflow does:
+**What the workflow does:**
 1. Connects to Tailscale
 2. Uses `rsync` to copy changed PHP, views, routes, and config to `/opt/metr-sync/site/backend` on `the18th`
 3. Excludes server-local files: `.env`, `vendor/`, `storage/`, `bootstrap/cache/`
@@ -248,7 +260,15 @@ scp sync-server/backend/app/Console/Commands/SomeCommand.php \
 ssh root@the18th.taild48c09.ts.net "docker exec metr-sync-php php artisan view:clear && docker exec metr-sync-php php artisan optimize"
 ```
 
-### 7.4 Verify Update Endpoint
+### 7.5 Forbidden Operations
+
+**Never do these for normal desktop releases:**
+- ❌ `npx tauri bundle` locally then SCP the result to the server
+- ❌ `rsync` desktop app artifacts (`*.dmg`, `*.msi`, `*.deb`, `*.tar.gz`, `*.AppImage`) manually
+- ❌ Run `php artisan metr:release:publish` manually on the server unless fixing a broken workflow
+- ❌ Edit version numbers in only one file (must sync `package.json`, `Cargo.toml`, `tauri.conf.json`)
+
+### 7.6 Verify Update Endpoint
 
 After any desktop release:
 ```bash
