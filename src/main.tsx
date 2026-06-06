@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { invoke } from "@tauri-apps/api/core";
 import { getVersion } from "@tauri-apps/api/app";
+import { listen } from "@tauri-apps/api/event";
 import {
   Activity,
   Cloud,
@@ -286,6 +287,19 @@ function App() {
     }, 100);
     getVersion().then((v) => setAppVersion(v)).catch(() => setAppVersion(""));
     return () => clearTimeout(initTimer);
+  }, []);
+
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    listen("sync-progress", (event) => {
+      const payload = event.payload as { uploaded: number; total: number };
+      setStatus(`Syncing... ${payload.uploaded.toLocaleString()} / ${payload.total.toLocaleString()} events uploaded`);
+    }).then((fn) => {
+      unlisten = fn;
+    });
+    return () => {
+      if (unlisten) unlisten();
+    };
   }, []);
 
   useEffect(() => {
