@@ -244,6 +244,11 @@ class WebController extends Controller
 
         $maxValue = max(1, (float) $dailyRows->max('value'));
 
+        $byProject = $this->reportGroupBy($query, 'project_id', 'projects', "COALESCE(projects.manual_name, projects.canonical_name, 'Unknown project')");
+        $byProvider = $this->reportGroupBy($query, 'provider_id');
+        $byDevice = $this->reportGroupBy($query, 'device_id', 'devices', "COALESCE(devices.alias, devices.display_name, 'Unknown device')");
+        $byModel = $this->reportGroupBy($query, 'model');
+
         return view('reports', [
             'summary' => $summary,
             'rows' => $dailyRows,
@@ -254,6 +259,10 @@ class WebController extends Controller
             'presets' => $this->reportPresets(),
             'favorites' => ReportFavorite::where('user_id', $user->id)->orderBy('name')->get(),
             'activeFavoriteId' => $request->query('favorite_id'),
+            'byProject' => $byProject,
+            'byProvider' => $byProvider,
+            'byDevice' => $byDevice,
+            'byModel' => $byModel,
         ]);
     }
 
@@ -760,6 +769,57 @@ class WebController extends Controller
             'value' => $isCost ? $cost : $totals['total_tokens'],
             'segments' => $segments,
         ];
+    }
+
+    /**
+     * @return array<int, array<string, mixed>>
+     */
+    private function reportGroupBy(Builder $baseQuery, string $groupColumn, ?string $joinTable = null, ?string $labelExpr = null): array
+    {
+        $query = clone $baseQuery;
+
+        if ($joinTable !== null && $labelExpr !== null) {
+            $query->leftJoin($joinTable, "{$joinTable}.id", '=', "usage_events.{$groupColumn}");
+        }
+
+        $select = [
+            DB::raw('COUNT(*) as event_count'),
+            DB::raw('SUM(input_tokens) as input_tokens'),
+            DB::raw('SUM(output_tokens) as output_tokens'),
+            DB::raw('SUM(cached_input_tokens) as cached_input_tokens'),
+            DB::raw('SUM(cache_write_tokens) as cache_write_tokens'),
+            DB::raw('SUM(cache_read_tokens) as cache_read_tokens'),
+            DB::raw('SUM(reasoning_tokens) as reasoning_tokens'),
+            DB::raw('SUM(tool_tokens) as tool_tokens'),
+            DB::raw('SUM(unknown_tokens) as unknown_tokens'),
+            DB::raw('SUM(official_api_cost_usd) as total_cost'),
+        ];
+
+        if ($labelExpr !== null) {
+            $select[] = DB::raw("{$labelExpr} as label");
+        } else {
+            $select[] = DB::raw("usage_events.{$groupColumn} as label");
+        }
+
+        $results = $query->select($select)
+            ->groupBy("usage_events.{$groupColumn}")
+            ->orderByDesc(DB::raw('total_cost'))
+            ->limit(50)
+            ->get();
+
+        return $results->map(function ($row) {
+            $totals = $this->reportTotals($row);
+
+            return [
+                'label' => $row->label ?: 'Unknown',
+                'events' => $totals['events'],
+                'cost' => $totals['cost'],
+                'cached' => $totals['cached'],
+                'input' => $totals['input'],
+                'output' => $totals['output'],
+                'total_tokens' => $totals['total_tokens'],
+            ];
+        })->all();
     }
 
     private function perPage(Request $request, int $default): int
