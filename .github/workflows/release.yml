@@ -29,6 +29,19 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Install Apple certificate
+        run: |
+          echo "$APPLE_CERTIFICATE" | base64 --decode > /tmp/certificate.p12
+          security create-keychain -p "" build.keychain
+          security set-keychain-settings -lut 21600 build.keychain
+          security unlock-keychain -p "" build.keychain
+          security import /tmp/certificate.p12 -P "$APPLE_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k build.keychain
+          security set-key-partition-list -S apple-tool:,apple: -s -k "" build.keychain
+          security list-keychains -d user -s build.keychain
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+
       - name: Build macOS
         run: npm run tauri:build
         env:
