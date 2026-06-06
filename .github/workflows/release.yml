@@ -177,6 +177,7 @@ jobs:
           mv ./macos/MEtR.app.tar.gz.sig "./macos/MEtR_${VERSION}_aarch64.app.tar.gz.sig"
 
       - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           name: MEtR v${{ env.VERSION }}
