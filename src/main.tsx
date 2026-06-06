@@ -1155,6 +1155,8 @@ function SettingsView(props: {
               <th>Input / 1M</th>
               <th>Output / 1M</th>
               <th>Cached / 1M</th>
+              <th>Cache Write / 1M</th>
+              <th>Cache Read / 1M</th>
             </tr>
           </thead>
           <tbody>
@@ -1165,9 +1167,11 @@ function SettingsView(props: {
                 <td>{price(entry.input_per_1m)}</td>
                 <td>{price(entry.output_per_1m)}</td>
                 <td>{price(entry.cached_input_per_1m)}</td>
+                <td>{price(entry.cache_write_per_1m)}</td>
+                <td>{price(entry.cache_read_per_1m)}</td>
               </tr>
             ))}
-            {props.pricing.length === 0 && <EmptyRow colSpan={5} text="No prices loaded. Pull from server or add manually." />}
+            {props.pricing.length === 0 && <EmptyRow colSpan={7} text="No prices loaded. Pull from server or add manually." />}
           </tbody>
         </table>
       </section>

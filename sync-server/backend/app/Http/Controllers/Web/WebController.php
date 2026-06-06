@@ -83,6 +83,7 @@ class WebController extends Controller
             DB::raw('SUM(input_tokens) as input_tokens'),
             DB::raw('SUM(GREATEST(input_tokens - cached_input_tokens, 0)) as effective_input_tokens'),
             DB::raw('SUM(output_tokens) as output_tokens'),
+            DB::raw('SUM(cached_input_tokens + cache_write_tokens + cache_read_tokens) as cached_tokens'),
             DB::raw('SUM(cached_input_tokens) as cached_input_tokens'),
             DB::raw('SUM(cache_write_tokens) as cache_write_tokens'),
             DB::raw('SUM(cache_read_tokens) as cache_read_tokens'),
