@@ -17,6 +17,9 @@ class PublishUpdateRelease extends Command
         {--darwin-dmg= : Path to macOS .dmg installer (optional, for fresh installs)}
         {--windows-msi= : Path to Windows .msi artifact}
         {--windows-sig= : Path to Windows .msi.sig file}
+        {--linux-deb= : Path to Linux .deb installer}
+        {--linux-appimage= : Path to Linux .AppImage updater artifact}
+        {--linux-sig= : Path to Linux .AppImage.sig signature file}
         {--force : Overwrite existing release with same version}';
 
     protected $description = 'Publish a new MEtR app update release';
@@ -122,8 +125,48 @@ class PublishUpdateRelease extends Command
             $this->info("Uploaded Windows artifact: {$filename}");
         }
 
+        // Linux .deb installer
+        if ($this->option('linux-deb')) {
+            $debPath = $this->option('linux-deb');
+            if (file_exists($debPath)) {
+                $filename = basename($debPath);
+                if ($disk->path($filename) !== realpath($debPath)) {
+                    $disk->putFileAs('', $debPath, $filename);
+                }
+                $platforms[] = UpdateAsset::create([
+                    'update_release_id' => $release->id,
+                    'platform' => 'linux-x86_64-installer',
+                    'filename' => $filename,
+                    'signature' => '',
+                ]);
+                $this->info("Uploaded Linux installer DEB: {$filename}");
+            }
+        }
+
+        // Linux .AppImage updater
+        if ($this->option('linux-appimage')) {
+            $appimagePath = $this->option('linux-appimage');
+            if (file_exists($appimagePath)) {
+                $filename = basename($appimagePath);
+                if ($disk->path($filename) !== realpath($appimagePath)) {
+                    $disk->putFileAs('', $appimagePath, $filename);
+                }
+                $sig = '';
+                if ($this->option('linux-sig') && file_exists($this->option('linux-sig'))) {
+                    $sig = $this->normalizeSignature(file_get_contents($this->option('linux-sig')));
+                }
+                $platforms[] = UpdateAsset::create([
+                    'update_release_id' => $release->id,
+                    'platform' => 'linux-x86_64',
+                    'filename' => $filename,
+                    'signature' => $sig,
+                ]);
+                $this->info("Uploaded Linux updater AppImage: {$filename}");
+            }
+        }
+
         if (empty($platforms)) {
-            $this->warn('No updater artifacts uploaded. Provide --darwin-tgz/--darwin-sig and/or --windows-msi/--windows-sig.');
+            $this->warn('No updater artifacts uploaded. Provide --darwin-tgz/--darwin-sig and/or --windows-msi/--windows-sig and/or --linux-appimage.');
         }
 
         $this->info("Release {$version} published successfully.");

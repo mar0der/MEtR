@@ -25,6 +25,8 @@ class UpdateController extends Controller
             'darwin-x86_64' => 'darwin-x86_64',
             'windows-x86_64' => 'windows-x86_64',
             'windows-i686' => 'windows-i686',
+            'linux-x86_64' => 'linux-x86_64',
+            'linux-aarch64' => 'linux-aarch64',
             default => null,
         };
 
