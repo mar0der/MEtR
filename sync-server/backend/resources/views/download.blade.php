@@ -15,7 +15,7 @@
         </div>
     @endif
 
-    <div class="grid two-col" style="max-width:600px; margin:0 auto;">
+    <div class="grid" style="max-width:900px; margin:0 auto;">
         <div class="card" style="text-align:center;">
             <div style="font-size:36px; margin-bottom:8px;">🍎</div>
             <h3 style="margin:0 0 6px;">macOS</h3>
@@ -36,6 +36,19 @@
             @if(isset($assets['windows-x86_64']))
                 <a class="btn" href="/updates/{{ $assets['windows-x86_64']->filename }}">
                     Download MSI
+                </a>
+            @else
+                <span class="muted" style="font-size:13px;">Coming soon</span>
+            @endif
+        </div>
+
+        <div class="card" style="text-align:center;">
+            <div style="font-size:36px; margin-bottom:8px;">🐧</div>
+            <h3 style="margin:0 0 6px;">Linux</h3>
+            <p class="muted" style="font-size:13px; margin:0 0 14px;">Ubuntu / Debian (x64)</p>
+            @if(isset($assets['linux-x86_64-installer']))
+                <a class="btn" href="/updates/{{ $assets['linux-x86_64-installer']->filename }}">
+                    Download .deb
                 </a>
             @else
                 <span class="muted" style="font-size:13px;">Coming soon</span>

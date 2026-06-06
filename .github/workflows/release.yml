@@ -90,8 +90,47 @@ jobs:
             src-tauri/target/release/bundle/msi/*.msi
             src-tauri/target/release/bundle/msi/*.sig
 
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build Linux
+        run: npm run tauri:build
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+
+      - name: Upload Linux artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-artifacts
+          path: |
+            src-tauri/target/release/bundle/deb/*.deb
+            src-tauri/target/release/bundle/appimage/*.AppImage
+            src-tauri/target/release/bundle/appimage/*.sig
+
   release:
-    needs: [build-macos, build-windows]
+    needs: [build-macos, build-windows, build-linux]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -114,6 +153,12 @@ jobs:
           name: windows-artifacts
           path: ./windows
 
+      - name: Download Linux artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: linux-artifacts
+          path: ./linux
+
       - name: Flatten and rename artifacts
         run: |
           # Flatten macOS artifacts (upload preserves directory structure)
@@ -123,6 +168,10 @@ jobs:
           # Flatten Windows artifacts
           mv ./windows/msi/*.msi ./windows/ 2>/dev/null || true
           mv ./windows/msi/*.sig ./windows/ 2>/dev/null || true
+          # Flatten Linux artifacts
+          mv ./linux/deb/*.deb ./linux/ 2>/dev/null || true
+          mv ./linux/appimage/*.AppImage ./linux/ 2>/dev/null || true
+          mv ./linux/appimage/*.sig ./linux/ 2>/dev/null || true
           # Rename updater archives with version
           mv ./macos/MEtR.app.tar.gz "./macos/MEtR_${VERSION}_aarch64.app.tar.gz"
           mv ./macos/MEtR.app.tar.gz.sig "./macos/MEtR_${VERSION}_aarch64.app.tar.gz.sig"
@@ -137,6 +186,9 @@ jobs:
             ./macos/*.sig
             ./windows/*.msi
             ./windows/*.sig
+            ./linux/*.deb
+            ./linux/*.AppImage
+            ./linux/*.sig
           generate_release_notes: true
 
       - name: Connect to Tailscale
@@ -168,10 +220,17 @@ jobs:
           scp -i ~/.ssh/deploy_key "./windows/MEtR_${VERSION}_x64_en-US.msi" ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:/opt/metr-sync/site/backend/storage/app/updates/
           scp -i ~/.ssh/deploy_key "./windows/MEtR_${VERSION}_x64_en-US.msi.sig" ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:/opt/metr-sync/site/backend/storage/app/updates/
 
+          # Linux installer → public releases
+          scp -i ~/.ssh/deploy_key ./linux/*.deb ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:/opt/metr-sync/site/storage/releases/
+
+          # Linux updater → Laravel storage
+          scp -i ~/.ssh/deploy_key ./linux/*.AppImage ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:/opt/metr-sync/site/backend/storage/app/updates/ 2>/dev/null || true
+          scp -i ~/.ssh/deploy_key ./linux/*.AppImage.sig ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:/opt/metr-sync/site/backend/storage/app/updates/ 2>/dev/null || true
+
           # Copy installers to updates dir for Laravel publish
-          ssh -i ~/.ssh/deploy_key ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} "cp /opt/metr-sync/site/storage/releases/MEtR_${VERSION}_aarch64.dmg /opt/metr-sync/site/backend/storage/app/updates/ && cp /opt/metr-sync/site/storage/releases/MEtR_${VERSION}_x64_en-US.msi /opt/metr-sync/site/backend/storage/app/updates/"
+          ssh -i ~/.ssh/deploy_key ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} "cp /opt/metr-sync/site/storage/releases/MEtR_${VERSION}_aarch64.dmg /opt/metr-sync/site/backend/storage/app/updates/ && cp /opt/metr-sync/site/storage/releases/MEtR_${VERSION}_x64_en-US.msi /opt/metr-sync/site/backend/storage/app/updates/ && cp /opt/metr-sync/site/storage/releases/MEtR_${VERSION}_amd64.deb /opt/metr-sync/site/backend/storage/app/updates/ 2>/dev/null || true"
 
       - name: Publish release to update server
         run: |
           NOTES="Auto-release from GitHub Actions"
-          ssh -i ~/.ssh/deploy_key ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} "docker exec metr-sync-php php artisan metr:release:publish --release-version=${VERSION} --notes='${NOTES}' --darwin-tgz=/var/www/html/storage/app/updates/MEtR_${VERSION}_aarch64.app.tar.gz --darwin-sig=/var/www/html/storage/app/updates/MEtR_${VERSION}_aarch64.app.tar.gz.sig --darwin-dmg=/var/www/html/storage/app/updates/MEtR_${VERSION}_aarch64.dmg --windows-msi=/var/www/html/storage/app/updates/MEtR_${VERSION}_x64_en-US.msi --windows-sig=/var/www/html/storage/app/updates/MEtR_${VERSION}_x64_en-US.msi.sig --force"
+          ssh -i ~/.ssh/deploy_key ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} "docker exec metr-sync-php php artisan metr:release:publish --release-version=${VERSION} --notes='${NOTES}' --darwin-tgz=/var/www/html/storage/app/updates/MEtR_${VERSION}_aarch64.app.tar.gz --darwin-sig=/var/www/html/storage/app/updates/MEtR_${VERSION}_aarch64.app.tar.gz.sig --darwin-dmg=/var/www/html/storage/app/updates/MEtR_${VERSION}_aarch64.dmg --windows-msi=/var/www/html/storage/app/updates/MEtR_${VERSION}_x64_en-US.msi --windows-sig=/var/www/html/storage/app/updates/MEtR_${VERSION}_x64_en-US.msi.sig --linux-deb=/var/www/html/storage/app/updates/MEtR_${VERSION}_amd64.deb --linux-appimage=/var/www/html/storage/app/updates/MEtR_${VERSION}_amd64.AppImage --force"
