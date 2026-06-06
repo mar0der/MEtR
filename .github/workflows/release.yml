@@ -1,0 +1,149 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+  workflow_dispatch:
+
+env:
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build macOS
+        run: npm run tauri:build
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+
+      - name: Upload macOS artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-artifacts
+          path: |
+            src-tauri/target/release/bundle/dmg/*.dmg
+            src-tauri/target/release/bundle/macos/*.tar.gz
+            src-tauri/target/release/bundle/macos/*.sig
+
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build Windows
+        run: npm run tauri:build
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+
+      - name: Upload Windows artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-artifacts
+          path: |
+            src-tauri/target/release/bundle/msi/*.msi
+            src-tauri/target/release/bundle/msi/*.sig
+
+  release:
+    needs: [build-macos, build-windows]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Extract version
+        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+
+      - name: Download macOS artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: macos-artifacts
+          path: ./macos
+
+      - name: Download Windows artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-artifacts
+          path: ./windows
+
+      - name: Rename updater archives with version
+        run: |
+          mv ./macos/MEtR.app.tar.gz "./macos/MEtR_${VERSION}_aarch64.app.tar.gz"
+          mv ./macos/MEtR.app.tar.gz.sig "./macos/MEtR_${VERSION}_aarch64.app.tar.gz.sig"
+          mv ./windows/MEtR_${VERSION}_x64_en-US.msi.sig "./windows/MEtR_${VERSION}_x64_en-US.msi.sig" 2>/dev/null || true
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: MEtR v${{ env.VERSION }}
+          files: |
+            ./macos/*.dmg
+            ./macos/*.tar.gz
+            ./macos/*.sig
+            ./windows/*.msi
+            ./windows/*.sig
+          generate_release_notes: true
+
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H ${{ secrets.DEPLOY_HOST }} >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Upload artifacts to server
+        run: |
+          # macOS installer → public releases
+          scp -i ~/.ssh/deploy_key ./macos/*.dmg ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:/opt/metr-sync/site/storage/releases/
+
+          # macOS updater → Laravel storage
+          scp -i ~/.ssh/deploy_key "./macos/MEtR_${VERSION}_aarch64.app.tar.gz" ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:/opt/metr-sync/site/backend/storage/app/updates/
+          scp -i ~/.ssh/deploy_key "./macos/MEtR_${VERSION}_aarch64.app.tar.gz.sig" ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:/opt/metr-sync/site/backend/storage/app/updates/
+
+          # Windows installer → public releases
+          scp -i ~/.ssh/deploy_key ./windows/*.msi ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:/opt/metr-sync/site/storage/releases/
+
+          # Windows updater → Laravel storage
+          scp -i ~/.ssh/deploy_key "./windows/MEtR_${VERSION}_x64_en-US.msi" ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:/opt/metr-sync/site/backend/storage/app/updates/
+          scp -i ~/.ssh/deploy_key "./windows/MEtR_${VERSION}_x64_en-US.msi.sig" ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:/opt/metr-sync/site/backend/storage/app/updates/
+
+          # Copy installers to updates dir for Laravel publish
+          ssh -i ~/.ssh/deploy_key ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} "cp /opt/metr-sync/site/storage/releases/MEtR_${VERSION}_aarch64.dmg /opt/metr-sync/site/backend/storage/app/updates/ && cp /opt/metr-sync/site/storage/releases/MEtR_${VERSION}_x64_en-US.msi /opt/metr-sync/site/backend/storage/app/updates/"
+
+      - name: Publish release to update server
+        run: |
+          NOTES="Auto-release from GitHub Actions"
+          ssh -i ~/.ssh/deploy_key ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} "docker exec metr-sync-php php artisan metr:release:publish --release-version=${VERSION} --notes='${NOTES}' --darwin-tgz=/var/www/html/storage/app/updates/MEtR_${VERSION}_aarch64.app.tar.gz --darwin-sig=/var/www/html/storage/app/updates/MEtR_${VERSION}_aarch64.app.tar.gz.sig --darwin-dmg=/var/www/html/storage/app/updates/MEtR_${VERSION}_aarch64.dmg --windows-msi=/var/www/html/storage/app/updates/MEtR_${VERSION}_x64_en-US.msi --windows-sig=/var/www/html/storage/app/updates/MEtR_${VERSION}_x64_en-US.msi.sig --force"
