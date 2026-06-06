@@ -307,6 +307,7 @@ There is **no local dev environment** for running the desktop app during develop
 - `pricing_catalogs` — model pricing per provider (USD per 1M tokens)
 - `subscriptions` — user subscription costs and billing anchors
 - `sync_config` — singleton row (id = 1) for server URL, auth token, device info
+- `update_releases` / `update_assets` — app release versions and per-platform artifacts (darwin, windows, linux)
 
 ---
 
