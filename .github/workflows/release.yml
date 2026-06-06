@@ -9,6 +9,9 @@ on:
 env:
   CARGO_INCREMENTAL: 0
 
+permissions:
+  contents: write
+
 jobs:
   build-macos:
     runs-on: macos-latest
