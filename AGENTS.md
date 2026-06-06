@@ -223,11 +223,30 @@ You can trigger the workflow manually from GitHub Actions (`workflow_dispatch`) 
 
 ### 7.3 Web Dashboard / Laravel Backend Deployments
 
-The sync-server Laravel backend is **not** auto-deployed by GitHub Actions today. Backend code changes (PHP, views, migrations) must be copied to `/opt/metr-sync/site/backend` on `the18th` manually or via a separate deploy workflow.
+Backend deploys are handled by `.github/workflows/deploy-backend.yml`. It triggers automatically on push to `main` when files under `sync-server/backend/**` change.
 
-**Backend deploy options:**
-- **Manual (current):** SCP changed files to `the18th:/opt/metr-sync/site/backend/` and run `docker exec metr-sync-php php artisan ...` as needed.
-- **Automated (recommended):** Add a second workflow (`.github/workflows/deploy-backend.yml`) that triggers on `push` to `main` when `sync-server/backend/**` changes. It should copy files via Tailscale SSH and clear caches, but **do not** auto-run database migrations — those should remain manual to prevent accidental data loss.
+What the workflow does:
+1. Connects to Tailscale
+2. Uses `rsync` to copy changed PHP, views, routes, and config to `/opt/metr-sync/site/backend` on `the18th`
+3. Excludes server-local files: `.env`, `vendor/`, `storage/`, `bootstrap/cache/`
+4. Runs `view:clear`, `config:clear`, `route:clear`, and `optimize` inside the Docker container
+5. Runs `php artisan about` as a health check
+
+**Migrations are intentionally NOT automated.** Always review migrations before running them manually:
+```bash
+ssh root@the18th.taild48c09.ts.net
+# Review the migration first
+docker exec metr-sync-php php artisan migrate:status
+# Then run if safe
+docker exec metr-sync-php php artisan migrate
+```
+
+**Manual fallback** if the workflow fails or you need to deploy outside git:
+```bash
+scp sync-server/backend/app/Console/Commands/SomeCommand.php \
+  root@the18th.taild48c09.ts.net:/opt/metr-sync/site/backend/app/Console/Commands/
+ssh root@the18th.taild48c09.ts.net "docker exec metr-sync-php php artisan view:clear && docker exec metr-sync-php php artisan optimize"
+```
 
 ### 7.4 Verify Update Endpoint
 
