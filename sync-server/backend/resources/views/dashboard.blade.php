@@ -31,10 +31,10 @@
         <div class="label">Total Tokens</div>
     </div>
 
-    {{-- Row 2: Cached, Real Input, Output --}}
+    {{-- Row 2: Cached (combined), Real Input, Output --}}
     <div class="card stat">
-        <div class="value">{{ number_format($summary['cached_input_tokens'] ?? 0) }}</div>
-        <div class="label">Cached Input Tokens</div>
+        <div class="value">{{ number_format($summary['cached_tokens'] ?? 0) }}</div>
+        <div class="label">Cached Tokens</div>
     </div>
     <div class="card stat">
         <div class="value">{{ number_format($summary['effective_input_tokens'] ?? 0) }}</div>
@@ -45,15 +45,7 @@
         <div class="label">Output Tokens</div>
     </div>
 
-    {{-- Row 3: Cache reads/writes and other buckets so totals are auditable --}}
-    <div class="card stat">
-        <div class="value">{{ number_format($summary['cache_read_tokens'] ?? 0) }}</div>
-        <div class="label">Cache Read Tokens</div>
-    </div>
-    <div class="card stat">
-        <div class="value">{{ number_format($summary['cache_write_tokens'] ?? 0) }}</div>
-        <div class="label">Cache Write Tokens</div>
-    </div>
+    {{-- Row 3: Other tokens --}}
     <div class="card stat">
         <div class="value">{{ number_format($otherTokens) }}</div>
         <div class="label">Other Tokens</div>
