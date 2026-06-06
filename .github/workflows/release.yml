@@ -98,7 +98,9 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Extract version
-        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
 
       - name: Download macOS artifacts
         uses: actions/download-artifact@v4
@@ -112,11 +114,18 @@ jobs:
           name: windows-artifacts
           path: ./windows
 
-      - name: Rename updater archives with version
+      - name: Flatten and rename artifacts
         run: |
+          # Flatten macOS artifacts (upload preserves directory structure)
+          mv ./macos/dmg/*.dmg ./macos/ 2>/dev/null || true
+          mv ./macos/macos/*.tar.gz ./macos/ 2>/dev/null || true
+          mv ./macos/macos/*.sig ./macos/ 2>/dev/null || true
+          # Flatten Windows artifacts
+          mv ./windows/msi/*.msi ./windows/ 2>/dev/null || true
+          mv ./windows/msi/*.sig ./windows/ 2>/dev/null || true
+          # Rename updater archives with version
           mv ./macos/MEtR.app.tar.gz "./macos/MEtR_${VERSION}_aarch64.app.tar.gz"
           mv ./macos/MEtR.app.tar.gz.sig "./macos/MEtR_${VERSION}_aarch64.app.tar.gz.sig"
-          mv ./windows/MEtR_${VERSION}_x64_en-US.msi.sig "./windows/MEtR_${VERSION}_x64_en-US.msi.sig" 2>/dev/null || true
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
