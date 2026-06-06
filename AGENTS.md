@@ -193,99 +193,50 @@ The helper script `scripts/build-release.sh` syncs the version from `tauri.conf.
 
 ## 7. Deployment Workflow
 
-### 7.1 No Local Testing Environment
+### 7.1 Desktop App Deployments Are Fully Automated via GitHub Actions
 
-There is **no local dev environment** for running the desktop app during development. Builds are deployed straight to the update server and tested from there.
+**Rule:** All desktop app releases (macOS, Windows, Linux) are built, signed, and deployed by `.github/workflows/release.yml`. Do NOT perform manual builds, manual signing, or manual SCP uploads for releases.
 
-**DO NOT** try to:
-- Run `cargo tauri dev` for local testing
-- Start the app locally to "verify" changes
-- Set up a local test loop
+The workflow triggers on **tag push** matching `v*.*.*`:
+```bash
+git tag v26.24.0
+git push origin v26.24.0
+```
 
-**DO** build the release bundle, sign it, upload to server, and test via the actual update mechanism.
+What the workflow does:
+1. Builds macOS on `macos-latest` (Apple code-signed with `APPLE_CERTIFICATE` secret)
+2. Builds Windows on `windows-latest` (MSI + Tauri updater signature)
+3. Builds Linux on `ubuntu-latest` (`.deb` + `.AppImage`)
+4. Creates a GitHub Release with all artifacts
+5. Connects to Tailscale and deploys artifacts to `the18th`
+6. Runs `php artisan metr:release:publish` to activate the updater
 
-### 7.2 Build & Deploy Steps
+**Required GitHub secrets:**
+- `TAURI_SIGNING_PRIVATE_KEY` + `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`
+- `APPLE_CERTIFICATE` + `APPLE_CERTIFICATE_PASSWORD`
+- `TAILSCALE_AUTH_KEY`
+- `DEPLOY_HOST`, `DEPLOY_USER`, `DEPLOY_SSH_KEY`
 
-1. **Bump version** in:
-   - `src-tauri/Cargo.toml`
-   - `package.json`
-   - `src-tauri/tauri.conf.json`
+### 7.2 Manual Testing via Workflow Dispatch
 
-2. **Build frontend:** `npm run build`
+You can trigger the workflow manually from GitHub Actions (`workflow_dispatch`) to test the build/deploy pipeline without creating a real release. Manual runs **do not** create a GitHub Release — they only build and deploy to the update server. Use this to verify CI changes before pushing a tag.
 
-3. **Build Tauri release bundle:** `npx tauri bundle --bundles dmg,app`
+### 7.3 Web Dashboard / Laravel Backend Deployments
 
-4. **Manually sign the updater archive** (auto-signing fails with "Device not configured"):
-   ```bash
-   # Decode the secret key (stored as base64 in ~/.tauri/metr.key)
-   cat ~/.tauri/metr.key | base64 -d > /tmp/metr.key
+The sync-server Laravel backend is **not** auto-deployed by GitHub Actions today. Backend code changes (PHP, views, migrations) must be copied to `/opt/metr-sync/site/backend` on `the18th` manually or via a separate deploy workflow.
 
-   # Decode the public key from tauri.conf.json
-   echo "PUBKEY_FROM_TAURI_CONF" | base64 -d > /tmp/metr.pubkey
+**Backend deploy options:**
+- **Manual (current):** SCP changed files to `the18th:/opt/metr-sync/site/backend/` and run `docker exec metr-sync-php php artisan ...` as needed.
+- **Automated (recommended):** Add a second workflow (`.github/workflows/deploy-backend.yml`) that triggers on `push` to `main` when `sync-server/backend/**` changes. It should copy files via Tailscale SSH and clear caches, but **do not** auto-run database migrations — those should remain manual to prevent accidental data loss.
 
-   # Sign the updater archive
-   rsign sign -p /tmp/metr.pubkey -s /tmp/metr.key -W \
-     -t "MEtR vVERSION" -c "Update archive for MEtR" \
-     src-tauri/target/release/bundle/macos/MEtR.app.tar.gz
+### 7.4 Verify Update Endpoint
 
-   # Rename .minisig to .sig
-   mv src-tauri/target/release/bundle/macos/MEtR.app.tar.gz.minisig \
-      src-tauri/target/release/bundle/macos/MEtR.app.tar.gz.sig
-   ```
-
-5. **Push to GitHub** to trigger the Windows build workflow (`.github/workflows/build-windows.yml`)
-
-6. **Wait for Windows build** to complete on GitHub Actions
-
-7. **Download Windows artifacts:**
-   ```bash
-   gh run download RUN_ID --name windows-msi --dir /tmp/windows-msi
-   gh run download RUN_ID --name windows-sig --dir /tmp/windows-sig
-   ```
-
-8. **Upload artifacts to the server:**
-   
-   Only `.dmg` and `.msi` (human installers) go to `/storage/releases/`. The `.tar.gz` updater archives go **straight to Laravel storage** — do NOT leave them in the public releases directory.
-   
-   ```bash
-   # Human installers → public releases dir
-   scp src-tauri/target/release/bundle/dmg/MEtR_VERSION_aarch64.dmg \
-       root@the18th:/opt/metr-sync/site/storage/releases/
-   scp /tmp/windows-msi/MEtR_VERSION_x64_en-US.msi \
-       root@the18th:/opt/metr-sync/site/storage/releases/
-   
-   # Updater archives → Laravel storage directly
-   scp src-tauri/target/release/bundle/macos/MEtR.app.tar.gz \
-       root@the18th:/opt/metr-sync/site/backend/storage/app/updates/MEtR_VERSION_aarch64.app.tar.gz
-   scp src-tauri/target/release/bundle/macos/MEtR.app.tar.gz.sig \
-       root@the18th:/opt/metr-sync/site/backend/storage/app/updates/MEtR_VERSION_aarch64.app.tar.gz.sig
-   scp /tmp/windows-sig/MEtR_VERSION_x64_en-US.msi.sig \
-       root@the18th:/opt/metr-sync/site/backend/storage/app/updates/MEtR_VERSION_x64_en-US.msi.sig
-   ```
-
-9. **Copy installer to backend storage and publish:**
-   ```bash
-   ssh root@the18th "cp /opt/metr-sync/site/storage/releases/MEtR_VERSION_aarch64.dmg \
-       /opt/metr-sync/site/backend/storage/app/updates/ && \
-    cp /opt/metr-sync/site/storage/releases/MEtR_VERSION_x64_en-US.msi \
-       /opt/metr-sync/site/backend/storage/app/updates/"
-
-   ssh root@the18th "docker exec metr-sync-php php artisan metr:release:publish \
-       --release-version=VERSION \
-       --notes='Release notes' \
-       --darwin-tgz=/var/www/html/storage/app/updates/MEtR_VERSION_aarch64.app.tar.gz \
-       --darwin-sig=/var/www/html/storage/app/updates/MEtR_VERSION_aarch64.app.tar.gz.sig \
-       --darwin-dmg=/var/www/html/storage/app/updates/MEtR_VERSION_aarch64.dmg \
-       --windows-msi=/var/www/html/storage/app/updates/MEtR_VERSION_x64_en-US.msi \
-       --windows-sig=/var/www/html/storage/app/updates/MEtR_VERSION_x64_en-US.msi.sig \
-       --force"
-   ```
-
-10. **Verify update endpoint:**
-    ```bash
-    curl -s "https://metr.petarpetkov.com/api/v1/update/darwin/aarch64/PREVIOUS_VERSION"
-    curl -s "https://metr.petarpetkov.com/api/v1/update/windows/x86_64/PREVIOUS_VERSION"
-    ```
+After any desktop release:
+```bash
+curl -s "https://metr.petarpetkov.com/api/v1/update/darwin/aarch64/PREVIOUS_VERSION"
+curl -s "https://metr.petarpetkov.com/api/v1/update/windows/x86_64/PREVIOUS_VERSION"
+curl -s "https://metr.petarpetkov.com/api/v1/update/linux/x86_64/PREVIOUS_VERSION"
+```
 
 ---
 
