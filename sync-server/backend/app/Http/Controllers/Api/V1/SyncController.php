@@ -18,6 +18,10 @@ class SyncController extends Controller
 
     public function events(Request $request): JsonResponse
     {
+        if ($this->isDemoUser($request)) {
+            return response()->json(['error' => 'Demo account does not accept sync uploads.'], 403);
+        }
+
         $data = $request->validate([
             'device_uuid' => ['required', 'string'],
             'client_batch_id' => ['required', 'string'],
@@ -63,6 +67,10 @@ class SyncController extends Controller
 
     public function subscriptions(Request $request): JsonResponse
     {
+        if ($this->isDemoUser($request)) {
+            return response()->json(['error' => 'Demo account does not accept sync uploads.'], 403);
+        }
+
         $data = $request->validate([
             'subscriptions' => ['required', 'array'],
             'subscriptions.*.source_subscription_id' => ['required', 'string', 'max:255'],
@@ -122,6 +130,10 @@ class SyncController extends Controller
 
     public function settings(Request $request): JsonResponse
     {
+        if ($this->isDemoUser($request)) {
+            return response()->json(['error' => 'Demo account settings cannot be downloaded.'], 403);
+        }
+
         $user = $request->user();
 
         // Only send model prices for models this user actually has events for.
@@ -178,6 +190,10 @@ class SyncController extends Controller
 
     public function pricing(Request $request): JsonResponse
     {
+        if ($this->isDemoUser($request)) {
+            return response()->json(['error' => 'Demo account does not accept sync uploads.'], 403);
+        }
+
         $data = $request->validate([
             'prices' => ['required', 'array'],
             'prices.*.provider_id' => ['required', 'string', 'exists:providers,id'],
@@ -228,5 +244,12 @@ class SyncController extends Controller
             'ok' => true,
             'synced' => $synced,
         ]);
+    }
+
+    private function isDemoUser(Request $request): bool
+    {
+        $user = $request->user();
+
+        return $user && ($user->email === 'demo@metr.app' || $user->username === 'demo');
     }
 }

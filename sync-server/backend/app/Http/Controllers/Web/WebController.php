@@ -115,6 +115,10 @@ class WebController extends Controller
     {
         $request->validate(['email' => 'required|email']);
 
+        if ($request->input('email') === 'demo@metr.app') {
+            return back()->withErrors(['email' => 'Password reset is disabled for the demo account.']);
+        }
+
         $status = Password::sendResetLink($request->only('email'));
 
         return $status === Password::RESET_LINK_SENT
@@ -366,6 +370,10 @@ class WebController extends Controller
 
     public function storeReportFavorite(Request $request)
     {
+        if ($this->isDemoUser()) {
+            return redirect('/reports')->withErrors(['demo' => 'Demo account data cannot be modified.']);
+        }
+
         $data = $request->validate([
             'favorite_name' => ['required', 'string', 'max:80'],
         ]);
@@ -394,6 +402,10 @@ class WebController extends Controller
 
     public function deleteReportFavorite($id)
     {
+        if ($this->isDemoUser()) {
+            return redirect('/reports')->withErrors(['demo' => 'Demo account data cannot be modified.']);
+        }
+
         ReportFavorite::where('user_id', Auth::id())->where('id', $id)->delete();
 
         return redirect('/reports')->with('success', 'Report favorite deleted.');
@@ -401,6 +413,10 @@ class WebController extends Controller
 
     public function updateDeviceAlias(Request $request, $id)
     {
+        if ($this->isDemoUser()) {
+            return redirect('/devices')->withErrors(['demo' => 'Demo account data cannot be modified.']);
+        }
+
         $validated = $request->validate(["alias" => ["nullable", "string", "max:255"]]);
         DB::table("devices")->where("id", $id)->where("user_id", Auth::id())->update(["alias" => $validated["alias"] ?? null]);
         return redirect("/devices")->with("success", "Device alias updated.");
@@ -408,6 +424,10 @@ class WebController extends Controller
 
     public function deleteDevice($id)
     {
+        if ($this->isDemoUser()) {
+            return redirect('/devices')->withErrors(['demo' => 'Demo account data cannot be modified.']);
+        }
+
         DB::table("devices")->where("id", $id)->where("user_id", Auth::id())->delete();
         return redirect("/devices")->with("success", "Device removed.");
     }
@@ -610,6 +630,10 @@ class WebController extends Controller
 
     public function clearData(Request $request)
     {
+        if ($this->isDemoUser()) {
+            return redirect('/settings')->withErrors(['demo' => 'Demo account data cannot be modified.']);
+        }
+
         $user = Auth::user();
 
         DB::statement('SET FOREIGN_KEY_CHECKS=0');
@@ -941,5 +965,12 @@ class WebController extends Controller
         $value = (int) $request->query('per_page', $default);
 
         return in_array($value, [10, 25, 50, 100], true) ? $value : $default;
+    }
+
+    private function isDemoUser(): bool
+    {
+        $user = Auth::user();
+
+        return $user && ($user->email === 'demo@metr.app' || $user->username === 'demo');
     }
 }

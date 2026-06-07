@@ -431,6 +431,37 @@
         .stat-success { border-left: 3px solid var(--success); }
         .stat-warning { border-left: 3px solid var(--warning); }
         .stat-danger { border-left: 3px solid var(--danger); }
+        .demo-banner {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 10px 14px;
+            border-radius: 8px;
+            background: linear-gradient(90deg, #fef3c7, #fffbeb);
+            border: 1px solid #fde68a;
+            margin-bottom: 16px;
+            font-size: 13px;
+            color: #92400e;
+            font-weight: 500;
+        }
+        @media (prefers-color-scheme: dark) {
+            .demo-banner {
+                background: linear-gradient(90deg, #451a03, #29200a);
+                border-color: #78350f;
+                color: #fbbf24;
+            }
+        }
+        .demo-pill {
+            display: inline-flex;
+            align-items: center;
+            padding: 2px 8px;
+            border-radius: 999px;
+            background: #f59e0b;
+            color: #fff;
+            font-size: 10px;
+            font-weight: 700;
+            letter-spacing: 0.05em;
+        }
     </style>
 </head>
 <body>
@@ -463,6 +494,19 @@
         @if(session('success'))
             <div class="flash">{{ session('success') }}</div>
         @endif
+        @if(session()->has('errors') && session('errors')->has('demo'))
+            <div style="color:#7c2d12;background:#fef3c7;border:1px solid #fde68a;padding:10px 14px;border-radius:8px;margin-bottom:16px;font-size:13px;font-weight:600;">
+                {{ session('errors')->first('demo') }}
+            </div>
+        @endif
+        @auth
+            @if(auth()->user()->email === 'demo@metr.app' || auth()->user()->username === 'demo')
+                <div class="demo-banner">
+                    <span class="demo-pill">DEMO</span>
+                    <span>This is a public demo account. Data cannot be modified or exported.</span>
+                </div>
+            @endif
+        @endauth
         @yield('content')
     </div>
 </body>

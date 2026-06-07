@@ -12,18 +12,24 @@
         <p class="muted" style="margin:0;">{{ number_format($projectCount) }} projects stored</p>
     </div>
 
-    <div style="border-top:1px solid #dce2ea; padding-top:20px;">
+    <div style="border-top:1px solid var(--border); padding-top:20px;">
         <h3 style="font-size:15px; color:#dc2626; margin-bottom:8px;">Danger Zone</h3>
         <p class="muted" style="margin:0 0 14px; max-width:460px;">
             Permanently delete all usage events, projects, conversations, and sync history from the server.
             Your account, devices, subscriptions, and pricing data stay intact.
         </p>
-        <form method="POST" action="/settings/clear-data" onsubmit="return confirm('WARNING: This will permanently delete ALL usage data from the server. This cannot be undone. Continue?');">
-            @csrf
-            <button type="submit" class="btn" style="background:#dc2626; border-color:#dc2626; color:#fff;">
-                Clear All Server Data
+        @if(auth()->user()->email === 'demo@metr.app' || auth()->user()->username === 'demo')
+            <button type="button" class="btn" style="background:#9ca3af; cursor:not-allowed; opacity:0.7;" disabled>
+                Clear All Server Data — Demo Account
             </button>
-        </form>
+        @else
+            <form method="POST" action="/settings/clear-data" onsubmit="return confirm('WARNING: This will permanently delete ALL usage data from the server. This cannot be undone. Continue?');">
+                @csrf
+                <button type="submit" class="btn" style="background:#dc2626; border-color:#dc2626; color:#fff;">
+                    Clear All Server Data
+                </button>
+            </form>
+        @endif
     </div>
 </div>
 @endsection
