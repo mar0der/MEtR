@@ -32,6 +32,11 @@
 
             <button class="btn" style="width:100%;margin-top:4px;padding:10px;font-size:15px;">Sign In</button>
         </form>
+
+        <div style="display:flex;justify-content:space-between;margin-top:16px;font-size:13px;">
+            <a href="/forgot-password" style="color:var(--muted);text-decoration:none;">Forgot password?</a>
+            <a href="/register" style="color:var(--accent);text-decoration:none;font-weight:600;">Create account</a>
+        </div>
     </div>
 </div>
 @endsection

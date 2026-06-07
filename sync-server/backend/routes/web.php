@@ -39,10 +39,18 @@ Route::get('/updates/{filename}', function (string $filename) {
 
 Route::get('/download', [WebController::class, 'download'])->name('download');
 
-Route::get('/login', [WebController::class, 'loginForm'])->name('login');
-Route::post('/login', [WebController::class, 'login'])->middleware('throttle:login');
+Route::get('/register', [WebController::class, 'registerForm'])->name('register');
+Route::post('/register', [WebController::class, 'register'])->middleware('throttle:10,1');
 
-Route::middleware(['auth', 'throttle:web'])->group(function () {
+Route::get('/login', [WebController::class, 'loginForm'])->name('login');
+Route::post('/login', [WebController::class, 'login'])->middleware('throttle:10,1');
+
+Route::get('/forgot-password', [WebController::class, 'forgotPasswordForm'])->name('password.request');
+Route::post('/forgot-password', [WebController::class, 'sendResetLink'])->middleware('throttle:5,1');
+Route::get('/reset-password/{token}', [WebController::class, 'resetPasswordForm'])->name('password.reset');
+Route::post('/reset-password', [WebController::class, 'resetPassword']);
+
+Route::middleware(['auth', 'throttle:120,1'])->group(function () {
     Route::post('/logout', [WebController::class, 'logout']);
     Route::get('/dashboard', [WebController::class, 'dashboard']);
     Route::get('/reports', [WebController::class, 'reports']);
@@ -64,5 +72,5 @@ Route::get('/', function () {
     if (auth()->check()) {
         return redirect('/dashboard');
     }
-    return redirect('/download');
+    return view('home');
 });

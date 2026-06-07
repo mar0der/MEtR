@@ -22,26 +22,26 @@ return Application::configure(basePath: dirname(__DIR__))
         $middleware->validateCsrfTokens(except: [
             'api/*',
         ]);
+
+        RateLimiter::for('sync', function (Request $request) {
+            $key = $request->user()?->id ?: $request->ip();
+            return Limit::perMinute(60)->by('sync:'.$key);
+        });
+
+        RateLimiter::for('dashboard-api', function (Request $request) {
+            $key = $request->user()?->id ?: $request->ip();
+            return Limit::perMinute(120)->by('dash-api:'.$key);
+        });
+
+        RateLimiter::for('web', function (Request $request) {
+            $key = $request->user()?->id ?: $request->ip();
+            return Limit::perMinute(120)->by('web:'.$key);
+        });
+
+        RateLimiter::for('login', function (Request $request) {
+            return Limit::perMinute(10)->by('login:'.$request->ip());
+        });
     })
     ->withExceptions(function (Exceptions $exceptions) {
         //
     })->create();
-
-RateLimiter::for('sync', function (Request $request) {
-    $key = $request->user()?->id ?: $request->ip();
-    return Limit::perMinute(30)->by('sync:'.$key);
-});
-
-RateLimiter::for('dashboard-api', function (Request $request) {
-    $key = $request->user()?->id ?: $request->ip();
-    return Limit::perMinute(120)->by('dash-api:'.$key);
-});
-
-RateLimiter::for('web', function (Request $request) {
-    $key = $request->user()?->id ?: $request->ip();
-    return Limit::perMinute(60)->by('web:'.$key);
-});
-
-RateLimiter::for('login', function (Request $request) {
-    return Limit::perMinute(5)->by('login:'.$request->ip());
-});

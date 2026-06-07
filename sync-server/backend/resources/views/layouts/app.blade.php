@@ -436,7 +436,7 @@
 <body>
     <nav>
         <div class="left">
-            <a href="{{ auth()->check() ? '/dashboard' : '/download' }}" class="logo">
+            <a href="{{ auth()->check() ? '/dashboard' : '/' }}" class="logo">
                 <span class="logo-mark">M</span>
                 MEtR
             </a>
@@ -450,12 +450,13 @@
                 <a href="/settings">Settings</a>
             @else
                 <a href="/download">Download</a>
+                <a href="/login">Login</a>
             @endauth
         </div>
         @auth
             <form method="POST" action="/logout" style="margin:0;">@csrf<button class="btn secondary" style="padding:6px 14px;font-size:13px;">Logout</button></form>
         @else
-            <a href="/login" class="btn secondary" style="padding:6px 14px;font-size:13px;">Login</a>
+            <a href="/register" class="btn" style="padding:6px 14px;font-size:13px;">Get Started</a>
         @endauth
     </nav>
     <div class="container">
