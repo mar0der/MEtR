@@ -38,6 +38,24 @@ class WebController extends Controller
         ]);
     }
 
+    public function demoLogin(Request $request)
+    {
+        if (Auth::check()) {
+            return redirect('/dashboard');
+        }
+
+        $user = User::where('username', 'demo')->first();
+
+        if (! $user) {
+            return redirect('/')->withErrors(['demo' => 'Demo account is not available right now.']);
+        }
+
+        Auth::login($user);
+        $request->session()->regenerate();
+
+        return redirect('/dashboard');
+    }
+
     public function loginForm()
     {
         if (Auth::check()) {

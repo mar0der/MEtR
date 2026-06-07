@@ -50,6 +50,8 @@ Route::post('/forgot-password', [WebController::class, 'sendResetLink'])->middle
 Route::get('/reset-password/{token}', [WebController::class, 'resetPasswordForm'])->name('password.reset');
 Route::post('/reset-password', [WebController::class, 'resetPassword']);
 
+Route::get('/demo-login', [WebController::class, 'demoLogin'])->middleware('throttle:10,1');
+
 Route::middleware(['auth', 'throttle:120,1'])->group(function () {
     Route::post('/logout', [WebController::class, 'logout']);
     Route::get('/dashboard', [WebController::class, 'dashboard']);

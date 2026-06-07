@@ -480,6 +480,7 @@
                 <a href="/pricing">Pricing</a>
                 <a href="/settings">Settings</a>
             @else
+                <a href="/demo-login">Try Demo</a>
                 <a href="/download">Download</a>
                 <a href="/login">Login</a>
             @endauth

@@ -52,7 +52,8 @@
     <h1>Know exactly what your LLM habit costs.</h1>
     <p>MEtR reads your local AI chat logs — Claude, ChatGPT, Cursor, Ollama, and more — and tells you what the same usage would cost on the API. Track subscriptions, compare spend, and never guess again.</p>
     <div class="hero-btns">
-        <a href="/download" class="btn">Download Free</a>
+        <a href="/demo-login" class="btn">Try Live Demo</a>
+        <a href="/download" class="btn secondary">Download Free</a>
         <a href="/register" class="btn secondary">Create Account</a>
     </div>
 </div>
@@ -140,7 +141,8 @@
     <h2>Ready to see your real LLM costs?</h2>
     <p>Download MEtR for macOS or Windows, create a free account, and get your first report in under a minute.</p>
     <div class="hero-btns">
-        <a href="/download" class="btn">Download for Free</a>
+        <a href="/demo-login" class="btn">Try Live Demo</a>
+        <a href="/download" class="btn secondary">Download for Free</a>
         <a href="/register" class="btn secondary">Create Account</a>
     </div>
     <div class="providers-strip">
