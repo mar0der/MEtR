@@ -15,7 +15,7 @@ use Illuminate\Support\Str;
 
 class DemoSeed extends Command
 {
-    protected $signature = 'metr:demo:seed {--fresh : Delete existing demo data first}';
+    protected $signature = 'metr:demo:seed {--fresh : Delete existing demo data first} {--password= : Demo account password (random if omitted)}';
     protected $description = 'Seed demo account with rich usage data for screenshots';
 
     public function handle(): int
@@ -27,7 +27,8 @@ class DemoSeed extends Command
 
         if ($existing && ! $this->option('fresh')) {
             $this->info("Demo user already exists. Use --fresh to recreate.");
-            $this->info("Login: {$username} / demo1234");
+            $this->info("Username: {$username}");
+            $this->info("Password: Use --password option or check server logs");
             return self::SUCCESS;
         }
 
@@ -36,11 +37,13 @@ class DemoSeed extends Command
             $this->deleteDemoData($existing);
         }
 
+        $password = $this->option('password') ?: $this->generatePassword();
+
         $user = User::create([
             'name' => 'Demo User',
             'username' => $username,
             'email' => $email,
-            'password' => Hash::make('demo1234'),
+            'password' => Hash::make($password),
         ]);
 
         $this->info('Creating demo devices...');
@@ -57,7 +60,8 @@ class DemoSeed extends Command
 
         $this->newLine();
         $this->info('Demo account ready!');
-        $this->info("Login: {$username} / demo1234");
+        $this->info("Username: {$username}");
+        $this->info("Password: {$password}");
         $this->info("URL: https://metr.petarpetkov.com/login");
 
         return self::SUCCESS;
@@ -71,6 +75,11 @@ class DemoSeed extends Command
         Device::where('user_id', $user->id)->delete();
         Subscription::where('user_id', $user->id)->delete();
         $user->delete();
+    }
+
+    private function generatePassword(): string
+    {
+        return bin2hex(random_bytes(8));
     }
 
     /** @return array<int, Device> */
