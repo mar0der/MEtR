@@ -23,16 +23,20 @@ Route::prefix('v1')->group(function () {
 
         Route::post('/devices/register', [DeviceController::class, 'register']);
 
-        Route::post('/sync/events', [SyncController::class, 'events']);
-        Route::post('/sync/subscriptions', [SyncController::class, 'subscriptions']);
-        Route::post('/sync/pricing', [SyncController::class, 'pricing']);
+        Route::middleware('throttle:sync')->group(function () {
+            Route::post('/sync/events', [SyncController::class, 'events']);
+            Route::post('/sync/subscriptions', [SyncController::class, 'subscriptions']);
+            Route::post('/sync/pricing', [SyncController::class, 'pricing']);
+        });
         Route::get('/sync/settings', [SyncController::class, 'settings']);
 
-        Route::get('/dashboard/summary', [DashboardController::class, 'summary']);
-        Route::get('/dashboard/by-device', [DashboardController::class, 'byDevice']);
-        Route::get('/dashboard/by-project', [DashboardController::class, 'byProject']);
-        Route::get('/dashboard/by-provider-account', [DashboardController::class, 'byProviderAccount']);
-        Route::get('/dashboard/by-model', [DashboardController::class, 'byModel']);
+        Route::middleware('throttle:dashboard-api')->group(function () {
+            Route::get('/dashboard/summary', [DashboardController::class, 'summary']);
+            Route::get('/dashboard/by-device', [DashboardController::class, 'byDevice']);
+            Route::get('/dashboard/by-project', [DashboardController::class, 'byProject']);
+            Route::get('/dashboard/by-provider-account', [DashboardController::class, 'byProviderAccount']);
+            Route::get('/dashboard/by-model', [DashboardController::class, 'byModel']);
+        });
 
         Route::apiResource('provider-accounts', ProviderAccountController::class)->only(['index', 'store', 'update', 'destroy']);
         Route::apiResource('account-attribution-rules', AccountAttributionRuleController::class)->only(['index', 'store', 'update', 'destroy']);

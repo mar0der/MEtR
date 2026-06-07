@@ -1,0 +1,15 @@
+[mysqld]
+# Slow query logging
+slow_query_log = 1
+slow_query_log_file = /var/lib/mysql/slow.log
+long_query_time = 1.0
+log_queries_not_using_indexes = 1
+
+# InnoDB tuning for small-to-mid DB
+innodb_buffer_pool_size = 1G
+innodb_log_file_size = 256M
+innodb_flush_log_at_trx_commit = 2
+innodb_flush_method = O_DIRECT
+
+# Connection limits
+max_connections = 200

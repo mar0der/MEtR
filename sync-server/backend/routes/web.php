@@ -3,9 +3,31 @@
 declare(strict_types=1);
 
 use App\Http\Controllers\Web\WebController;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Route;
 
-Route::get('/health', fn () => response()->json(['ok' => true]));
+Route::get('/health', function () {
+    $checks = [
+        'database' => true,
+        'redis' => true,
+    ];
+    try {
+        DB::select('SELECT 1');
+    } catch (\Throwable $e) {
+        $checks['database'] = false;
+    }
+    try {
+        \Illuminate\Support\Facades\Redis::ping();
+    } catch (\Throwable $e) {
+        $checks['redis'] = false;
+    }
+    $healthy = !in_array(false, $checks, true);
+    return response()->json([
+        'status' => $healthy ? 'ok' : 'degraded',
+        'checks' => $checks,
+        'timestamp' => now()->toIso8601String(),
+    ], $healthy ? 200 : 503);
+});
 
 Route::get('/updates/{filename}', function (string $filename) {
     $path = storage_path('app/updates/'.$filename);
@@ -18,9 +40,9 @@ Route::get('/updates/{filename}', function (string $filename) {
 Route::get('/download', [WebController::class, 'download'])->name('download');
 
 Route::get('/login', [WebController::class, 'loginForm'])->name('login');
-Route::post('/login', [WebController::class, 'login']);
+Route::post('/login', [WebController::class, 'login'])->middleware('throttle:login');
 
-Route::middleware('auth')->group(function () {
+Route::middleware(['auth', 'throttle:web'])->group(function () {
     Route::post('/logout', [WebController::class, 'logout']);
     Route::get('/dashboard', [WebController::class, 'dashboard']);
     Route::get('/reports', [WebController::class, 'reports']);

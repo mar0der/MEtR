@@ -18,6 +18,7 @@ use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\Request;
 use Illuminate\Routing\Controller;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 
 class WebController extends Controller
@@ -79,23 +80,29 @@ class WebController extends Controller
 
         $query = $this->filteredUsageQuery($request, $user->id);
 
-        $summary = (clone $query)->select([
-            DB::raw('SUM(input_tokens) as input_tokens'),
-            DB::raw('SUM(GREATEST(input_tokens - cached_input_tokens, 0)) as effective_input_tokens'),
-            DB::raw('SUM(output_tokens) as output_tokens'),
-            DB::raw('SUM(cached_input_tokens + cache_write_tokens + cache_read_tokens) as cached_tokens'),
-            DB::raw('SUM(cached_input_tokens) as cached_input_tokens'),
-            DB::raw('SUM(cache_write_tokens) as cache_write_tokens'),
-            DB::raw('SUM(cache_read_tokens) as cache_read_tokens'),
-            DB::raw('SUM(reasoning_tokens) as reasoning_tokens'),
-            DB::raw('SUM(tool_tokens) as tool_tokens'),
-            DB::raw('SUM(unknown_tokens) as unknown_tokens'),
-            DB::raw('SUM(GREATEST(input_tokens - cached_input_tokens, 0) + output_tokens + cached_input_tokens + cache_write_tokens + cache_read_tokens + reasoning_tokens + tool_tokens + unknown_tokens) as total_tokens'),
-            DB::raw('COUNT(*) as event_count'),
-            DB::raw('SUM(CASE WHEN official_api_cost_usd IS NULL THEN 1 ELSE 0 END) as unpriced_count'),
-            DB::raw('SUM(CASE WHEN provider_account_id IS NULL THEN 1 ELSE 0 END) as unattributed_count'),
-            DB::raw('SUM(official_api_cost_usd) as total_cost'),
-        ])->first();
+        $summary = Cache::remember(
+            $this->cacheKey('dashboard:summary', $request),
+            60,
+            function () use ($query) {
+                return (clone $query)->select([
+                    DB::raw('SUM(input_tokens) as input_tokens'),
+                    DB::raw('SUM(GREATEST(input_tokens - cached_input_tokens, 0)) as effective_input_tokens'),
+                    DB::raw('SUM(output_tokens) as output_tokens'),
+                    DB::raw('SUM(cached_input_tokens + cache_write_tokens + cache_read_tokens) as cached_tokens'),
+                    DB::raw('SUM(cached_input_tokens) as cached_input_tokens'),
+                    DB::raw('SUM(cache_write_tokens) as cache_write_tokens'),
+                    DB::raw('SUM(cache_read_tokens) as cache_read_tokens'),
+                    DB::raw('SUM(reasoning_tokens) as reasoning_tokens'),
+                    DB::raw('SUM(tool_tokens) as tool_tokens'),
+                    DB::raw('SUM(unknown_tokens) as unknown_tokens'),
+                    DB::raw('SUM(GREATEST(input_tokens - cached_input_tokens, 0) + output_tokens + cached_input_tokens + cache_write_tokens + cache_read_tokens + reasoning_tokens + tool_tokens + unknown_tokens) as total_tokens'),
+                    DB::raw('COUNT(*) as event_count'),
+                    DB::raw('SUM(CASE WHEN official_api_cost_usd IS NULL THEN 1 ELSE 0 END) as unpriced_count'),
+                    DB::raw('SUM(CASE WHEN provider_account_id IS NULL THEN 1 ELSE 0 END) as unattributed_count'),
+                    DB::raw('SUM(official_api_cost_usd) as total_cost'),
+                ])->first();
+            }
+        );
 
         $byDevice = (clone $query)
             ->leftJoin('devices', 'devices.id', '=', 'usage_events.device_id')
@@ -209,38 +216,50 @@ class WebController extends Controller
 
         $query = $this->filteredUsageQuery($request, $user->id, $dateRange);
 
-        $summaryRaw = (clone $query)->select([
-            DB::raw('SUM(input_tokens) as input_tokens'),
-            DB::raw('SUM(output_tokens) as output_tokens'),
-            DB::raw('SUM(cached_input_tokens) as cached_input_tokens'),
-            DB::raw('SUM(cache_write_tokens) as cache_write_tokens'),
-            DB::raw('SUM(cache_read_tokens) as cache_read_tokens'),
-            DB::raw('SUM(reasoning_tokens) as reasoning_tokens'),
-            DB::raw('SUM(tool_tokens) as tool_tokens'),
-            DB::raw('SUM(unknown_tokens) as unknown_tokens'),
-            DB::raw('COUNT(*) as event_count'),
-            DB::raw('SUM(official_api_cost_usd) as total_cost'),
-        ])->first();
-        $summary = $this->reportTotals($summaryRaw);
+        $summary = Cache::remember(
+            $this->cacheKey('reports:summary', $request, ['metric' => $metric]),
+            300,
+            function () use ($query) {
+                $summaryRaw = (clone $query)->select([
+                    DB::raw('SUM(input_tokens) as input_tokens'),
+                    DB::raw('SUM(output_tokens) as output_tokens'),
+                    DB::raw('SUM(cached_input_tokens) as cached_input_tokens'),
+                    DB::raw('SUM(cache_write_tokens) as cache_write_tokens'),
+                    DB::raw('SUM(cache_read_tokens) as cache_read_tokens'),
+                    DB::raw('SUM(reasoning_tokens) as reasoning_tokens'),
+                    DB::raw('SUM(tool_tokens) as tool_tokens'),
+                    DB::raw('SUM(unknown_tokens) as unknown_tokens'),
+                    DB::raw('COUNT(*) as event_count'),
+                    DB::raw('SUM(official_api_cost_usd) as total_cost'),
+                ])->first();
+                return $this->reportTotals($summaryRaw);
+            }
+        );
 
-        $dailyRows = (clone $query)
-            ->select([
-                DB::raw('DATE(usage_events.timestamp) as bucket'),
-                DB::raw('SUM(input_tokens) as input_tokens'),
-                DB::raw('SUM(output_tokens) as output_tokens'),
-                DB::raw('SUM(cached_input_tokens) as cached_input_tokens'),
-                DB::raw('SUM(cache_write_tokens) as cache_write_tokens'),
-                DB::raw('SUM(cache_read_tokens) as cache_read_tokens'),
-                DB::raw('SUM(reasoning_tokens) as reasoning_tokens'),
-                DB::raw('SUM(tool_tokens) as tool_tokens'),
-                DB::raw('SUM(unknown_tokens) as unknown_tokens'),
-                DB::raw('COUNT(*) as event_count'),
-                DB::raw('SUM(official_api_cost_usd) as total_cost'),
-            ])
-            ->groupBy(DB::raw('DATE(usage_events.timestamp)'))
-            ->orderBy('bucket')
-            ->get()
-            ->map(fn ($row) => $this->reportChartRow($row, $metric));
+        $dailyRows = Cache::remember(
+            $this->cacheKey('reports:daily', $request, ['metric' => $metric]),
+            300,
+            function () use ($query, $metric) {
+                return (clone $query)
+                    ->select([
+                        DB::raw('DATE(usage_events.timestamp) as bucket'),
+                        DB::raw('SUM(input_tokens) as input_tokens'),
+                        DB::raw('SUM(output_tokens) as output_tokens'),
+                        DB::raw('SUM(cached_input_tokens) as cached_input_tokens'),
+                        DB::raw('SUM(cache_write_tokens) as cache_write_tokens'),
+                        DB::raw('SUM(cache_read_tokens) as cache_read_tokens'),
+                        DB::raw('SUM(reasoning_tokens) as reasoning_tokens'),
+                        DB::raw('SUM(tool_tokens) as tool_tokens'),
+                        DB::raw('SUM(unknown_tokens) as unknown_tokens'),
+                        DB::raw('COUNT(*) as event_count'),
+                        DB::raw('SUM(official_api_cost_usd) as total_cost'),
+                    ])
+                    ->groupBy(DB::raw('DATE(usage_events.timestamp)'))
+                    ->orderBy('bucket')
+                    ->get()
+                    ->map(fn ($row) => $this->reportChartRow($row, $metric));
+            }
+        );
 
         $maxValue = max(1, (float) $dailyRows->max('value'));
 
@@ -422,17 +441,22 @@ class WebController extends Controller
     {
         $user = Auth::user();
 
-        $usedModels = UsageEvent::where('usage_events.user_id', $user->id)
-            ->whereNotNull('model')
-            ->select('provider_id', 'model')
-            ->distinct()
-            ->get();
+        $cacheKey = 'pricing:used_models:'.$user->id;
+        $usedModels = Cache::remember($cacheKey, 3600, function () use ($user) {
+            return UsageEvent::where('usage_events.user_id', $user->id)
+                ->whereNotNull('model')
+                ->select('provider_id', 'model')
+                ->distinct()
+                ->get();
+        });
 
-        $allPrices = ModelPrice::with('provider')
-            ->whereNull('effective_to')
-            ->orderBy('provider_id')
-            ->orderBy('model')
-            ->get();
+        $allPrices = Cache::remember('pricing:catalog', 3600, function () {
+            return ModelPrice::with('provider')
+                ->whereNull('effective_to')
+                ->orderBy('provider_id')
+                ->orderBy('model')
+                ->get();
+        });
 
         $usedKeys = $usedModels
             ->map(fn ($e) => strtolower($e->provider_id.'|'.$e->model))
@@ -528,6 +552,17 @@ class WebController extends Controller
         $this->applyUsageFilters($query, $request, $dateRange);
 
         return $query;
+    }
+
+    private function cacheKey(string $prefix, Request $request, array $extra = []): string
+    {
+        $filters = array_merge($request->only([
+            'from', 'to', 'provider_id', 'device_id', 'project_id',
+            'provider_account_id', 'model', 'metric', 'preset', 'q',
+        ]), $extra);
+        ksort($filters);
+
+        return $prefix.':'.Auth::id().':'.md5(serialize($filters));
     }
 
     private function applyUsageFilters(Builder $query, Request $request, ?array $dateRange = null): void
