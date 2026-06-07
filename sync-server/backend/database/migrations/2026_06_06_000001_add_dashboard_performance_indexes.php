@@ -8,11 +8,6 @@ return new class extends Migration
 {
     public function up(): void
     {
-        // Index for sync loop: find pending events by user, ordered by timestamp
-        Schema::table('usage_events', function (Blueprint $table) {
-            $table->index(['user_id', 'synced_at', 'timestamp'], 'idx_ue_user_synced_timestamp');
-        });
-
         // Index for model-filtered reports
         Schema::table('usage_events', function (Blueprint $table) {
             $table->index(['user_id', 'model', 'timestamp'], 'idx_ue_user_model_timestamp');
@@ -27,7 +22,6 @@ return new class extends Migration
     public function down(): void
     {
         Schema::table('usage_events', function (Blueprint $table) {
-            $table->dropIndex('idx_ue_user_synced_timestamp');
             $table->dropIndex('idx_ue_user_model_timestamp');
         });
 
