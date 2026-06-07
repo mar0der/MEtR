@@ -1,6 +1,7 @@
 @extends('layouts.app')
 
 @section('title', 'MEtR — Track Your LLM Usage & Costs')
+@section('description', 'MEtR reads your local AI chat logs and tells you what your usage would cost on the API. Track Claude, ChatGPT, Cursor, Ollama, and more. Local-first, privacy-focused.')
 
 @section('content')
 <style>

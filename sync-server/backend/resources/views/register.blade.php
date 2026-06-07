@@ -1,6 +1,7 @@
 @extends('layouts.app')
 
-@section('title', 'Register - MEtR')
+@section('title', 'Create Account — MEtR')
+@section('description', 'Create a free MEtR account to sync your LLM usage data across devices and access the web dashboard.')
 
 @section('content')
 <div class="login-bg">

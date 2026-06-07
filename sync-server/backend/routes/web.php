@@ -38,6 +38,7 @@ Route::get('/updates/{filename}', function (string $filename) {
 })->where('filename', '.*');
 
 Route::get('/download', [WebController::class, 'download'])->name('download');
+Route::get('/guide', [WebController::class, 'guide'])->name('guide');
 
 Route::get('/register', [WebController::class, 'registerForm'])->name('register');
 Route::post('/register', [WebController::class, 'register'])->middleware('throttle:10,1');

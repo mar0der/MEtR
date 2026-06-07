@@ -1,6 +1,7 @@
 @extends('layouts.app')
 
-@section('title', 'Download MEtR')
+@section('title', 'Download MEtR — macOS & Windows')
+@section('description', 'Download MEtR for macOS (Apple Silicon) or Windows (x64). Track LLM token usage and calculate API-equivalent costs locally.')
 
 @section('content')
 <div style="text-align:center; padding:40px 20px;">

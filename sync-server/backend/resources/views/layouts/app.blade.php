@@ -3,7 +3,9 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>@yield('title', 'MEtR Sync')</title>
+    <title>@yield('title', 'MEtR — Track Your LLM Usage & Costs')</title>
+    <meta name="description" content="@yield('description', 'MEtR is a local-first desktop app that tracks LLM token usage from local log files and compares subscription spend against API-equivalent pricing.')">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -480,6 +482,7 @@
                 <a href="/pricing">Pricing</a>
                 <a href="/settings">Settings</a>
             @else
+                <a href="/guide">Guide</a>
                 <a href="/demo-login">Try Demo</a>
                 <a href="/download">Download</a>
                 <a href="/login">Login</a>

@@ -38,6 +38,11 @@ class WebController extends Controller
         ]);
     }
 
+    public function guide()
+    {
+        return view('guide');
+    }
+
     public function demoLogin(Request $request)
     {
         if (Auth::check()) {

@@ -1,6 +1,7 @@
 @extends('layouts.app')
 
-@section('title', 'Login - MEtR Sync')
+@section('title', 'Login — MEtR Dashboard')
+@section('description', 'Sign in to your MEtR dashboard to view LLM usage reports, manage devices, and track subscription costs.')
 
 @section('content')
 <div class="login-bg">
