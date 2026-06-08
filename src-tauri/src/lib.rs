@@ -1986,7 +1986,6 @@ fn scan_source(conn: &Connection, source: &Source, full_scan: bool) -> Result<us
             };
             parse_content(source, entry.path(), &content)
         };
-        replace_events_for_file(conn, source, entry.path())?;
         for event in events {
             if insert_event(conn, source, entry.path(), &modified, &source_hash, event)? {
                 imported += 1;
@@ -2030,15 +2029,6 @@ fn scan_source(conn: &Connection, source: &Source, full_scan: bool) -> Result<us
     )
     .map_err(to_string)?;
     Ok(imported)
-}
-
-fn replace_events_for_file(conn: &Connection, source: &Source, path: &Path) -> Result<(), String> {
-    conn.execute(
-        "DELETE FROM usage_events WHERE source_id = ?1 AND source_file_path = ?2",
-        params![source.id, path.to_string_lossy().to_string()],
-    )
-    .map_err(to_string)?;
-    Ok(())
 }
 
 fn indexed_file_is_current(
