@@ -53,6 +53,11 @@ Route::post('/reset-password', [WebController::class, 'resetPassword']);
 
 Route::get('/demo-login', [WebController::class, 'demoLogin'])->middleware('throttle:10,1');
 
+Route::get('/admin/login', [\App\Http\Controllers\AdminController::class, 'loginForm'])->name('admin.login');
+Route::post('/admin/login', [\App\Http\Controllers\AdminController::class, 'login'])->middleware('throttle:10,1');
+Route::post('/admin/logout', [\App\Http\Controllers\AdminController::class, 'logout']);
+Route::get('/admin', [\App\Http\Controllers\AdminController::class, 'dashboard'])->name('admin.dashboard');
+
 Route::middleware(['auth', 'throttle:120,1'])->group(function () {
     Route::post('/logout', [WebController::class, 'logout']);
     Route::get('/dashboard', [WebController::class, 'dashboard']);
