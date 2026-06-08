@@ -16,3 +16,6 @@ sync-server/storage/
 AGENTS.md
 CLAUDE.md
 DEPLOYMENT.md
+sync-server/scripts/deploy.sh
+sync-server/scripts/metr_sync_preflight.sh
+docs/sync_backend_laravel_implementation_and_deployment.md

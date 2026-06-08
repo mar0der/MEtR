@@ -103,4 +103,5 @@
 
 - [[scaling-progress]] — Live tracker with completion %
 - [[product_specs]] — Product requirements
-- [[sync_backend_laravel_implementation_and_deployment]] — Deployment procedures
+- [[security-hardening]] — Rate limits, auth, and hardening
+- [[monitoring-and-observability]] — Health checks and metrics

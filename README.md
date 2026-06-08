@@ -132,7 +132,7 @@ The optional sync server lives in `sync-server/` and is deployed via Docker Comp
 - Update artifact hosting (macOS `.tar.gz`, Windows `.msi`, Linux `.AppImage`)
 - Release publishing via `php artisan metr:release:publish`
 
-See `sync-server/README.md` and `docs/sync_backend_laravel_implementation_and_deployment.md` for setup instructions.
+See `sync-server/README.md` for backend setup instructions.
 
 ---
 
@@ -143,7 +143,7 @@ Contributions are welcome. The codebase is intentionally concentrated in two fil
 - `src/main.tsx` — all React components, hooks, types, and UI logic
 - `src-tauri/src/lib.rs` — all Tauri commands, DB schema/migrations, parsing, pricing, sync, and queries
 
-For agent-specific conventions, build steps, and deployment rules, see [`AGENTS.md`](AGENTS.md).
+For developer setup, see the README files in `sync-server/` and `src-tauri/`.
 
 ---
 

@@ -64,17 +64,9 @@ upstream php {
 
 ## Deployment Notes
 
-PHP-FPM config lives inside the Docker image. To apply changes:
+PHP-FPM config lives inside the Docker image. To apply changes, rebuild the PHP container after editing `sync-server/backend/docker/php/www.conf`.
 
-1. Edit `sync-server/backend/docker/php/www.conf`
-2. Rebuild image: `docker compose build php`
-3. Restart container: `docker compose up -d php`
-
-Or hot-patch inside container:
-```bash
-docker exec metr-sync-php sed -i 's/pm.max_children = 5/pm.max_children = 30/' /usr/local/etc/php-fpm.d/www.conf
-docker exec metr-sync-php kill -USR2 1
-```
+For hot-patching without a rebuild, run equivalent `sed` and `kill -USR2` commands inside the running PHP container. This is environment-specific and should be done according to your own operational runbooks.
 
 ---
 
