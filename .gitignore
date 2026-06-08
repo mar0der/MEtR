@@ -11,3 +11,8 @@ src-tauri/gen
 *.orig
 *.post-sync-*
 sync-server/storage/
+
+# Internal operational docs (contain server paths, hostnames, deployment procedures)
+AGENTS.md
+CLAUDE.md
+DEPLOYMENT.md
