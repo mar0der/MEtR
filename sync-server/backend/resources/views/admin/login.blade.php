@@ -25,6 +25,11 @@
             <label>Password</label>
             <input type="password" name="password" required placeholder="••••••••">
 
+            <label class="remember-row">
+                <input type="checkbox" name="remember" value="1">
+                <span>Remember me for 30 days</span>
+            </label>
+
             <button class="btn" style="width:100%;margin-top:4px;padding:10px;font-size:15px;">Sign In</button>
         </form>
     </div>

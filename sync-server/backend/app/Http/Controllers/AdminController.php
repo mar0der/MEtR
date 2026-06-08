@@ -23,9 +23,43 @@ class AdminController extends Controller
 
     private function checkAdmin(): void
     {
-        if (! session('is_admin')) {
-            abort(redirect('/admin/login'));
+        if (session('is_admin')) {
+            return;
         }
+
+        if ($this->tryRememberLogin()) {
+            return;
+        }
+
+        abort(redirect('/admin/login'));
+    }
+
+    private function tryRememberLogin(): bool
+    {
+        $cookie = request()->cookie('admin_remember');
+        if (! $cookie) {
+            return false;
+        }
+
+        $expected = hash('sha256', $this->adminEmail() . $this->adminPasswordHash() . config('app.key'));
+        if (! hash_equals($expected, $cookie)) {
+            return false;
+        }
+
+        session(['is_admin' => true]);
+
+        return true;
+    }
+
+    private function setRememberCookie(): void
+    {
+        $value = hash('sha256', $this->adminEmail() . $this->adminPasswordHash() . config('app.key'));
+        cookie()->queue('admin_remember', $value, 60 * 24 * 30); // 30 days
+    }
+
+    private function clearRememberCookie(): void
+    {
+        cookie()->queue(cookie()->forget('admin_remember'));
     }
 
     public function loginForm()
@@ -42,6 +76,7 @@ class AdminController extends Controller
         $data = $request->validate([
             'email' => ['required', 'email'],
             'password' => ['required', 'string'],
+            'remember' => ['nullable', 'boolean'],
         ]);
 
         $email = $this->adminEmail();
@@ -58,12 +93,17 @@ class AdminController extends Controller
         session(['is_admin' => true]);
         $request->session()->regenerate();
 
+        if ($request->boolean('remember')) {
+            $this->setRememberCookie();
+        }
+
         return redirect('/admin');
     }
 
     public function logout(Request $request)
     {
         session()->forget('is_admin');
+        $this->clearRememberCookie();
         $request->session()->regenerateToken();
 
         return redirect('/admin/login');
