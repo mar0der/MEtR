@@ -80,6 +80,8 @@ struct SyncStatus {
     device_name: Option<String>,
     last_sync_at: Option<String>,
     pending_events: i64,
+    sync_error_count: i64,
+    last_sync_error: Option<String>,
     sync_enabled: bool,
 }
 
@@ -784,7 +786,7 @@ fn get_sync_config(conn: &Connection) -> Result<SyncStatus, String> {
     ensure_sync_config(conn)?;
     let row = conn
         .query_row(
-            "SELECT server_url, auth_token, device_name, username, last_sync_at, sync_enabled
+            "SELECT server_url, auth_token, device_name, username, last_sync_at, sync_enabled, last_sync_error
              FROM sync_config WHERE id = 1",
             [],
             |r| {
@@ -795,6 +797,7 @@ fn get_sync_config(conn: &Connection) -> Result<SyncStatus, String> {
                     r.get::<_, Option<String>>(3)?,
                     r.get::<_, Option<String>>(4)?,
                     r.get::<_, i64>(5)? == 1,
+                    r.get::<_, Option<String>>(6)?,
                 ))
             },
         )
@@ -808,6 +811,14 @@ fn get_sync_config(conn: &Connection) -> Result<SyncStatus, String> {
         )
         .unwrap_or(0);
 
+    let sync_error_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM usage_events WHERE synced_at IS NULL AND sync_error IS NOT NULL",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+
     Ok(SyncStatus {
         configured: true,
         server_url: row.0,
@@ -816,6 +827,8 @@ fn get_sync_config(conn: &Connection) -> Result<SyncStatus, String> {
         device_name: row.2,
         last_sync_at: row.4,
         pending_events: pending,
+        sync_error_count,
+        last_sync_error: row.6,
         sync_enabled: row.5,
     })
 }
@@ -1085,6 +1098,8 @@ where
         )
         .unwrap_or(0);
 
+    println!("[Sync] Starting sync. Pending events: {}, force_all: {}", total_pending, force_all);
+
     let mut total_uploaded = 0usize;
     let mut batch_count = 0usize;
 
@@ -1199,10 +1214,14 @@ where
 
             total_uploaded += events.len();
             batch_count += 1;
+            println!("[Sync] Batch {} uploaded successfully ({} events). Total: {}/{}", batch_count, events.len(), total_uploaded, total_pending);
             progress(total_uploaded, total_pending);
         } else {
+            let status = resp.status();
             let body = resp.text().unwrap_or_default();
-            errors.push(format!("Batch {} failed: {}", batch_count + 1, body));
+            let error_msg = format!("Batch {} failed (HTTP {}): {}", batch_count + 1, status, body);
+            println!("[Sync] {}", error_msg);
+            errors.push(error_msg);
             let failed_at = now();
             for event in &events {
                 if let Some(id) = event.get("source_event_id").and_then(|v| v.as_str()) {
@@ -1218,11 +1237,18 @@ where
     }
 
     let now = now();
+    let last_error = errors.last().cloned();
     conn.execute(
-        "UPDATE sync_config SET last_sync_at = ?1, updated_at = ?1 WHERE id = 1",
-        params![now],
+        "UPDATE sync_config SET last_sync_at = ?1, last_sync_error = ?2, updated_at = ?1 WHERE id = 1",
+        params![now, last_error],
     )
     .map_err(to_string)?;
+
+    if !errors.is_empty() {
+        println!("[Sync] Completed with errors: {:?}", errors);
+    } else {
+        println!("[Sync] Completed successfully. Uploaded {} events in {} batches.", total_uploaded, batch_count);
+    }
 
     Ok(SyncResult {
         uploaded: total_uploaded,
@@ -1610,6 +1636,7 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     add_column_if_missing(conn, "usage_events", "sync_batch_id", "TEXT")?;
     add_column_if_missing(conn, "usage_events", "sync_error", "TEXT")?;
     add_column_if_missing(conn, "usage_events", "event_type", "TEXT")?;
+    add_column_if_missing(conn, "sync_config", "last_sync_error", "TEXT")?;
     Ok(())
 }
 

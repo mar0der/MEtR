@@ -149,6 +149,8 @@ type SyncStatus = {
   device_name: string | null;
   last_sync_at: string | null;
   pending_events: number;
+  sync_error_count: number;
+  last_sync_error: string | null;
   sync_enabled: boolean;
 };
 
@@ -487,8 +489,13 @@ function App() {
     setStatus("Syncing...");
     try {
       const result = await api<SyncResult>("sync_now");
-      const warning = result.errors.length ? `, ${result.errors.length} warning(s)` : "";
-      setStatus(`Synced ${result.uploaded} model call(s), ${result.subscriptions_uploaded} subscription(s)${warning}`);
+      if (result.errors.length > 0) {
+        const firstError = result.errors[0];
+        const others = result.errors.length > 1 ? ` (+${result.errors.length - 1} more)` : "";
+        setStatus(`Sync failed: ${firstError}${others}`);
+      } else {
+        setStatus(`Synced ${result.uploaded} model call(s), ${result.subscriptions_uploaded} subscription(s)`);
+      }
       await refresh(false);
     } catch (error) {
       setStatus(message(error));
@@ -505,8 +512,13 @@ function App() {
     setStatus("Running full resync...");
     try {
       const result = await api<SyncResult>("full_resync");
-      const warning = result.errors.length ? `, ${result.errors.length} warning(s)` : "";
-      setStatus(`Full resync sent ${result.uploaded} event(s), ${result.subscriptions_uploaded} subscription(s)${warning}`);
+      if (result.errors.length > 0) {
+        const firstError = result.errors[0];
+        const others = result.errors.length > 1 ? ` (+${result.errors.length - 1} more)` : "";
+        setStatus(`Full resync failed: ${firstError}${others}`);
+      } else {
+        setStatus(`Full resync sent ${result.uploaded} event(s), ${result.subscriptions_uploaded} subscription(s)`);
+      }
       await refresh(false);
     } catch (error) {
       setStatus(message(error));
@@ -913,6 +925,12 @@ function SettingsView(props: {
             <p><strong>Device:</strong> {props.syncStatus.device_name}</p>
             <p><strong>Last sync:</strong> {date(props.syncStatus.last_sync_at)}</p>
             <p><strong>Pending model calls:</strong> {props.syncStatus.pending_events}</p>
+            {props.syncStatus.sync_error_count > 0 && (
+              <p style={{ color: "#e11d48" }}><strong>Sync errors:</strong> {props.syncStatus.sync_error_count} event(s) failed to upload</p>
+            )}
+            {props.syncStatus.last_sync_error && (
+              <p style={{ color: "#e11d48", fontSize: "0.85em" }}><strong>Last error:</strong> {props.syncStatus.last_sync_error}</p>
+            )}
             <div className="form-row">
               <button className="primary-button" onClick={props.onSync} disabled={props.syncLoading}>
                 <RefreshCw size={14} />
