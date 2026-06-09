@@ -260,7 +260,8 @@ pub fn run() {
             login_sync,
             logout_sync,
             sync_now,
-            full_resync
+            full_resync,
+            debug_sync_state
         ])
         .run(tauri::generate_context!())
         .expect("error while running MEtR");
@@ -1256,6 +1257,75 @@ where
         subscriptions_uploaded,
         errors,
     })
+}
+
+#[tauri::command]
+fn debug_sync_state(state: State<AppState>) -> Result<Value, String> {
+    let conn = state.db.lock().map_err(to_string)?;
+
+    let pending: i64 = conn
+        .query_row("SELECT COUNT(*) FROM usage_events WHERE synced_at IS NULL", [], |r| r.get(0))
+        .unwrap_or(0);
+
+    let with_error: i64 = conn
+        .query_row("SELECT COUNT(*) FROM usage_events WHERE synced_at IS NULL AND sync_error IS NOT NULL", [], |r| r.get(0))
+        .unwrap_or(0);
+
+    let total_events: i64 = conn
+        .query_row("SELECT COUNT(*) FROM usage_events", [], |r| r.get(0))
+        .unwrap_or(0);
+
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, provider_id, timestamp, model, source_file_path, sync_error
+             FROM usage_events
+             WHERE synced_at IS NULL
+             ORDER BY timestamp DESC
+             LIMIT 10",
+        )
+        .map_err(to_string)?;
+
+    let sample_events: Vec<Value> = stmt
+        .query_map([], |r| {
+            Ok(serde_json::json!({
+                "id": r.get::<_, String>(0)?,
+                "provider_id": r.get::<_, String>(1)?,
+                "timestamp": r.get::<_, String>(2)?,
+                "model": r.get::<_, Option<String>>(3)?,
+                "source_file_path": r.get::<_, Option<String>>(4)?,
+                "sync_error": r.get::<_, Option<String>>(5)?,
+            }))
+        })
+        .map_err(to_string)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(to_string)?;
+
+    let sync_config: Value = conn
+        .query_row(
+            "SELECT server_url, auth_token IS NOT NULL, username, last_sync_at, last_sync_error, sync_enabled, device_uuid
+             FROM sync_config WHERE id = 1",
+            [],
+            |r| {
+                Ok(serde_json::json!({
+                    "server_url": r.get::<_, String>(0)?,
+                    "logged_in": r.get::<_, i64>(1)? == 1,
+                    "username": r.get::<_, Option<String>>(2)?,
+                    "last_sync_at": r.get::<_, Option<String>>(3)?,
+                    "last_sync_error": r.get::<_, Option<String>>(4)?,
+                    "sync_enabled": r.get::<_, i64>(5)? == 1,
+                    "device_uuid": r.get::<_, Option<String>>(6)?,
+                }))
+            },
+        )
+        .unwrap_or_else(|_| serde_json::json!({"error": "sync_config not initialized"}));
+
+    Ok(serde_json::json!({
+        "pending_events": pending,
+        "events_with_sync_error": with_error,
+        "total_events": total_events,
+        "sample_pending_events": sample_events,
+        "sync_config": sync_config,
+    }))
 }
 
 fn sync_subscriptions(

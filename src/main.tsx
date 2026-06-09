@@ -943,6 +943,23 @@ function SettingsView(props: {
               <button className="secondary-button" onClick={props.onLogout} disabled={props.syncLoading}>
                 Logout
               </button>
+              <button
+                className="secondary-button"
+                disabled={props.syncLoading}
+                onClick={async () => {
+                  try {
+                    const info = await api<Record<string, unknown>>("debug_sync_state");
+                    const json = JSON.stringify(info, null, 2);
+                    await navigator.clipboard.writeText(json);
+                    alert("Debug info copied to clipboard. Paste it when reporting an issue.");
+                  } catch (e) {
+                    alert("Failed to copy debug info: " + message(e));
+                  }
+                }}
+                title="Copy diagnostic info for troubleshooting"
+              >
+                Copy Debug Info
+              </button>
             </div>
           </div>
         ) : (
