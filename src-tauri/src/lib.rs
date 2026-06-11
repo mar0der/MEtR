@@ -3,6 +3,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use std::error::Error;
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -1095,7 +1096,10 @@ where
     };
 
     let base_url = server_url.trim_end_matches('/');
-    let client = reqwest::blocking::Client::new();
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(60))
+        .build()
+        .map_err(|e| format!("Failed to build HTTP client: {}", e))?;
     let auth_header = format!("Bearer {}", token);
 
     let device_name = conn
@@ -1182,7 +1186,7 @@ where
                  LEFT JOIN conversations c ON c.id = u.conversation_id
                  WHERE u.synced_at IS NULL
                  ORDER BY u.timestamp ASC
-                 LIMIT 500",
+                 LIMIT 100",
             )
             .map_err(to_string)?;
 
@@ -1251,7 +1255,13 @@ where
                 "events": events,
             }))
             .send()
-            .map_err(|e| format!("Sync request failed: {}", e))?;
+            .map_err(|e| {
+                let mut detail = format!("Sync request failed ({} events, ~{} bytes): {}", events.len(), serde_json::to_string(&events).unwrap_or_default().len(), e);
+                if let Some(source) = e.source() {
+                    detail.push_str(&format!(" | caused by: {}", source));
+                }
+                detail
+            })?;
 
         if resp.status().is_success() {
             let now = now();
