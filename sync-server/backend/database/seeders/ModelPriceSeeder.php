@@ -132,6 +132,16 @@ class ModelPriceSeeder extends Seeder
                 'source_url' => 'https://docs.anthropic.com/en/docs/about-claude/pricing',
             ],
             [
+                'provider_id' => 'anthropic',
+                'model' => 'claude-fable-5',
+                'aliases' => [],
+                'input_per_1m' => '10.0000000000',
+                'output_per_1m' => '50.0000000000',
+                'cache_write_per_1m' => '12.5000000000',
+                'cache_read_per_1m' => '1.0000000000',
+                'source_url' => 'https://docs.anthropic.com/en/docs/about-claude/pricing',
+            ],
+            [
                 'provider_id' => 'kimi',
                 'model' => 'kimi-k2.6',
                 'aliases' => ['kimi-k2.6:cloud', 'kimi-for-coding', 'kimi-code/kimi-for-coding', 'Kimi-k2.6'],

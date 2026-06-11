@@ -224,6 +224,7 @@ class LiteLLmPricingSource extends AbstractPricingSource
             'claude-opus-4-5' => ['claude-opus-4.5'],
             'claude-opus-4-6' => ['claude-opus-4.6'],
             'claude-opus-4-7' => ['claude-opus-4.7'],
+            'claude-fable-5' => [],
         ];
 
         if (isset($known[$model])) {
