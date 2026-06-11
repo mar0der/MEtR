@@ -153,6 +153,7 @@ type SyncStatus = {
   sync_error_count: number;
   last_sync_error: string | null;
   sync_enabled: boolean;
+  project_root: string | null;
 };
 
 type SyncResult = {
@@ -211,7 +212,9 @@ function App() {
     password: ""
   });
   const [syncLoading, setSyncLoading] = useState(false);
+  const [projectRootLoading, setProjectRootLoading] = useState(false);
   const [pricingLoading, setPricingLoading] = useState(false);
+  const [projectRoot, setProjectRoot] = useState<string | null>(null);
   const [appVersion, setAppVersion] = useState<string>("");
   const [newPriceForm, setNewPriceForm] = useState<Record<string, { input: string; output: string }>>({});
   const [paginatedSessions, setPaginatedSessions] = useState<PaginatedSessions>({ sessions: [], total_count: 0 });
@@ -254,13 +257,14 @@ function App() {
   const refresh = async (showBusy = true) => {
     if (showBusy) setLoading(true);
     try {
-      const [nextSummary, nextSources, nextSubs, nextPricing, nextMissing, nextSync] = await Promise.all([
+      const [nextSummary, nextSources, nextSubs, nextPricing, nextMissing, nextSync, nextProjectRoot] = await Promise.all([
         api<DashboardSummary>("get_dashboard_summary"),
         api<Source[]>("list_sources"),
         api<Subscription[]>("list_subscriptions"),
         api<PricingEntry[]>("list_pricing_catalog"),
         api<MissingModel[]>("list_missing_models"),
-        api<SyncStatus>("get_sync_status")
+        api<SyncStatus>("get_sync_status"),
+        api<string | null>("get_project_root")
       ]);
       setSummary(nextSummary);
       setSources(nextSources);
@@ -268,6 +272,7 @@ function App() {
       setPricing(nextPricing);
       setMissingModels(nextMissing);
       setSyncStatus(nextSync);
+      setProjectRoot(nextProjectRoot);
       if (nextSync.logged_in && nextSync.server_url) {
         setSyncForm((s) => ({ ...s, server_url: nextSync.server_url }));
       }
@@ -584,6 +589,33 @@ function App() {
     }
   };
 
+  const updateProjectRoot = async (value: string) => {
+    setProjectRoot(value);
+    setProjectRootLoading(true);
+    try {
+      await api<SyncStatus>("set_project_root", { projectRoot: value || null });
+      setStatus("Project root updated");
+    } catch (error) {
+      setStatus(message(error));
+    } finally {
+      setProjectRootLoading(false);
+    }
+  };
+
+  const doRebuildProjects = async () => {
+    setProjectRootLoading(true);
+    setStatus("Rebuilding projects...");
+    try {
+      const result = await api<{ rebuilt: number }>("rebuild_projects");
+      setStatus(`Rebuilt ${result.rebuilt} event(s) into projects`);
+      await refresh(false);
+    } catch (error) {
+      setStatus(message(error));
+    } finally {
+      setProjectRootLoading(false);
+    }
+  };
+
   return (
     <main className="app-shell">
       <header className="titlebar">
@@ -665,7 +697,11 @@ function App() {
             syncForm={syncForm}
             setSyncForm={setSyncForm}
             syncLoading={syncLoading}
+            projectRootLoading={projectRootLoading}
             pricingLoading={pricingLoading}
+            projectRoot={projectRoot}
+            onProjectRootChange={updateProjectRoot}
+            onRebuildProjects={doRebuildProjects}
             onLogin={doLogin}
             onLogout={doLogout}
             onSync={doSync}
@@ -905,7 +941,11 @@ function SettingsView(props: {
   syncForm: { server_url: string; login: string; password: string };
   setSyncForm: (value: { server_url: string; login: string; password: string }) => void;
   syncLoading: boolean;
+  projectRootLoading: boolean;
   pricingLoading: boolean;
+  projectRoot: string | null;
+  onProjectRootChange: (value: string) => void;
+  onRebuildProjects: () => void;
   onLogin: () => void;
   onLogout: () => void;
   onSync: () => void;
@@ -993,6 +1033,29 @@ function SettingsView(props: {
             </button>
           </div>
         )}
+      </section>
+
+      <section className="panel">
+        <h2><FolderOpen size={16} /> Project Root</h2>
+        <p className="muted">When a log path sits under this folder, MEtR groups by the first subfolder (e.g. ~/Developer/MEtR). Leave empty to use auto-detection.</p>
+        <div className="form-row">
+          <input
+            type="text"
+            value={props.projectRoot ?? ""}
+            onChange={(e) => props.onProjectRootChange(e.target.value)}
+            placeholder="~/Developer"
+            disabled={props.projectRootLoading}
+          />
+          <button
+            className="primary-button"
+            onClick={props.onRebuildProjects}
+            disabled={props.projectRootLoading}
+            title="Reclassify all existing events using the current root"
+          >
+            <RefreshCw size={14} />
+            {props.projectRootLoading ? "Rebuilding..." : "Rebuild Projects"}
+          </button>
+        </div>
       </section>
 
       <section className="panel">

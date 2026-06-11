@@ -85,6 +85,7 @@ struct SyncStatus {
     sync_error_count: i64,
     last_sync_error: Option<String>,
     sync_enabled: bool,
+    project_root: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -259,6 +260,9 @@ pub fn run() {
             push_pricing,
             get_sync_status,
             configure_sync_server,
+            get_project_root,
+            set_project_root,
+            rebuild_projects,
             login_sync,
             logout_sync,
             sync_now,
@@ -775,21 +779,46 @@ fn ensure_sync_config(conn: &Connection) -> Result<(), String> {
         .unwrap_or(false);
     if !exists {
         let now = now();
+        let default_root = default_project_root();
         conn.execute(
-            "INSERT INTO sync_config (id, server_url, created_at, updated_at)
-             VALUES (1, 'https://metr.petarpetkov.com', ?1, ?1)",
-            params![now],
+            "INSERT INTO sync_config (id, server_url, project_root, created_at, updated_at)
+             VALUES (1, 'https://metr.petarpetkov.com', ?1, ?2, ?2)",
+            params![default_root, now],
         )
         .map_err(to_string)?;
+    } else {
+        // Backfill the default project root for existing users who got a NULL column.
+        let is_null: bool = conn
+            .query_row(
+                "SELECT project_root IS NULL FROM sync_config WHERE id = 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or(false);
+        if is_null {
+            let default_root = default_project_root();
+            let _ = conn.execute(
+                "UPDATE sync_config SET project_root = ?1, updated_at = ?2 WHERE id = 1",
+                params![default_root, now()],
+            );
+        }
     }
     Ok(())
+}
+
+fn default_project_root() -> Option<String> {
+    if std::env::consts::OS == "macos" {
+        dirs::home_dir().map(|h| h.join("Developer").to_string_lossy().to_string())
+    } else {
+        None
+    }
 }
 
 fn get_sync_config(conn: &Connection) -> Result<SyncStatus, String> {
     ensure_sync_config(conn)?;
     let row = conn
         .query_row(
-            "SELECT server_url, auth_token, device_name, username, last_sync_at, sync_enabled, last_sync_error, last_sync_attempt_at
+            "SELECT server_url, auth_token, device_name, username, last_sync_at, sync_enabled, last_sync_error, last_sync_attempt_at, project_root
              FROM sync_config WHERE id = 1",
             [],
             |r| {
@@ -802,6 +831,7 @@ fn get_sync_config(conn: &Connection) -> Result<SyncStatus, String> {
                     r.get::<_, i64>(5)? == 1,
                     r.get::<_, Option<String>>(6)?,
                     r.get::<_, Option<String>>(7)?,
+                    r.get::<_, Option<String>>(8)?,
                 ))
             },
         )
@@ -835,6 +865,7 @@ fn get_sync_config(conn: &Connection) -> Result<SyncStatus, String> {
         sync_error_count,
         last_sync_error: row.6,
         sync_enabled: row.5,
+        project_root: row.8,
     })
 }
 
@@ -849,6 +880,101 @@ fn configure_sync_server(state: State<AppState>, server_url: String) -> Result<S
     )
     .map_err(to_string)?;
     get_sync_config(&conn)
+}
+
+#[tauri::command]
+fn get_project_root(state: State<AppState>) -> Result<Option<String>, String> {
+    let conn = state.db.lock().map_err(to_string)?;
+    ensure_sync_config(&conn)?;
+    let root: Option<String> = conn
+        .query_row(
+            "SELECT project_root FROM sync_config WHERE id = 1",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(to_string)?;
+    Ok(root)
+}
+
+#[tauri::command]
+fn set_project_root(state: State<AppState>, project_root: Option<String>) -> Result<SyncStatus, String> {
+    let conn = state.db.lock().map_err(to_string)?;
+    ensure_sync_config(&conn)?;
+    let now = now();
+    let value = project_root.as_deref().unwrap_or("");
+    conn.execute(
+        "UPDATE sync_config SET project_root = ?1, updated_at = ?2 WHERE id = 1",
+        params![value, now],
+    )
+    .map_err(to_string)?;
+    get_sync_config(&conn)
+}
+
+#[tauri::command]
+fn rebuild_projects(state: State<AppState>) -> Result<Value, String> {
+    let conn = state.db.lock().map_err(to_string)?;
+    ensure_sync_config(&conn)?;
+    let custom_root = project_root_from_conn(&conn);
+
+    // Clear existing project assignments.
+    conn.execute("UPDATE usage_events SET project_id = NULL", [])
+        .map_err(to_string)?;
+    conn.execute("UPDATE conversations SET project_id = NULL", [])
+        .map_err(to_string)?;
+    conn.execute("DELETE FROM projects", [])
+        .map_err(to_string)?;
+
+    // Re-infer projects for all events.
+    let mut stmt = conn
+        .prepare("SELECT id, provider_id, source_file_path, timestamp FROM usage_events")
+        .map_err(to_string)?;
+    let rows: Vec<(String, String, String, String)> = stmt
+        .query_map([], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+        })
+        .map_err(to_string)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(to_string)?;
+    drop(stmt);
+
+    for (id, provider_id, source_file_path, timestamp) in &rows {
+        let inferred = infer_project_from_path(Path::new(&source_file_path));
+        let project_path = if let Some(root) = custom_root.as_deref() {
+            if let Some(p) = inferred
+                .as_deref()
+                .and_then(|p| project_under_root(Path::new(p), root))
+            {
+                Some(p)
+            } else {
+                project_under_root(Path::new(&source_file_path), root)
+            }
+        } else {
+            inferred
+        };
+
+        if let Some(path) = project_path {
+            let project_id = upsert_project(&conn, &provider_id, &path, &timestamp)?;
+            conn.execute(
+                "UPDATE usage_events SET project_id = ?1 WHERE id = ?2",
+                params![project_id, id],
+            )
+            .map_err(to_string)?;
+        }
+    }
+
+    // Rebuild conversation project links from their events.
+    conn.execute(
+        "UPDATE conversations
+         SET project_id = (
+             SELECT project_id FROM usage_events
+             WHERE usage_events.conversation_id = conversations.id AND project_id IS NOT NULL
+             ORDER BY timestamp ASC LIMIT 1
+         )",
+        [],
+    )
+    .map_err(to_string)?;
+
+    Ok(serde_json::json!({ "rebuilt": rows.len() }))
 }
 
 #[tauri::command]
@@ -1780,6 +1906,7 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     add_column_if_missing(conn, "usage_events", "event_type", "TEXT")?;
     add_column_if_missing(conn, "sync_config", "last_sync_error", "TEXT")?;
     add_column_if_missing(conn, "sync_config", "last_sync_attempt_at", "TEXT")?;
+    add_column_if_missing(conn, "sync_config", "project_root", "TEXT")?;
     Ok(())
 }
 
@@ -2096,6 +2223,7 @@ fn scan_source(conn: &Connection, source: &Source, full_scan: bool) -> Result<us
         params![started, source.id],
     )
     .map_err(to_string)?;
+    let custom_root = project_root_from_conn(conn);
     let root = PathBuf::from(&source.path);
     if !root.exists() {
         conn.execute(
@@ -2157,7 +2285,7 @@ fn scan_source(conn: &Connection, source: &Source, full_scan: bool) -> Result<us
             parse_content(source, entry.path(), &content)
         };
         for event in events {
-            if insert_event(conn, source, entry.path(), &modified, &source_hash, event)? {
+            if insert_event(conn, source, entry.path(), &modified, &source_hash, event, custom_root.as_deref())? {
                 imported += 1;
             }
         }
@@ -2670,14 +2798,18 @@ fn insert_event(
     modified: &str,
     source_hash: &str,
     event: ParsedEvent,
+    custom_root: Option<&Path>,
 ) -> Result<bool, String> {
     ensure_provider(conn, &event.provider_id, provider_display_name(&event.provider_id))
         .map_err(to_string)?;
-    let project_id = match &event.project_path {
+
+    // Resolve project path, honoring a user-configured project root.
+    let project_path = resolve_event_project_path(&event, file_path, custom_root);
+    let project_id = match project_path {
         Some(path) => Some(upsert_project(
             conn,
             &event.provider_id,
-            path,
+            &path,
             &event.timestamp,
         )?),
         None => None,
@@ -3356,6 +3488,7 @@ fn project_root_from_path(path: &Path) -> Option<String> {
     if path.to_string_lossy().contains(' ') {
         return None;
     }
+
     // First: try marker-based detection for true project root
     if let Some(root) = find_project_root_by_markers(path) {
         let root_path = Path::new(&root);
@@ -3400,6 +3533,65 @@ fn project_root_from_path(path: &Path) -> Option<String> {
         }
     }
     None
+}
+
+fn expand_tilde(path: &str) -> PathBuf {
+    if path.starts_with("~/") || path == "~" {
+        dirs::home_dir()
+            .map(|h| if path == "~" { h } else { h.join(&path[2..]) })
+            .unwrap_or_else(|| PathBuf::from(path))
+    } else {
+        PathBuf::from(path)
+    }
+}
+
+fn project_root_from_conn(conn: &Connection) -> Option<PathBuf> {
+    let stored: Option<String> = conn
+        .query_row(
+            "SELECT project_root FROM sync_config WHERE id = 1",
+            [],
+            |r| r.get(0),
+        )
+        .ok()?;
+    let stored = stored?;
+    if stored.trim().is_empty() {
+        return None;
+    }
+    Some(expand_tilde(&stored))
+}
+
+fn project_under_root(path: &Path, root: &Path) -> Option<String> {
+    let stripped = path.strip_prefix(root).ok()?;
+    let first = stripped.components().next()?;
+    let name = first.as_os_str().to_string_lossy().to_string();
+    if name.is_empty() || name.starts_with('.') {
+        return None;
+    }
+    Some(root.join(&name).to_string_lossy().to_string())
+}
+
+fn resolve_event_project_path(
+    event: &ParsedEvent,
+    file_path: &Path,
+    custom_root: Option<&Path>,
+) -> Option<String> {
+    let candidate = event
+        .project_path
+        .clone()
+        .or_else(|| infer_project_from_path(file_path));
+
+    if let Some(root) = custom_root {
+        // If the candidate is inside the configured root, truncate to root/<first_dir>.
+        if let Some(c) = candidate.as_deref().and_then(|p| project_under_root(Path::new(p), root)) {
+            return Some(c);
+        }
+        // Otherwise try to derive directly from the file path under the root.
+        if let Some(p) = project_under_root(file_path, root) {
+            return Some(p);
+        }
+    }
+
+    candidate
 }
 
 fn join_path_parts(parts: &[String]) -> String {
