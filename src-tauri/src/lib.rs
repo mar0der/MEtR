@@ -79,6 +79,7 @@ struct SyncStatus {
     username: Option<String>,
     device_name: Option<String>,
     last_sync_at: Option<String>,
+    last_sync_attempt_at: Option<String>,
     pending_events: i64,
     sync_error_count: i64,
     last_sync_error: Option<String>,
@@ -787,7 +788,7 @@ fn get_sync_config(conn: &Connection) -> Result<SyncStatus, String> {
     ensure_sync_config(conn)?;
     let row = conn
         .query_row(
-            "SELECT server_url, auth_token, device_name, username, last_sync_at, sync_enabled, last_sync_error
+            "SELECT server_url, auth_token, device_name, username, last_sync_at, sync_enabled, last_sync_error, last_sync_attempt_at
              FROM sync_config WHERE id = 1",
             [],
             |r| {
@@ -799,6 +800,7 @@ fn get_sync_config(conn: &Connection) -> Result<SyncStatus, String> {
                     r.get::<_, Option<String>>(4)?,
                     r.get::<_, i64>(5)? == 1,
                     r.get::<_, Option<String>>(6)?,
+                    r.get::<_, Option<String>>(7)?,
                 ))
             },
         )
@@ -827,6 +829,7 @@ fn get_sync_config(conn: &Connection) -> Result<SyncStatus, String> {
         username: row.3,
         device_name: row.2,
         last_sync_at: row.4,
+        last_sync_attempt_at: row.7,
         pending_events: pending,
         sync_error_count,
         last_sync_error: row.6,
@@ -943,6 +946,16 @@ fn get_sync_status(state: State<AppState>) -> Result<SyncStatus, String> {
 #[tauri::command]
 async fn sync_now(state: State<'_, AppState>, app: tauri::AppHandle) -> Result<SyncResult, String> {
     let db = state.db.clone();
+    {
+        let conn = db.lock().map_err(to_string)?;
+        let now = now();
+        conn.execute(
+            "UPDATE sync_config SET last_sync_attempt_at = ?1, updated_at = ?1 WHERE id = 1",
+            params![now],
+        )
+        .map_err(to_string)?;
+    }
+
     let (progress_tx, progress_rx) = std::sync::mpsc::channel::<(usize, usize)>();
     let progress_tx_clone = progress_tx.clone();
 
@@ -950,9 +963,9 @@ async fn sync_now(state: State<'_, AppState>, app: tauri::AppHandle) -> Result<S
         let conn = db.lock().map_err(to_string)?;
         let result = perform_sync(&conn, false, |uploaded, total| {
             let _ = progress_tx_clone.send((uploaded, total));
-        })?;
+        });
         let _ = pull_pricing_from_server(&conn);
-        Ok::<_, String>(result)
+        result
     });
 
     let emit_task = tauri::async_runtime::spawn(async move {
@@ -964,15 +977,44 @@ async fn sync_now(state: State<'_, AppState>, app: tauri::AppHandle) -> Result<S
         }
     });
 
-    let result = sync_task.await.map_err(|e| format!("Sync task failed: {:?}", e))??;
+    let result = match sync_task.await {
+        Ok(Ok(result)) => Ok(result),
+        Ok(Err(err)) => {
+            let conn = state.db.lock().map_err(to_string)?;
+            let _ = conn.execute(
+                "UPDATE sync_config SET last_sync_error = ?1, updated_at = ?2 WHERE id = 1",
+                params![&err, now()],
+            );
+            Err(err)
+        }
+        Err(e) => {
+            let err = format!("Sync task failed: {:?}", e);
+            let conn = state.db.lock().map_err(to_string)?;
+            let _ = conn.execute(
+                "UPDATE sync_config SET last_sync_error = ?1, updated_at = ?2 WHERE id = 1",
+                params![&err, now()],
+            );
+            Err(err)
+        }
+    };
     drop(progress_tx);
     let _ = emit_task.await;
-    Ok(result)
+    result
 }
 
 #[tauri::command]
 async fn full_resync(state: State<'_, AppState>, app: tauri::AppHandle) -> Result<SyncResult, String> {
     let db = state.db.clone();
+    {
+        let conn = db.lock().map_err(to_string)?;
+        let now = now();
+        conn.execute(
+            "UPDATE sync_config SET last_sync_attempt_at = ?1, updated_at = ?1 WHERE id = 1",
+            params![now],
+        )
+        .map_err(to_string)?;
+    }
+
     let (progress_tx, progress_rx) = std::sync::mpsc::channel::<(usize, usize)>();
     let progress_tx_clone = progress_tx.clone();
 
@@ -980,9 +1022,9 @@ async fn full_resync(state: State<'_, AppState>, app: tauri::AppHandle) -> Resul
         let conn = db.lock().map_err(to_string)?;
         let result = perform_sync(&conn, true, |uploaded, total| {
             let _ = progress_tx_clone.send((uploaded, total));
-        })?;
+        });
         let _ = pull_pricing_from_server(&conn);
-        Ok::<_, String>(result)
+        result
     });
 
     let emit_task = tauri::async_runtime::spawn(async move {
@@ -994,10 +1036,29 @@ async fn full_resync(state: State<'_, AppState>, app: tauri::AppHandle) -> Resul
         }
     });
 
-    let result = sync_task.await.map_err(|e| format!("Sync task failed: {:?}", e))??;
+    let result = match sync_task.await {
+        Ok(Ok(result)) => Ok(result),
+        Ok(Err(err)) => {
+            let conn = state.db.lock().map_err(to_string)?;
+            let _ = conn.execute(
+                "UPDATE sync_config SET last_sync_error = ?1, updated_at = ?2 WHERE id = 1",
+                params![&err, now()],
+            );
+            Err(err)
+        }
+        Err(e) => {
+            let err = format!("Sync task failed: {:?}", e);
+            let conn = state.db.lock().map_err(to_string)?;
+            let _ = conn.execute(
+                "UPDATE sync_config SET last_sync_error = ?1, updated_at = ?2 WHERE id = 1",
+                params![&err, now()],
+            );
+            Err(err)
+        }
+    };
     drop(progress_tx);
     let _ = emit_task.await;
-    Ok(result)
+    result
 }
 
 fn perform_sync<F>(conn: &Connection, force_all: bool, mut progress: F) -> Result<SyncResult, String>
@@ -1302,7 +1363,7 @@ fn debug_sync_state(state: State<AppState>) -> Result<Value, String> {
 
     let sync_config: Value = conn
         .query_row(
-            "SELECT server_url, auth_token IS NOT NULL, username, last_sync_at, last_sync_error, sync_enabled, device_uuid
+            "SELECT server_url, auth_token IS NOT NULL, username, last_sync_at, last_sync_error, sync_enabled, device_uuid, last_sync_attempt_at
              FROM sync_config WHERE id = 1",
             [],
             |r| {
@@ -1314,6 +1375,7 @@ fn debug_sync_state(state: State<AppState>) -> Result<Value, String> {
                     "last_sync_error": r.get::<_, Option<String>>(4)?,
                     "sync_enabled": r.get::<_, i64>(5)? == 1,
                     "device_uuid": r.get::<_, Option<String>>(6)?,
+                    "last_sync_attempt_at": r.get::<_, Option<String>>(7)?,
                 }))
             },
         )
@@ -1707,6 +1769,7 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     add_column_if_missing(conn, "usage_events", "sync_error", "TEXT")?;
     add_column_if_missing(conn, "usage_events", "event_type", "TEXT")?;
     add_column_if_missing(conn, "sync_config", "last_sync_error", "TEXT")?;
+    add_column_if_missing(conn, "sync_config", "last_sync_attempt_at", "TEXT")?;
     Ok(())
 }
 

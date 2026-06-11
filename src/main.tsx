@@ -148,6 +148,7 @@ type SyncStatus = {
   username: string | null;
   device_name: string | null;
   last_sync_at: string | null;
+  last_sync_attempt_at: string | null;
   pending_events: number;
   sync_error_count: number;
   last_sync_error: string | null;
@@ -924,12 +925,13 @@ function SettingsView(props: {
             <p><strong>Server:</strong> {props.syncStatus.server_url}</p>
             <p><strong>Device:</strong> {props.syncStatus.device_name}</p>
             <p><strong>Last sync:</strong> {date(props.syncStatus.last_sync_at)}</p>
+            <p><strong>Last attempt:</strong> {date(props.syncStatus.last_sync_attempt_at)}</p>
             <p><strong>Pending model calls:</strong> {props.syncStatus.pending_events}</p>
             {props.syncStatus.sync_error_count > 0 && (
               <p style={{ color: "#e11d48" }}><strong>Sync errors:</strong> {props.syncStatus.sync_error_count} event(s) failed to upload</p>
             )}
             {props.syncStatus.last_sync_error && (
-              <p style={{ color: "#e11d48", fontSize: "0.85em" }}><strong>Last error:</strong> {props.syncStatus.last_sync_error}</p>
+              <p style={{ color: "#e11d48", fontSize: "0.9em", whiteSpace: "pre-wrap", wordBreak: "break-word" }}><strong>Last error:</strong> {props.syncStatus.last_sync_error}</p>
             )}
             <div className="form-row">
               <button className="primary-button" onClick={props.onSync} disabled={props.syncLoading}>
