@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "MEtR",
-  "version": "26.24.5",
+  "version": "26.24.6",
   "identifier": "com.metr.local",
   "build": {
     "beforeDevCommand": "npm run dev",
