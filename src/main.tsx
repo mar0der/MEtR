@@ -9,6 +9,7 @@ import {
   Database,
   FolderPlus,
   FolderOpen,
+  Pencil,
   RefreshCw,
   Settings,
   ShieldCheck,
@@ -58,6 +59,7 @@ type SessionSummary = {
   id: string;
   provider_id: string;
   project_name: string | null;
+  project_path: string | null;
   model: string | null;
   event_type: string | null;
   timestamp: string;
@@ -141,6 +143,16 @@ type MissingModel = {
   event_count: number;
 };
 
+type Project = {
+  id: string;
+  provider_id: string;
+  display_name: string;
+  path: string | null;
+  custom_name: string | null;
+  merged_into_project_id: string | null;
+  effective_name: string;
+};
+
 type SyncStatus = {
   configured: boolean;
   server_url: string;
@@ -215,6 +227,7 @@ function App() {
   const [projectRootLoading, setProjectRootLoading] = useState(false);
   const [pricingLoading, setPricingLoading] = useState(false);
   const [projectRoot, setProjectRoot] = useState<string | null>(null);
+  const [projects, setProjects] = useState<Project[]>([]);
   const [appVersion, setAppVersion] = useState<string>("");
   const [newPriceForm, setNewPriceForm] = useState<Record<string, { input: string; output: string }>>({});
   const [paginatedSessions, setPaginatedSessions] = useState<PaginatedSessions>({ sessions: [], total_count: 0 });
@@ -257,14 +270,15 @@ function App() {
   const refresh = async (showBusy = true) => {
     if (showBusy) setLoading(true);
     try {
-      const [nextSummary, nextSources, nextSubs, nextPricing, nextMissing, nextSync, nextProjectRoot] = await Promise.all([
+      const [nextSummary, nextSources, nextSubs, nextPricing, nextMissing, nextSync, nextProjectRoot, nextProjects] = await Promise.all([
         api<DashboardSummary>("get_dashboard_summary"),
         api<Source[]>("list_sources"),
         api<Subscription[]>("list_subscriptions"),
         api<PricingEntry[]>("list_pricing_catalog"),
         api<MissingModel[]>("list_missing_models"),
         api<SyncStatus>("get_sync_status"),
-        api<string | null>("get_project_root")
+        api<string | null>("get_project_root"),
+        api<{ projects: Project[] }>("list_projects").then((r) => r.projects)
       ]);
       setSummary(nextSummary);
       setSources(nextSources);
@@ -273,6 +287,7 @@ function App() {
       setMissingModels(nextMissing);
       setSyncStatus(nextSync);
       setProjectRoot(nextProjectRoot);
+      setProjects(nextProjects);
       if (nextSync.logged_in && nextSync.server_url) {
         setSyncForm((s) => ({ ...s, server_url: nextSync.server_url }));
       }
@@ -616,6 +631,36 @@ function App() {
     }
   };
 
+  const renameProject = async (projectId: string, customName: string) => {
+    try {
+      await api<{ projects: Project[] }>("rename_project", { projectId, customName: customName || null });
+      setStatus("Project renamed");
+      await refresh(false);
+    } catch (error) {
+      setStatus(message(error));
+    }
+  };
+
+  const mergeProjects = async (targetId: string, sourceIds: string[]) => {
+    try {
+      await api<{ projects: Project[] }>("merge_projects", { targetProjectId: targetId, sourceProjectIds: sourceIds });
+      setStatus("Projects merged");
+      await refresh(false);
+    } catch (error) {
+      setStatus(message(error));
+    }
+  };
+
+  const unmergeProject = async (projectId: string) => {
+    try {
+      await api<{ projects: Project[] }>("unmerge_project", { projectId });
+      setStatus("Project unmerged");
+      await refresh(false);
+    } catch (error) {
+      setStatus(message(error));
+    }
+  };
+
   return (
     <main className="app-shell">
       <header className="titlebar">
@@ -702,6 +747,10 @@ function App() {
             projectRoot={projectRoot}
             onProjectRootChange={updateProjectRoot}
             onRebuildProjects={doRebuildProjects}
+            projects={projects}
+            onRenameProject={renameProject}
+            onMergeProjects={mergeProjects}
+            onUnmergeProject={unmergeProject}
             onLogin={doLogin}
             onLogout={doLogout}
             onSync={doSync}
@@ -834,8 +883,8 @@ function DashboardView({
             {projects.map((project) => (
               <tr key={project.id}>
                 <td>
-                  <strong>{project.display_name}</strong>
-                  <span>{provider ? folderHint(project.path) : providerLabel(project.provider_id)}</span>
+                  <strong title={project.path ?? undefined}>{project.display_name}</strong>
+                  <span title={project.path ?? undefined}>{provider ? folderHint(project.path) : providerLabel(project.provider_id)}</span>
                 </td>
                 <td>{compact(project.totals.total_tokens)}</td>
                 <td>{tokenMix(project.totals)}</td>
@@ -880,7 +929,7 @@ function DashboardView({
             {sessions.map((session) => (
               <tr key={session.id}>
                 <td>{date(session.timestamp)}</td>
-                <td>{session.project_name ?? "—"}</td>
+                <td title={session.project_path ?? undefined}>{session.project_name ?? "—"}</td>
                 <td>{session.event_type ? <span className="pill info">{session.event_type}</span> : "—"}</td>
                 <td>{session.model ?? "—"}</td>
                 <td><TokenCell value={session.cached_tokens} cost={session.cached_cost} total={session.total_tokens} /></td>
@@ -919,6 +968,116 @@ function DashboardView({
   );
 }
 
+function ProjectManager(props: {
+  projects: Project[];
+  onRename: (projectId: string, customName: string) => void;
+  onMerge: (targetId: string, sourceIds: string[]) => void;
+  onUnmerge: (projectId: string) => void;
+}) {
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editName, setEditName] = useState("");
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+
+  const startRename = (project: Project) => {
+    setEditingId(project.id);
+    setEditName(project.custom_name ?? project.display_name);
+  };
+
+  const saveRename = (projectId: string) => {
+    props.onRename(projectId, editName);
+    setEditingId(null);
+  };
+
+  const toggleSelect = (id: string) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const doMerge = () => {
+    const ids = Array.from(selectedIds);
+    if (ids.length < 2) return;
+    const target = ids[0];
+    const sources = ids.slice(1);
+    props.onMerge(target, sources);
+    setSelectedIds(new Set());
+  };
+
+  return (
+    <div>
+      <div className="form-row" style={{ marginBottom: 12 }}>
+        <button className="secondary-button" onClick={doMerge} disabled={selectedIds.size < 2}>
+          Merge selected ({selectedIds.size})
+        </button>
+        <span className="muted">Select 2+ projects; first selection becomes the main one.</span>
+      </div>
+      <table>
+        <thead>
+          <tr>
+            <th></th>
+            <th>Name</th>
+            <th>Provider</th>
+            <th>Path</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          {props.projects.map((project) => (
+            <tr key={project.id}>
+              <td>
+                <input
+                  type="checkbox"
+                  checked={selectedIds.has(project.id)}
+                  onChange={() => toggleSelect(project.id)}
+                />
+              </td>
+              <td>
+                {editingId === project.id ? (
+                  <input
+                    value={editName}
+                    onChange={(e) => setEditName(e.target.value)}
+                    onBlur={() => saveRename(project.id)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") saveRename(project.id);
+                      if (e.key === "Escape") setEditingId(null);
+                    }}
+                    autoFocus
+                  />
+                ) : (
+                  <span title={project.path ?? undefined} style={{ cursor: "pointer" }} onClick={() => startRename(project)}>
+                    {project.effective_name}
+                    {project.custom_name && <span className="muted" style={{ marginLeft: 6 }}>(auto: {project.display_name})</span>}
+                  </span>
+                )}
+              </td>
+              <td>{project.provider_id}</td>
+              <td>
+                <span className="muted" title={project.path ?? undefined}>
+                  {project.path ? project.path.split("/").slice(-3).join("/") : "—"}
+                </span>
+              </td>
+              <td>
+                {project.merged_into_project_id ? (
+                  <button className="secondary-button" onClick={() => props.onUnmerge(project.id)}>
+                    Unmerge
+                  </button>
+                ) : (
+                  <button className="icon-button" onClick={() => startRename(project)} title="Rename">
+                    <Pencil size={14} />
+                  </button>
+                )}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 function SettingsView(props: {
   sources: Source[];
   detected: DetectedSource[];
@@ -946,6 +1105,10 @@ function SettingsView(props: {
   projectRoot: string | null;
   onProjectRootChange: (value: string) => void;
   onRebuildProjects: () => void;
+  projects: Project[];
+  onRenameProject: (projectId: string, customName: string) => void;
+  onMergeProjects: (targetId: string, sourceIds: string[]) => void;
+  onUnmergeProject: (projectId: string) => void;
   onLogin: () => void;
   onLogout: () => void;
   onSync: () => void;
@@ -1059,8 +1222,23 @@ function SettingsView(props: {
       </section>
 
       <section className="panel">
+        <h2><FolderOpen size={16} /> Projects</h2>
+        <p className="muted">Rename auto-detected projects or merge duplicates. Custom names and merges survive Clear All Data. Hover over a name to see the full folder path.</p>
+        {props.projects.length === 0 ? (
+          <p className="muted">No projects found. Run a scan first.</p>
+        ) : (
+          <ProjectManager
+            projects={props.projects}
+            onRename={props.onRenameProject}
+            onMerge={props.onMergeProjects}
+            onUnmerge={props.onUnmergeProject}
+          />
+        )}
+      </section>
+
+      <section className="panel">
         <h2><Trash2 size={16} /> Danger Zone</h2>
-        <p className="muted">Delete all parsed model calls, projects, and conversations. Your source folders and subscriptions stay intact.</p>
+        <p className="muted">Delete all parsed model calls, projects, and conversations. Your source folders and subscriptions stay intact. Project custom names and merges are preserved.</p>
         <button className="secondary-button" onClick={props.onClearAllData} style={{ borderColor: "#ef4444", color: "#ef4444" }}>
           <Trash2 size={14} />
           Clear All Data

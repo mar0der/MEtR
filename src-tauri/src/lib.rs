@@ -157,6 +157,7 @@ struct SessionSummary {
     id: String,
     provider_id: String,
     project_name: Option<String>,
+    project_path: Option<String>,
     model: Option<String>,
     event_type: Option<String>,
     timestamp: String,
@@ -253,6 +254,10 @@ pub fn run() {
             delete_subscription,
             list_pricing_catalog,
             clear_parsed_data,
+            list_projects,
+            rename_project,
+            merge_projects,
+            unmerge_project,
             open_project_path,
             list_missing_models,
             add_pricing,
@@ -385,6 +390,109 @@ fn clear_parsed_data(state: State<AppState>) -> Result<(), String> {
     )
     .map_err(to_string)?;
     Ok(())
+}
+
+#[tauri::command]
+fn list_projects(state: State<AppState>) -> Result<Value, String> {
+    let conn = state.db.lock().map_err(to_string)?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT p.id, p.provider_id, p.display_name, p.path, pm.custom_name, pm.merged_into_project_id
+             FROM projects p
+             LEFT JOIN project_management pm ON pm.id = p.id
+             ORDER BY COALESCE(pm.custom_name, p.display_name) ASC, p.path ASC",
+        )
+        .map_err(to_string)?;
+    let rows: Vec<Value> = stmt
+        .query_map([], |r| {
+            let id: String = r.get(0)?;
+            let provider_id: String = r.get(1)?;
+            let display_name: String = r.get(2)?;
+            let path: Option<String> = r.get(3)?;
+            let custom_name: Option<String> = r.get(4)?;
+            let merged_into: Option<String> = r.get(5)?;
+            Ok(serde_json::json!({
+                "id": id,
+                "provider_id": provider_id,
+                "display_name": display_name,
+                "path": path,
+                "custom_name": custom_name,
+                "merged_into_project_id": merged_into,
+                "effective_name": custom_name.as_deref().unwrap_or(&display_name),
+            }))
+        })
+        .map_err(to_string)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(to_string)?;
+    Ok(serde_json::json!({ "projects": rows }))
+}
+
+#[tauri::command]
+fn rename_project(state: State<AppState>, project_id: String, custom_name: Option<String>) -> Result<Value, String> {
+    {
+        let conn = state.db.lock().map_err(to_string)?;
+        let provider_id: String = conn
+            .query_row("SELECT provider_id FROM projects WHERE id = ?1", params![project_id], |r| r.get(0))
+            .map_err(|_| "Project not found")?;
+        let now = now();
+        if let Some(name) = custom_name.as_deref().filter(|s| !s.trim().is_empty()) {
+            conn.execute(
+                "INSERT INTO project_management (id, provider_id, custom_name, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?4)
+                 ON CONFLICT(id) DO UPDATE SET custom_name = excluded.custom_name, updated_at = excluded.updated_at",
+                params![project_id, provider_id, name.trim(), now],
+            )
+            .map_err(to_string)?;
+        } else {
+            conn.execute(
+                "UPDATE project_management SET custom_name = NULL, updated_at = ?1 WHERE id = ?2",
+                params![now, project_id],
+            )
+            .map_err(to_string)?;
+        }
+        // Apply the new name to the projects table so existing queries see it immediately.
+        apply_project_management(&conn).map_err(to_string)?;
+    }
+    list_projects(state)
+}
+
+#[tauri::command]
+fn merge_projects(state: State<AppState>, target_project_id: String, source_project_ids: Vec<String>) -> Result<Value, String> {
+    {
+        let conn = state.db.lock().map_err(to_string)?;
+        let now = now();
+        for source_id in &source_project_ids {
+            if source_id == &target_project_id {
+                continue;
+            }
+            let provider_id: String = conn
+                .query_row("SELECT provider_id FROM projects WHERE id = ?1", params![source_id], |r| r.get(0))
+                .map_err(|_| format!("Source project {} not found", source_id))?;
+            conn.execute(
+                "INSERT INTO project_management (id, provider_id, merged_into_project_id, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?4)
+                 ON CONFLICT(id) DO UPDATE SET merged_into_project_id = excluded.merged_into_project_id, updated_at = excluded.updated_at",
+                params![source_id, provider_id, target_project_id, now],
+            )
+            .map_err(to_string)?;
+        }
+        apply_project_management(&conn).map_err(to_string)?;
+    }
+    list_projects(state)
+}
+
+#[tauri::command]
+fn unmerge_project(state: State<AppState>, project_id: String) -> Result<Value, String> {
+    {
+        let conn = state.db.lock().map_err(to_string)?;
+        conn.execute(
+            "UPDATE project_management SET merged_into_project_id = NULL, updated_at = ?1 WHERE id = ?2",
+            params![now(), project_id],
+        )
+        .map_err(to_string)?;
+        apply_project_management(&conn).map_err(to_string)?;
+    }
+    list_projects(state)
 }
 
 #[tauri::command]
@@ -941,6 +1049,7 @@ fn rebuild_projects(state: State<AppState>) -> Result<Value, String> {
     for (id, provider_id, source_file_path, source_project_path, timestamp) in &rows {
         let raw_path = source_project_path
             .clone()
+            .map(|p| expand_tilde(&p).to_string_lossy().to_string())
             .or_else(|| infer_project_from_path(Path::new(&source_file_path)));
         let project_path = if let Some(root) = custom_root.as_deref() {
             if let Some(p) = raw_path
@@ -976,6 +1085,8 @@ fn rebuild_projects(state: State<AppState>) -> Result<Value, String> {
         [],
     )
     .map_err(to_string)?;
+
+    apply_project_management(&conn).map_err(to_string)?;
 
     Ok(serde_json::json!({ "rebuilt": rows.len() }))
 }
@@ -1911,7 +2022,24 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     add_column_if_missing(conn, "sync_config", "last_sync_attempt_at", "TEXT")?;
     add_column_if_missing(conn, "sync_config", "project_root", "TEXT")?;
     add_column_if_missing(conn, "usage_events", "source_project_path", "TEXT")?;
+    create_project_management_table(conn)?;
     Ok(())
+}
+
+fn create_project_management_table(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch(
+        "
+        CREATE TABLE IF NOT EXISTS project_management (
+          id TEXT PRIMARY KEY,
+          provider_id TEXT NOT NULL,
+          custom_name TEXT,
+          merged_into_project_id TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_project_management_merged ON project_management(merged_into_project_id);
+        ",
+    )
 }
 
 fn seed_defaults(conn: &Connection) -> rusqlite::Result<()> {
@@ -2910,21 +3038,68 @@ fn upsert_project(
     timestamp: &str,
 ) -> Result<String, String> {
     let id = hash(&format!("{provider_id}|{}", path.to_ascii_lowercase()));
-    let display = Path::new(path)
+    let auto_display = Path::new(path)
         .file_name()
         .and_then(|s| s.to_str())
         .filter(|s| !s.is_empty())
         .unwrap_or(path)
         .to_string();
+    let display: String = conn
+        .query_row(
+            "SELECT custom_name FROM project_management WHERE id = ?1 AND custom_name IS NOT NULL",
+            params![id],
+            |r| r.get::<_, String>(0),
+        )
+        .unwrap_or(auto_display);
     let now = now();
     conn.execute(
         "INSERT INTO projects (id, provider_id, display_name, path, normalized_path_hash, first_seen_at, last_seen_at, created_at, updated_at)
          VALUES (?1, ?2, ?3, ?4, ?1, ?5, ?5, ?6, ?6)
-         ON CONFLICT(id) DO UPDATE SET last_seen_at = MAX(last_seen_at, excluded.last_seen_at), updated_at = excluded.updated_at",
+         ON CONFLICT(id) DO UPDATE SET display_name = CASE WHEN excluded.display_name != display_name THEN excluded.display_name ELSE display_name END,
+                                          last_seen_at = MAX(last_seen_at, excluded.last_seen_at), updated_at = excluded.updated_at",
         params![id, provider_id, display, path, timestamp, now],
     )
     .map_err(to_string)?;
     Ok(id)
+}
+
+fn apply_project_management(conn: &Connection) -> rusqlite::Result<()> {
+    // Apply custom names to projects table.
+    conn.execute(
+        "UPDATE projects
+         SET display_name = (
+             SELECT pm.custom_name FROM project_management pm
+             WHERE pm.id = projects.id AND pm.custom_name IS NOT NULL
+         )
+         WHERE id IN (
+             SELECT id FROM project_management WHERE custom_name IS NOT NULL
+         )",
+        [],
+    )?;
+
+    // Apply merges: redirect events and conversations, then delete merged projects.
+    let mut stmt = conn.prepare(
+        "SELECT id, merged_into_project_id FROM project_management
+         WHERE merged_into_project_id IS NOT NULL"
+    )?;
+    let merges: Vec<(String, String)> = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(stmt);
+
+    for (source_id, target_id) in merges {
+        conn.execute(
+            "UPDATE usage_events SET project_id = ?1 WHERE project_id = ?2",
+            params![target_id, source_id],
+        )?;
+        conn.execute(
+            "UPDATE conversations SET project_id = ?1 WHERE project_id = ?2",
+            params![target_id, source_id],
+        )?;
+        conn.execute("DELETE FROM projects WHERE id = ?1", params![source_id])?;
+    }
+
+    Ok(())
 }
 
 fn upsert_conversation(
@@ -3177,7 +3352,7 @@ fn query_recent_sessions(conn: &Connection, provider_filter: Option<&str>, offse
     }.map_err(to_string)?;
 
     let sql = format!(
-        "SELECT u.id, u.provider_id, pr.display_name, u.model, u.event_type, u.timestamp,
+        "SELECT u.id, u.provider_id, pr.display_name, pr.path, u.model, u.event_type, u.timestamp,
          u.input_tokens, (u.input_tokens - u.cached_input_tokens), u.output_tokens,
          (u.cached_input_tokens + u.cache_write_tokens + u.cache_read_tokens),
          ((CASE WHEN u.cache_read_tokens > 0 OR u.cache_write_tokens > 0 THEN u.input_tokens ELSE max(u.input_tokens - u.cached_input_tokens, 0) END) + u.output_tokens + u.cached_input_tokens + u.cache_write_tokens + u.cache_read_tokens + u.reasoning_tokens + u.tool_tokens + u.unknown_tokens),
@@ -3193,25 +3368,25 @@ fn query_recent_sessions(conn: &Connection, provider_filter: Option<&str>, offse
     let mut stmt = conn.prepare(&sql).map_err(to_string)?;
     let map_row = |r: &rusqlite::Row| -> rusqlite::Result<SessionSummary> {
         let provider_id: String = r.get(1)?;
-        let model: Option<String> = r.get(3)?;
+        let model: Option<String> = r.get(4)?;
         let event = ParsedEvent {
             provider_id: provider_id.clone(),
             product_id: None,
-            timestamp: r.get(5)?,
+            timestamp: r.get(6)?,
             project_path: None,
             conversation_id: None,
             message_id: None,
             request_id: None,
             model: model.clone(),
-            event_type: r.get(4)?,
-            input_tokens: r.get(6)?,
-            output_tokens: r.get(8)?,
-            cached_input_tokens: r.get(13)?,
-            cache_write_tokens: r.get(14)?,
-            cache_read_tokens: r.get(15)?,
-            reasoning_tokens: r.get(16)?,
-            tool_tokens: r.get(17)?,
-            unknown_tokens: r.get(18)?,
+            event_type: r.get(5)?,
+            input_tokens: r.get(7)?,
+            output_tokens: r.get(9)?,
+            cached_input_tokens: r.get(14)?,
+            cache_write_tokens: r.get(15)?,
+            cache_read_tokens: r.get(16)?,
+            reasoning_tokens: r.get(17)?,
+            tool_tokens: r.get(18)?,
+            unknown_tokens: r.get(19)?,
             source_offset: None,
             raw_record_hash: String::new(),
             confidence: String::new(),
@@ -3225,22 +3400,23 @@ fn query_recent_sessions(conn: &Connection, provider_filter: Option<&str>, offse
             id: r.get(0)?,
             provider_id,
             project_name: r.get(2)?,
+            project_path: r.get(3)?,
             model,
-            event_type: r.get(4)?,
-            timestamp: r.get(5)?,
-            input_tokens: r.get(6)?,
+            event_type: r.get(5)?,
+            timestamp: r.get(6)?,
+            input_tokens: r.get(7)?,
             effective_input_tokens: (event.input_tokens
                 - if event.cache_read_tokens > 0 || event.cache_write_tokens > 0 { 0 } else { event.cached_input_tokens })
                 .max(0),
-            output_tokens: r.get(8)?,
-            cached_tokens: r.get(9)?,
-            total_tokens: r.get(10)?,
+            output_tokens: r.get(9)?,
+            cached_tokens: r.get(10)?,
+            total_tokens: r.get(11)?,
             input_cost: cost_parts.map(|parts| parts.0),
             output_cost: cost_parts.map(|parts| parts.1),
             cached_cost: cost_parts.map(|parts| parts.2),
             other_cost: cost_parts.map(|parts| parts.3),
-            api_equivalent_cost: r.get(11)?,
-            confidence: r.get(12)?,
+            api_equivalent_cost: r.get(12)?,
+            confidence: r.get(13)?,
         })
     };
     let rows = if let Some(pid) = provider_filter {
