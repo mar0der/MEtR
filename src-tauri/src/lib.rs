@@ -924,23 +924,26 @@ fn rebuild_projects(state: State<AppState>) -> Result<Value, String> {
     conn.execute("DELETE FROM projects", [])
         .map_err(to_string)?;
 
-    // Re-infer projects for all events.
+    // Re-infer projects for all events, preferring the original cwd/project_path
+    // captured during parsing (stored in source_project_path) over the log file path.
     let mut stmt = conn
-        .prepare("SELECT id, provider_id, source_file_path, timestamp FROM usage_events")
+        .prepare("SELECT id, provider_id, source_file_path, source_project_path, timestamp FROM usage_events")
         .map_err(to_string)?;
-    let rows: Vec<(String, String, String, String)> = stmt
+    let rows: Vec<(String, String, String, Option<String>, String)> = stmt
         .query_map([], |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
         })
         .map_err(to_string)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(to_string)?;
     drop(stmt);
 
-    for (id, provider_id, source_file_path, timestamp) in &rows {
-        let inferred = infer_project_from_path(Path::new(&source_file_path));
+    for (id, provider_id, source_file_path, source_project_path, timestamp) in &rows {
+        let raw_path = source_project_path
+            .clone()
+            .or_else(|| infer_project_from_path(Path::new(&source_file_path)));
         let project_path = if let Some(root) = custom_root.as_deref() {
-            if let Some(p) = inferred
+            if let Some(p) = raw_path
                 .as_deref()
                 .and_then(|p| project_under_root(Path::new(p), root))
             {
@@ -949,7 +952,7 @@ fn rebuild_projects(state: State<AppState>) -> Result<Value, String> {
                 project_under_root(Path::new(&source_file_path), root)
             }
         } else {
-            inferred
+            raw_path
         };
 
         if let Some(path) = project_path {
@@ -1907,6 +1910,7 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     add_column_if_missing(conn, "sync_config", "last_sync_error", "TEXT")?;
     add_column_if_missing(conn, "sync_config", "last_sync_attempt_at", "TEXT")?;
     add_column_if_missing(conn, "sync_config", "project_root", "TEXT")?;
+    add_column_if_missing(conn, "usage_events", "source_project_path", "TEXT")?;
     Ok(())
 }
 
@@ -2856,9 +2860,9 @@ fn insert_event(
              message_id, request_id, model, event_type, input_tokens, output_tokens, cached_input_tokens, cache_write_tokens,
              cache_read_tokens, reasoning_tokens, tool_tokens, unknown_tokens, official_api_cost_usd, pricing_catalog_id,
              pricing_match_confidence, source_file_path, source_file_modified_at, source_offset, source_hash,
-             raw_record_hash, confidence, warnings_json, created_at, updated_at)
+             raw_record_hash, source_project_path, confidence, warnings_json, created_at, updated_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18,
-             ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?32)",
+             ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33, ?33)",
             params![
                 id,
                 event.provider_id,
@@ -2889,6 +2893,7 @@ fn insert_event(
                 event.source_offset,
                 source_hash,
                 event.raw_record_hash,
+                event.project_path.as_deref(),
                 event.confidence,
                 serde_json::to_string(&event.warnings).unwrap_or_else(|_| "[]".into()),
                 now
@@ -3578,6 +3583,7 @@ fn resolve_event_project_path(
     let candidate = event
         .project_path
         .clone()
+        .map(|p| expand_tilde(&p).to_string_lossy().to_string())
         .or_else(|| infer_project_from_path(file_path));
 
     if let Some(root) = custom_root {
