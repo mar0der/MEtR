@@ -2078,6 +2078,7 @@ dependencies = [
  "tauri-plugin-process",
  "tauri-plugin-updater",
  "thiserror 2.0.18",
+ "tokio",
  "uuid",
  "walkdir",
  "whoami",

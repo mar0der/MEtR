@@ -8,8 +8,9 @@ use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use tauri::{Emitter, Manager, State};
+use tokio::sync::Mutex;
 use uuid::Uuid;
 use walkdir::WalkDir;
 
@@ -230,7 +231,7 @@ pub fn run() {
             });
             // Run expensive maintenance in background so UI loads instantly
             let maint_db_path = db_path.join("metr.db");
-            std::thread::spawn(move || {
+            tauri::async_runtime::spawn_blocking(move || {
                 if let Ok(conn) = Connection::open(&maint_db_path) {
                     let _ = cleanup_known_bad_imports(&conn);
                     let _ = recalculate_event_costs(&conn);
@@ -314,7 +315,7 @@ fn detect_sources() -> Result<Vec<DetectedSource>, String> {
 
 #[tauri::command]
 fn list_sources(state: State<AppState>) -> Result<Vec<Source>, String> {
-    let conn = state.db.lock().map_err(to_string)?;
+    let conn = state.db.blocking_lock();
     query_sources(&conn)
 }
 
@@ -332,7 +333,7 @@ fn add_source(state: State<AppState>, input: AddSourceInput) -> Result<Source, S
         _ => infer_source(&path),
     };
     let now = now();
-    let conn = state.db.lock().map_err(to_string)?;
+    let conn = state.db.blocking_lock();
     ensure_provider(&conn, &provider_id, provider_display_name(&provider_id)).map_err(to_string)?;
     let existing: Option<String> = conn
         .query_row(
@@ -366,7 +367,7 @@ fn add_source(state: State<AppState>, input: AddSourceInput) -> Result<Source, S
 
 #[tauri::command]
 fn remove_source(state: State<AppState>, source_id: String) -> Result<(), String> {
-    let conn = state.db.lock().map_err(to_string)?;
+    let conn = state.db.blocking_lock();
     conn.execute("DELETE FROM log_sources WHERE id = ?1", params![source_id])
         .map_err(to_string)?;
     Ok(())
@@ -374,7 +375,7 @@ fn remove_source(state: State<AppState>, source_id: String) -> Result<(), String
 
 #[tauri::command]
 fn clear_parsed_data(state: State<AppState>) -> Result<(), String> {
-    let conn = state.db.lock().map_err(to_string)?;
+    let conn = state.db.blocking_lock();
     conn.execute_batch(
         "
         DELETE FROM usage_events;
@@ -394,7 +395,7 @@ fn clear_parsed_data(state: State<AppState>) -> Result<(), String> {
 
 #[tauri::command]
 fn list_projects(state: State<AppState>) -> Result<Value, String> {
-    let conn = state.db.lock().map_err(to_string)?;
+    let conn = state.db.blocking_lock();
     let mut stmt = conn
         .prepare(
             "SELECT p.id, p.provider_id, p.display_name, p.path, pm.custom_name, pm.merged_into_project_id
@@ -430,7 +431,7 @@ fn list_projects(state: State<AppState>) -> Result<Value, String> {
 #[tauri::command]
 fn rename_project(state: State<AppState>, project_id: String, custom_name: Option<String>) -> Result<Value, String> {
     {
-        let conn = state.db.lock().map_err(to_string)?;
+        let conn = state.db.blocking_lock();
         let provider_id: String = conn
             .query_row("SELECT provider_id FROM projects WHERE id = ?1", params![project_id], |r| r.get(0))
             .map_err(|_| "Project not found")?;
@@ -459,7 +460,7 @@ fn rename_project(state: State<AppState>, project_id: String, custom_name: Optio
 #[tauri::command]
 fn merge_projects(state: State<AppState>, target_project_id: String, source_project_ids: Vec<String>) -> Result<Value, String> {
     {
-        let conn = state.db.lock().map_err(to_string)?;
+        let conn = state.db.blocking_lock();
         let now = now();
         for source_id in &source_project_ids {
             if source_id == &target_project_id {
@@ -484,7 +485,7 @@ fn merge_projects(state: State<AppState>, target_project_id: String, source_proj
 #[tauri::command]
 fn unmerge_project(state: State<AppState>, project_id: String) -> Result<Value, String> {
     {
-        let conn = state.db.lock().map_err(to_string)?;
+        let conn = state.db.blocking_lock();
         conn.execute(
             "UPDATE project_management SET merged_into_project_id = NULL, updated_at = ?1 WHERE id = ?2",
             params![now(), project_id],
@@ -524,7 +525,7 @@ fn open_project_path(path: String) -> Result<(), String> {
 
 #[tauri::command]
 fn rescan_all(state: State<AppState>) -> Result<Value, String> {
-    let conn = state.db.lock().map_err(to_string)?;
+    let conn = state.db.blocking_lock();
     let sources = query_sources(&conn)?;
     let mut imported = 0usize;
     for source in sources.into_iter().filter(|s| s.enabled) {
@@ -535,7 +536,7 @@ fn rescan_all(state: State<AppState>) -> Result<Value, String> {
 
 #[tauri::command]
 fn rescan_all_full(state: State<AppState>) -> Result<Value, String> {
-    let conn = state.db.lock().map_err(to_string)?;
+    let conn = state.db.blocking_lock();
     let sources = query_sources(&conn)?;
     let mut imported = 0usize;
     for source in sources.into_iter().filter(|s| s.enabled) {
@@ -546,7 +547,7 @@ fn rescan_all_full(state: State<AppState>) -> Result<Value, String> {
 
 #[tauri::command]
 fn rescan_source(state: State<AppState>, source_id: String) -> Result<Value, String> {
-    let conn = state.db.lock().map_err(to_string)?;
+    let conn = state.db.blocking_lock();
     let source = query_source(&conn, &source_id)?;
     let imported = scan_source(&conn, &source, false)?;
     Ok(serde_json::json!({ "imported": imported }))
@@ -554,7 +555,7 @@ fn rescan_source(state: State<AppState>, source_id: String) -> Result<Value, Str
 
 #[tauri::command]
 fn get_dashboard_summary(state: State<AppState>) -> Result<DashboardSummary, String> {
-    let conn = state.db.lock().map_err(to_string)?;
+    let conn = state.db.blocking_lock();
     let providers = query_provider_summaries(&conn)?;
     let top_projects = query_top_projects(&conn)?;
     let (recent_sessions, _) = query_recent_sessions(&conn, None, 0, 30)?;
@@ -591,14 +592,14 @@ fn get_recent_sessions(
     offset: usize,
     limit: usize,
 ) -> Result<RecentSessionsResult, String> {
-    let conn = state.db.lock().map_err(to_string)?;
+    let conn = state.db.blocking_lock();
     let (sessions, total_count) = query_recent_sessions(&conn, provider_id.as_deref(), offset, limit)?;
     Ok(RecentSessionsResult { sessions, total_count })
 }
 
 #[tauri::command]
 fn list_subscriptions(state: State<AppState>) -> Result<Vec<Subscription>, String> {
-    let conn = state.db.lock().map_err(to_string)?;
+    let conn = state.db.blocking_lock();
     let mut stmt = conn
         .prepare(
             "SELECT id, provider_id, product_name, monthly_amount, currency, billing_anchor_day, enabled
@@ -632,7 +633,7 @@ fn create_subscription(
     if input.billing_anchor_day < 1 || input.billing_anchor_day > 28 {
         return Err("Billing anchor day must be between 1 and 28 (not all months have 29-31 days).".to_string());
     }
-    let conn = state.db.lock().map_err(to_string)?;
+    let conn = state.db.blocking_lock();
     ensure_provider(
         &conn,
         &input.provider_id,
@@ -677,7 +678,7 @@ fn create_subscription(
 
 #[tauri::command]
 fn delete_subscription(state: State<AppState>, id: String) -> Result<(), String> {
-    let conn = state.db.lock().map_err(to_string)?;
+    let conn = state.db.blocking_lock();
     conn.execute("DELETE FROM subscriptions WHERE id = ?1", params![id])
         .map_err(to_string)?;
     Ok(())
@@ -685,7 +686,7 @@ fn delete_subscription(state: State<AppState>, id: String) -> Result<(), String>
 
 #[tauri::command]
 fn list_pricing_catalog(state: State<AppState>) -> Result<Vec<Value>, String> {
-    let conn = state.db.lock().map_err(to_string)?;
+    let conn = state.db.blocking_lock();
     let mut stmt = conn
         .prepare(
             "SELECT id, provider_id, model, aliases_json, input_per_1m, output_per_1m,
@@ -733,7 +734,7 @@ struct AddPricingInput {
 
 #[tauri::command]
 fn add_pricing(state: State<AppState>, input: AddPricingInput) -> Result<Value, String> {
-    let conn = state.db.lock().map_err(to_string)?;
+    let conn = state.db.blocking_lock();
     let id = format!("{}:{}", input.provider_id, input.model.to_ascii_lowercase());
     let now_ts = now();
     conn.execute(
@@ -775,7 +776,7 @@ fn add_pricing(state: State<AppState>, input: AddPricingInput) -> Result<Value, 
 
 #[tauri::command]
 fn list_missing_models(state: State<AppState>) -> Result<Vec<Value>, String> {
-    let conn = state.db.lock().map_err(to_string)?;
+    let conn = state.db.blocking_lock();
     let mut stmt = conn
         .prepare(
             "SELECT u.provider_id, u.model, COUNT(*) as event_count
@@ -808,7 +809,7 @@ fn list_missing_models(state: State<AppState>) -> Result<Vec<Value>, String> {
 
 #[tauri::command]
 fn pull_pricing(state: State<AppState>) -> Result<Value, String> {
-    let conn = state.db.lock().map_err(to_string)?;
+    let conn = state.db.blocking_lock();
     let count = pull_pricing_from_server(&conn)?;
     recalculate_event_costs(&conn).map_err(to_string)?;
     Ok(serde_json::json!({ "pulled": count }))
@@ -816,7 +817,7 @@ fn pull_pricing(state: State<AppState>) -> Result<Value, String> {
 
 #[tauri::command]
 fn push_pricing(state: State<AppState>) -> Result<Value, String> {
-    let conn = state.db.lock().map_err(to_string)?;
+    let conn = state.db.blocking_lock();
     ensure_sync_config(&conn)?;
     let (token, server_url): (String, String) = conn
         .query_row(
@@ -979,7 +980,7 @@ fn get_sync_config(conn: &Connection) -> Result<SyncStatus, String> {
 
 #[tauri::command]
 fn configure_sync_server(state: State<AppState>, server_url: String) -> Result<SyncStatus, String> {
-    let conn = state.db.lock().map_err(to_string)?;
+    let conn = state.db.blocking_lock();
     ensure_sync_config(&conn)?;
     let now = now();
     conn.execute(
@@ -992,7 +993,7 @@ fn configure_sync_server(state: State<AppState>, server_url: String) -> Result<S
 
 #[tauri::command]
 fn get_project_root(state: State<AppState>) -> Result<Option<String>, String> {
-    let conn = state.db.lock().map_err(to_string)?;
+    let conn = state.db.blocking_lock();
     ensure_sync_config(&conn)?;
     let root: Option<String> = conn
         .query_row(
@@ -1006,7 +1007,7 @@ fn get_project_root(state: State<AppState>) -> Result<Option<String>, String> {
 
 #[tauri::command]
 fn set_project_root(state: State<AppState>, project_root: Option<String>) -> Result<SyncStatus, String> {
-    let conn = state.db.lock().map_err(to_string)?;
+    let conn = state.db.blocking_lock();
     ensure_sync_config(&conn)?;
     let now = now();
     let value = project_root.as_deref().unwrap_or("");
@@ -1020,7 +1021,7 @@ fn set_project_root(state: State<AppState>, project_root: Option<String>) -> Res
 
 #[tauri::command]
 fn rebuild_projects(state: State<AppState>) -> Result<Value, String> {
-    let conn = state.db.lock().map_err(to_string)?;
+    let conn = state.db.blocking_lock();
     ensure_sync_config(&conn)?;
     let custom_root = project_root_from_conn(&conn);
 
@@ -1093,7 +1094,7 @@ fn rebuild_projects(state: State<AppState>) -> Result<Value, String> {
 
 #[tauri::command]
 fn login_sync(state: State<AppState>, input: LoginInput) -> Result<SyncStatus, String> {
-    let conn = state.db.lock().map_err(to_string)?;
+    let conn = state.db.blocking_lock();
     ensure_sync_config(&conn)?;
 
     let device_name = format!(
@@ -1150,7 +1151,7 @@ fn login_sync(state: State<AppState>, input: LoginInput) -> Result<SyncStatus, S
 
 #[tauri::command]
 fn logout_sync(state: State<AppState>) -> Result<SyncStatus, String> {
-    let conn = state.db.lock().map_err(to_string)?;
+    let conn = state.db.blocking_lock();
     ensure_sync_config(&conn)?;
 
     if let Ok((Some(token), server_url)) = conn.query_row(
@@ -1180,7 +1181,7 @@ fn logout_sync(state: State<AppState>) -> Result<SyncStatus, String> {
 
 #[tauri::command]
 fn get_sync_status(state: State<AppState>) -> Result<SyncStatus, String> {
-    let conn = state.db.lock().map_err(to_string)?;
+    let conn = state.db.blocking_lock();
     get_sync_config(&conn)
 }
 
@@ -1188,7 +1189,7 @@ fn get_sync_status(state: State<AppState>) -> Result<SyncStatus, String> {
 async fn sync_now(state: State<'_, AppState>, app: tauri::AppHandle) -> Result<SyncResult, String> {
     let db = state.db.clone();
     {
-        let conn = db.lock().map_err(to_string)?;
+        let conn = db.lock().await;
         let now = now();
         conn.execute(
             "UPDATE sync_config SET last_sync_attempt_at = ?1, updated_at = ?1 WHERE id = 1",
@@ -1201,7 +1202,7 @@ async fn sync_now(state: State<'_, AppState>, app: tauri::AppHandle) -> Result<S
     let progress_tx_clone = progress_tx.clone();
 
     let sync_task = tauri::async_runtime::spawn_blocking(move || {
-        let conn = db.lock().map_err(to_string)?;
+        let conn = db.blocking_lock();
         let result = perform_sync(&conn, false, |uploaded, total| {
             let _ = progress_tx_clone.send((uploaded, total));
         });
@@ -1221,7 +1222,7 @@ async fn sync_now(state: State<'_, AppState>, app: tauri::AppHandle) -> Result<S
     let result = match sync_task.await {
         Ok(Ok(result)) => Ok(result),
         Ok(Err(err)) => {
-            let conn = state.db.lock().map_err(to_string)?;
+            let conn = state.db.lock().await;
             let _ = conn.execute(
                 "UPDATE sync_config SET last_sync_error = ?1, updated_at = ?2 WHERE id = 1",
                 params![&err, now()],
@@ -1230,7 +1231,7 @@ async fn sync_now(state: State<'_, AppState>, app: tauri::AppHandle) -> Result<S
         }
         Err(e) => {
             let err = format!("Sync task failed: {:?}", e);
-            let conn = state.db.lock().map_err(to_string)?;
+            let conn = state.db.lock().await;
             let _ = conn.execute(
                 "UPDATE sync_config SET last_sync_error = ?1, updated_at = ?2 WHERE id = 1",
                 params![&err, now()],
@@ -1247,7 +1248,7 @@ async fn sync_now(state: State<'_, AppState>, app: tauri::AppHandle) -> Result<S
 async fn full_resync(state: State<'_, AppState>, app: tauri::AppHandle) -> Result<SyncResult, String> {
     let db = state.db.clone();
     {
-        let conn = db.lock().map_err(to_string)?;
+        let conn = db.lock().await;
         let now = now();
         conn.execute(
             "UPDATE sync_config SET last_sync_attempt_at = ?1, updated_at = ?1 WHERE id = 1",
@@ -1260,7 +1261,7 @@ async fn full_resync(state: State<'_, AppState>, app: tauri::AppHandle) -> Resul
     let progress_tx_clone = progress_tx.clone();
 
     let sync_task = tauri::async_runtime::spawn_blocking(move || {
-        let conn = db.lock().map_err(to_string)?;
+        let conn = db.blocking_lock();
         let result = perform_sync(&conn, true, |uploaded, total| {
             let _ = progress_tx_clone.send((uploaded, total));
         });
@@ -1280,7 +1281,7 @@ async fn full_resync(state: State<'_, AppState>, app: tauri::AppHandle) -> Resul
     let result = match sync_task.await {
         Ok(Ok(result)) => Ok(result),
         Ok(Err(err)) => {
-            let conn = state.db.lock().map_err(to_string)?;
+            let conn = state.db.lock().await;
             let _ = conn.execute(
                 "UPDATE sync_config SET last_sync_error = ?1, updated_at = ?2 WHERE id = 1",
                 params![&err, now()],
@@ -1289,7 +1290,7 @@ async fn full_resync(state: State<'_, AppState>, app: tauri::AppHandle) -> Resul
         }
         Err(e) => {
             let err = format!("Sync task failed: {:?}", e);
-            let conn = state.db.lock().map_err(to_string)?;
+            let conn = state.db.lock().await;
             let _ = conn.execute(
                 "UPDATE sync_config SET last_sync_error = ?1, updated_at = ?2 WHERE id = 1",
                 params![&err, now()],
@@ -1572,7 +1573,7 @@ where
 
 #[tauri::command]
 fn debug_sync_state(state: State<AppState>) -> Result<Value, String> {
-    let conn = state.db.lock().map_err(to_string)?;
+    let conn = state.db.blocking_lock();
 
     let pending: i64 = conn
         .query_row("SELECT COUNT(*) FROM usage_events WHERE synced_at IS NULL", [], |r| r.get(0))
