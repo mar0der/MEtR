@@ -208,7 +208,6 @@ function App() {
   const [missingModels, setMissingModels] = useState<MissingModel[]>([]);
   const [activeTab, setActiveTab] = useState<Tab>("all");
   const [status, setStatus] = useState("Ready");
-  const [loading, setLoading] = useState(false);
   const [manualPath, setManualPath] = useState("");
   const [subForm, setSubForm] = useState({
     provider_id: "openai",
@@ -224,6 +223,13 @@ function App() {
     password: ""
   });
   const [syncLoading, setSyncLoading] = useState(false);
+  const [scanLoading, setScanLoading] = useState(false);
+  const [fullScanLoading, setFullScanLoading] = useState(false);
+  const [sourceLoading, setSourceLoading] = useState(false);
+  const [detectLoading, setDetectLoading] = useState(false);
+  const [refreshLoading, setRefreshLoading] = useState(false);
+  const [updateCheckLoading, setUpdateCheckLoading] = useState(false);
+  const [clearLoading, setClearLoading] = useState(false);
   const [projectRootLoading, setProjectRootLoading] = useState(false);
   const [pricingLoading, setPricingLoading] = useState(false);
   const [projectRoot, setProjectRoot] = useState<string | null>(null);
@@ -268,7 +274,7 @@ function App() {
   };
 
   const refresh = async (showBusy = true) => {
-    if (showBusy) setLoading(true);
+    if (showBusy) setRefreshLoading(true);
     try {
       const [nextSummary, nextSources, nextSubs, nextPricing, nextMissing, nextSync, nextProjectRoot, nextProjects] = await Promise.all([
         api<DashboardSummary>("get_dashboard_summary"),
@@ -296,7 +302,7 @@ function App() {
     } catch (error) {
       setStatus(message(error));
     } finally {
-      if (showBusy) setLoading(false);
+      if (showBusy) setRefreshLoading(false);
     }
   };
 
@@ -382,7 +388,8 @@ function App() {
   }, [activeTab, sessionPage]);
 
   const runDetection = async () => {
-    setLoading(true);
+    if (detectLoading) return;
+    setDetectLoading(true);
     try {
       const result = await api<DetectedSource[]>("detect_sources");
       setDetected(result);
@@ -390,7 +397,7 @@ function App() {
     } catch (error) {
       setStatus(message(error));
     } finally {
-      setLoading(false);
+      setDetectLoading(false);
     }
   };
 
@@ -407,14 +414,22 @@ function App() {
   };
 
   const addManual = async () => {
-    if (!manualPath.trim()) return;
-    await api("add_source", { input: { path: manualPath.trim() } });
-    setManualPath("");
-    await refresh(false);
+    if (!manualPath.trim() || sourceLoading) return;
+    setSourceLoading(true);
+    try {
+      await api("add_source", { input: { path: manualPath.trim() } });
+      setManualPath("");
+      await refresh(false);
+    } catch (error) {
+      setStatus(message(error));
+    } finally {
+      setSourceLoading(false);
+    }
   };
 
   const rescanAll = async () => {
-    setLoading(true);
+    if (scanLoading) return;
+    setScanLoading(true);
     setStatus("Scanning new and changed files...");
     try {
       const result = await api<{ imported: number }>("rescan_all");
@@ -423,12 +438,13 @@ function App() {
     } catch (error) {
       setStatus(message(error));
     } finally {
-      setLoading(false);
+      setScanLoading(false);
     }
   };
 
   const fullRescanAll = async () => {
-    setLoading(true);
+    if (fullScanLoading) return;
+    setFullScanLoading(true);
     setStatus("Full rescan running...");
     try {
       const result = await api<{ imported: number }>("rescan_all_full");
@@ -437,7 +453,7 @@ function App() {
     } catch (error) {
       setStatus(message(error));
     } finally {
-      setLoading(false);
+      setFullScanLoading(false);
     }
   };
 
@@ -445,7 +461,7 @@ function App() {
     if (!window.confirm("WARNING: This will permanently delete all model calls, projects, conversations, and scan history. Your source folders and subscriptions will remain. This cannot be undone.")) {
       return;
     }
-    setLoading(true);
+    setClearLoading(true);
     setStatus("Clearing all data...");
     try {
       await api("clear_parsed_data");
@@ -456,7 +472,7 @@ function App() {
     } catch (error) {
       setStatus(message(error));
     } finally {
-      setLoading(false);
+      setClearLoading(false);
     }
   };
 
@@ -669,19 +685,31 @@ function App() {
           <p>Local LLM usage, subscriptions, and API-equivalent cost.</p>
         </div>
         <div className="actions">
-          <button className="icon-button" onClick={() => void refresh(true)} disabled={loading} title="Refresh">
-            <RefreshCw size={17} className={loading ? "spin" : undefined} />
+          <button className="icon-button" onClick={() => void refresh(true)} disabled={refreshLoading} title="Refresh">
+            <RefreshCw size={17} className={refreshLoading ? "spin" : undefined} />
           </button>
-          <button className="icon-button" onClick={() => void checkForUpdates(true)} disabled={loading} title="Check for Updates">
-            <Download size={17} />
+          <button
+            className="icon-button"
+            onClick={async () => {
+              setUpdateCheckLoading(true);
+              try {
+                await checkForUpdates(true);
+              } finally {
+                setUpdateCheckLoading(false);
+              }
+            }}
+            disabled={updateCheckLoading}
+            title="Check for Updates"
+          >
+            <Download size={17} className={updateCheckLoading ? "spin" : undefined} />
           </button>
-          <button className="primary-button" onClick={rescanAll} disabled={loading}>
-            <Activity size={16} className={loading ? "spin" : undefined} />
-            {loading ? "Working..." : "Scan New"}
+          <button className="primary-button" onClick={rescanAll} disabled={scanLoading || fullScanLoading}>
+            <Activity size={16} className={scanLoading ? "spin" : undefined} />
+            {scanLoading ? "Scanning..." : "Scan New"}
           </button>
-          <button className="secondary-button" onClick={fullRescanAll} disabled={loading}>
-            <Database size={16} className={loading ? "spin" : undefined} />
-            {loading ? "Updating..." : "Full Rescan"}
+          <button className="secondary-button" onClick={fullRescanAll} disabled={scanLoading || fullScanLoading}>
+            <Database size={16} className={fullScanLoading ? "spin" : undefined} />
+            {fullScanLoading ? "Rescanning..." : "Full Rescan"}
           </button>
         </div>
       </header>
@@ -702,7 +730,7 @@ function App() {
       </nav>
 
       <div className="status-line">
-        <span className="status-message">{loading ? <span className="spinner" /> : null}{status}</span>
+        <span className="status-message">{(refreshLoading || scanLoading || fullScanLoading || syncLoading || projectRootLoading || pricingLoading || sourceLoading || detectLoading || updateCheckLoading) ? <span className="spinner" /> : null}{status}</span>
         <span className="privacy">
           {syncStatus?.logged_in ? (
             <><Cloud size={14} /> Connected to {syncStatus.server_url.replace(/^https:\/\//, "")}</>
@@ -742,6 +770,10 @@ function App() {
             syncForm={syncForm}
             setSyncForm={setSyncForm}
             syncLoading={syncLoading}
+            scanLoading={scanLoading}
+            fullScanLoading={fullScanLoading}
+            sourceLoading={sourceLoading}
+            detectLoading={detectLoading}
             projectRootLoading={projectRootLoading}
             pricingLoading={pricingLoading}
             projectRoot={projectRoot}
@@ -759,6 +791,7 @@ function App() {
             onPushPricing={doPushPricing}
             onAddLocalPricing={addLocalPricing}
             onClearAllData={clearAllData}
+            clearLoading={clearLoading}
           />
         </ErrorBoundary>
       ) : (
@@ -1100,6 +1133,10 @@ function SettingsView(props: {
   syncForm: { server_url: string; login: string; password: string };
   setSyncForm: (value: { server_url: string; login: string; password: string }) => void;
   syncLoading: boolean;
+  scanLoading: boolean;
+  fullScanLoading: boolean;
+  sourceLoading: boolean;
+  detectLoading: boolean;
   projectRootLoading: boolean;
   pricingLoading: boolean;
   projectRoot: string | null;
@@ -1117,6 +1154,7 @@ function SettingsView(props: {
   onPushPricing: () => void;
   onAddLocalPricing: (providerId: string, model: string) => void;
   onClearAllData: () => void;
+  clearLoading: boolean;
 }) {
   return (
     <div className="settings-grid">
@@ -1138,12 +1176,12 @@ function SettingsView(props: {
             )}
             <div className="form-row">
               <button className="primary-button" onClick={props.onSync} disabled={props.syncLoading}>
-                <RefreshCw size={14} />
+                <RefreshCw size={14} className={props.syncLoading ? "spin" : undefined} />
                 {props.syncLoading ? "Syncing..." : "Sync Now"}
               </button>
               <button className="secondary-button" onClick={props.onFullResync} disabled={props.syncLoading}>
-                <RefreshCw size={14} />
-                Full Resync
+                <RefreshCw size={14} className={props.syncLoading ? "spin" : undefined} />
+                {props.syncLoading ? "Resyncing..." : "Full Resync"}
               </button>
               <button className="secondary-button" onClick={props.onLogout} disabled={props.syncLoading}>
                 Logout
@@ -1215,7 +1253,7 @@ function SettingsView(props: {
             disabled={props.projectRootLoading}
             title="Reclassify all existing events using the current root"
           >
-            <RefreshCw size={14} />
+            <RefreshCw size={14} className={props.projectRootLoading ? "spin" : undefined} />
             {props.projectRootLoading ? "Rebuilding..." : "Rebuild Projects"}
           </button>
         </div>
@@ -1239,9 +1277,9 @@ function SettingsView(props: {
       <section className="panel">
         <h2><Trash2 size={16} /> Danger Zone</h2>
         <p className="muted">Delete all parsed model calls, projects, and conversations. Your source folders and subscriptions stay intact. Project custom names and merges are preserved.</p>
-        <button className="secondary-button" onClick={props.onClearAllData} style={{ borderColor: "#ef4444", color: "#ef4444" }}>
-          <Trash2 size={14} />
-          Clear All Data
+        <button className="secondary-button" onClick={props.onClearAllData} disabled={props.clearLoading} style={{ borderColor: "#ef4444", color: "#ef4444" }}>
+          <Trash2 size={14} className={props.clearLoading ? "spin" : undefined} />
+          {props.clearLoading ? "Clearing..." : "Clear All Data"}
         </button>
       </section>
 
@@ -1252,13 +1290,17 @@ function SettingsView(props: {
             value={props.manualPath}
             onChange={(event) => props.setManualPath(event.target.value)}
             placeholder="Paste a folder path, for example C:\\Users\\you\\.claude"
+            disabled={props.sourceLoading}
           />
-          <button className="primary-button" onClick={props.addManual}>
-            <FolderPlus size={16} />
-            Add
+          <button className="primary-button" onClick={props.addManual} disabled={props.sourceLoading}>
+            <FolderPlus size={16} className={props.sourceLoading ? "spin" : undefined} />
+            {props.sourceLoading ? "Adding..." : "Add"}
           </button>
         </div>
-        <button className="secondary-button" onClick={props.runDetection}>Detect standard folders</button>
+        <button className="secondary-button" onClick={props.runDetection} disabled={props.detectLoading}>
+          <RefreshCw size={14} className={props.detectLoading ? "spin" : undefined} />
+          {props.detectLoading ? "Detecting..." : "Detect standard folders"}
+        </button>
         <table>
           <thead>
             <tr>
@@ -1356,11 +1398,11 @@ function SettingsView(props: {
         <h2>Pricing Catalog</h2>
         <div className="form-row">
           <button className="primary-button" onClick={props.onPullPricing} disabled={props.pricingLoading || !props.syncStatus?.logged_in} title={props.syncStatus?.logged_in ? "Pull latest prices from central server" : "Log in to sync first"}>
-            <RefreshCw size={14} />
+            <RefreshCw size={14} className={props.pricingLoading ? "spin" : undefined} />
             {props.pricingLoading ? "Pulling..." : "Pull from Server"}
           </button>
           <button className="secondary-button" onClick={props.onPushPricing} disabled={props.pricingLoading || !props.syncStatus?.logged_in} title={props.syncStatus?.logged_in ? "Push local prices to central server" : "Log in to sync first"}>
-            <Cloud size={14} />
+            <Cloud size={14} className={props.pricingLoading ? "spin" : undefined} />
             {props.pricingLoading ? "Pushing..." : "Push to Server"}
           </button>
         </div>
