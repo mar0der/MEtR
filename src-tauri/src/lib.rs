@@ -15,6 +15,9 @@ use walkdir::WalkDir;
 
 const MAX_SCAN_FILES_PER_SOURCE: usize = 50_000;
 const PARSER_VERSION: &str = "0.1.9";
+const KEYRING_SERVICE: &str = "com.petarpetkov.metr.sync";
+const KEYRING_USERNAME: &str = "auth_token";
+const OFFICIAL_SERVER_HOST: &str = "metr.petarpetkov.com";
 
 struct AppState {
     db: Arc<Mutex<Connection>>,
@@ -920,6 +923,124 @@ fn default_project_root() -> Option<String> {
     } else {
         None
     }
+}
+
+fn keyring_entry() -> Result<keyring::Entry, keyring::Error> {
+    keyring::Entry::new(KEYRING_SERVICE, KEYRING_USERNAME)
+}
+
+fn get_sync_token(_conn: &Connection) -> Result<Option<String>, String> {
+    match keyring_entry() {
+        Ok(entry) => match entry.get_password() {
+            Ok(token) if token.is_empty() => Ok(None),
+            Ok(token) => Ok(Some(token)),
+            Err(keyring::Error::NoEntry) => Ok(None),
+            Err(e) => Err(format!("Failed to read sync token from keychain: {}", e)),
+        },
+        Err(e) => Err(format!("Failed to access keychain: {}", e)),
+    }
+}
+
+fn set_sync_token(_conn: &Connection, token: &str) -> Result<(), String> {
+    let entry = keyring_entry().map_err(|e| format!("Failed to access keychain: {}", e))?;
+    entry
+        .set_password(token)
+        .map_err(|e| format!("Failed to store sync token in keychain: {}", e))
+}
+
+fn delete_sync_token(_conn: &Connection) -> Result<(), String> {
+    match keyring_entry() {
+        Ok(entry) => match entry.delete_credential() {
+            Ok(()) => Ok(()),
+            Err(keyring::Error::NoEntry) => Ok(()),
+            Err(e) => Err(format!("Failed to delete sync token from keychain: {}", e)),
+        },
+        Err(e) => Err(format!("Failed to access keychain: {}", e)),
+    }
+}
+
+fn validate_server_url(url: &str) -> Result<(String, Option<String>), String> {
+    let trimmed = url.trim();
+    if trimmed.is_empty() {
+        return Err("Server URL is required.".to_string());
+    }
+    let parsed = reqwest::Url::parse(trimmed)
+        .map_err(|e| format!("Invalid server URL: {}", e))?;
+    if parsed.scheme() != "https" {
+        return Err("Server URL must use HTTPS.".to_string());
+    }
+    let host = parsed
+        .host_str()
+        .ok_or("Server URL must include a host.")?
+        .to_lowercase();
+    let warning = if host != OFFICIAL_SERVER_HOST {
+        Some(format!(
+            "You are connecting to an unofficial server ({}). The official server is {}.",
+            host, OFFICIAL_SERVER_HOST
+        ))
+    } else {
+        None
+    };
+    Ok((trimmed.to_string(), warning))
+}
+
+fn validate_source_path(path: &str) -> Result<PathBuf, String> {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return Err("Path is empty.".to_string());
+    }
+    if trimmed.starts_with('-') {
+        return Err("Path cannot start with '-'.".to_string());
+    }
+    if trimmed.contains("://") || trimmed.starts_with("\\\\") {
+        return Err("URL-like or network paths are not allowed.".to_string());
+    }
+
+    let expanded = expand_tilde(trimmed);
+    let canonical = std::fs::canonicalize(&expanded)
+        .map_err(|e| format!("Path does not exist: {}", e))?;
+    if !canonical.is_dir() {
+        return Err("Path is not a directory.".to_string());
+    }
+
+    if is_dangerous_root(&canonical) {
+        return Err(format!(
+            "Refusing to add protected system directory: {}",
+            canonical.display()
+        ));
+    }
+    Ok(canonical)
+}
+
+fn is_dangerous_root(path: &Path) -> bool {
+    let dangerous: Vec<PathBuf> = {
+        #[cfg(target_family = "unix")]
+        {
+            vec!["/", "/etc", "/System", "/usr", "/bin", "/sbin", "/opt", "/var", "/tmp", "/dev", "/home", "/Users"]
+                .into_iter()
+                .map(PathBuf::from)
+                .collect()
+        }
+        #[cfg(target_os = "windows")]
+        {
+            vec![
+                "C:\\",
+                "C:\\Windows",
+                "C:\\Program Files",
+                "C:\\Program Files (x86)",
+                "C:\\ProgramData",
+                "C:\\Users",
+            ]
+            .into_iter()
+            .map(PathBuf::from)
+            .collect()
+        }
+    };
+    dangerous.iter().any(|root| {
+        std::fs::canonicalize(root)
+            .map(|r| r == *path)
+            .unwrap_or(false)
+    })
 }
 
 fn get_sync_config(conn: &Connection) -> Result<SyncStatus, String> {
