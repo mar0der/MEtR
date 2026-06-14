@@ -232,6 +232,7 @@ function App() {
   const [clearLoading, setClearLoading] = useState(false);
   const [projectRootLoading, setProjectRootLoading] = useState(false);
   const [pricingLoading, setPricingLoading] = useState(false);
+  const [subscriptionLoading, setSubscriptionLoading] = useState(false);
   const [projectRoot, setProjectRoot] = useState<string | null>(null);
   const [projects, setProjects] = useState<Project[]>([]);
   const [appVersion, setAppVersion] = useState<string>("");
@@ -249,6 +250,10 @@ function App() {
   // Ref to guard against out-of-order fetchSessions responses
   const sessionRequestIdRef = React.useRef(0);
   const previousSessionTabRef = React.useRef(activeTab);
+
+  // Refs for debounced project-root saves and race-condition guard
+  const projectRootDebounceRef = React.useRef<number | undefined>(undefined);
+  const projectRootRequestIdRef = React.useRef(0);
 
   const fetchSessions = async (page: number, provider?: string) => {
     const requestId = ++sessionRequestIdRef.current;
@@ -343,24 +348,68 @@ function App() {
   }, []);
 
   useEffect(() => {
-    const refreshId = window.setInterval(() => {
-      void refresh(false);
-    }, 30_000);
-    const rescanId = window.setInterval(async () => {
-      try {
-        await api("rescan_all");
-        await refresh(false);
-      } catch {
-        // Keep background polling quiet in the UI; manual controls still show status.
-      }
-    }, 300_000);
     const updateCheckId = window.setTimeout(() => {
       void checkForUpdates(false);
     }, 5000);
+
+    // Recursive setTimeout loops that wait for the previous invocation to finish
+    // and pause while the document is hidden to avoid stacking async work.
+    const startRefreshLoop = () => {
+      let running = false;
+      let timeoutId: number | undefined;
+      const tick = async () => {
+        if (document.hidden || running) {
+          timeoutId = window.setTimeout(tick, 30_000);
+          return;
+        }
+        running = true;
+        try {
+          await refresh(false);
+        } catch {
+          // Keep background polling quiet in the UI.
+        } finally {
+          running = false;
+          timeoutId = window.setTimeout(tick, 30_000);
+        }
+      };
+      timeoutId = window.setTimeout(tick, 30_000);
+      return () => {
+        if (timeoutId) window.clearTimeout(timeoutId);
+      };
+    };
+
+    const startRescanLoop = () => {
+      let running = false;
+      let timeoutId: number | undefined;
+      const tick = async () => {
+        if (document.hidden || running) {
+          timeoutId = window.setTimeout(tick, 300_000);
+          return;
+        }
+        running = true;
+        try {
+          await api("rescan_all");
+          await refresh(false);
+        } catch {
+          // Keep background polling quiet in the UI.
+        } finally {
+          running = false;
+          timeoutId = window.setTimeout(tick, 300_000);
+        }
+      };
+      timeoutId = window.setTimeout(tick, 300_000);
+      return () => {
+        if (timeoutId) window.clearTimeout(timeoutId);
+      };
+    };
+
+    const stopRefresh = startRefreshLoop();
+    const stopRescan = startRescanLoop();
+
     return () => {
-      window.clearInterval(refreshId);
-      window.clearInterval(rescanId);
       window.clearTimeout(updateCheckId);
+      stopRefresh();
+      stopRescan();
     };
   }, []);
 
@@ -488,16 +537,50 @@ function App() {
   };
 
   const addSubscription = async () => {
-    await api("create_subscription", {
-      input: {
-        provider_id: subForm.provider_id,
-        product_name: subForm.product_name,
-        monthly_amount: Number(subForm.monthly_amount),
-        currency: subForm.currency,
-        billing_anchor_day: Number(subForm.billing_anchor_day)
-      }
-    });
-    await refresh(false);
+    setSubscriptionLoading(true);
+    try {
+      await api("create_subscription", {
+        input: {
+          provider_id: subForm.provider_id,
+          product_name: subForm.product_name,
+          monthly_amount: Number(subForm.monthly_amount),
+          currency: subForm.currency,
+          billing_anchor_day: Number(subForm.billing_anchor_day)
+        }
+      });
+      setStatus("Subscription added");
+      await refresh(false);
+    } catch (error) {
+      setStatus(message(error));
+    } finally {
+      setSubscriptionLoading(false);
+    }
+  };
+
+  const deleteSubscription = async (id: string) => {
+    setSubscriptionLoading(true);
+    try {
+      await api("delete_subscription", { id });
+      setStatus("Subscription deleted");
+      await refresh(false);
+    } catch (error) {
+      setStatus(message(error));
+    } finally {
+      setSubscriptionLoading(false);
+    }
+  };
+
+  const removeSource = async (source_id: string) => {
+    setSourceLoading(true);
+    try {
+      await api("remove_source", { sourceId: source_id });
+      setStatus("Source removed");
+      await refresh(false);
+    } catch (error) {
+      setStatus(message(error));
+    } finally {
+      setSourceLoading(false);
+    }
   };
 
   const doLogin = async () => {
@@ -631,17 +714,42 @@ function App() {
     }
   };
 
-  const updateProjectRoot = async (value: string) => {
-    setProjectRoot(value);
+  const persistProjectRoot = async (value: string) => {
+    const requestId = ++projectRootRequestIdRef.current;
     setProjectRootLoading(true);
     try {
-      await api<SyncStatus>("set_project_root", { projectRoot: value || null });
+      const result = await api<SyncStatus>("set_project_root", { projectRoot: value || null });
+      // Ignore stale responses from out-of-order saves.
+      if (projectRootRequestIdRef.current !== requestId) return;
+      setSyncStatus((prev) => (prev ? { ...prev, project_root: result.project_root } : result));
       setStatus("Project root updated");
     } catch (error) {
+      if (projectRootRequestIdRef.current !== requestId) return;
       setStatus(message(error));
     } finally {
-      setProjectRootLoading(false);
+      if (projectRootRequestIdRef.current === requestId) {
+        setProjectRootLoading(false);
+      }
     }
+  };
+
+  const updateProjectRoot = (value: string) => {
+    setProjectRoot(value);
+    if (projectRootDebounceRef.current) {
+      window.clearTimeout(projectRootDebounceRef.current);
+    }
+    projectRootDebounceRef.current = window.setTimeout(() => {
+      void persistProjectRoot(value);
+    }, 500);
+  };
+
+  const commitProjectRoot = (value: string) => {
+    setProjectRoot(value);
+    if (projectRootDebounceRef.current) {
+      window.clearTimeout(projectRootDebounceRef.current);
+      projectRootDebounceRef.current = undefined;
+    }
+    void persistProjectRoot(value);
   };
 
   const doRebuildProjects = async () => {
@@ -741,7 +849,7 @@ function App() {
       </nav>
 
       <div className="status-line">
-        <span className="status-message">{(refreshLoading || scanLoading || fullScanLoading || syncLoading || projectRootLoading || pricingLoading || sourceLoading || detectLoading || updateCheckLoading) ? <span className="spinner" /> : null}{status}</span>
+        <span className="status-message">{(refreshLoading || scanLoading || fullScanLoading || syncLoading || projectRootLoading || pricingLoading || sourceLoading || detectLoading || updateCheckLoading || subscriptionLoading) ? <span className="spinner" /> : null}{status}</span>
         <span className="privacy">
           {syncStatus?.logged_in ? (
             <><Cloud size={14} /> Connected to {syncStatus.server_url.replace(/^https:\/\//, "")}</>
@@ -769,14 +877,8 @@ function App() {
             addDetected={addDetected}
             addManual={addManual}
             addSubscription={addSubscription}
-            deleteSubscription={async (id) => {
-              await api("delete_subscription", { id });
-              await refresh(false);
-            }}
-            removeSource={async (source_id) => {
-              await api("remove_source", { sourceId: source_id });
-              await refresh(false);
-            }}
+            deleteSubscription={deleteSubscription}
+            removeSource={removeSource}
             syncStatus={syncStatus}
             syncForm={syncForm}
             setSyncForm={setSyncForm}
@@ -787,8 +889,10 @@ function App() {
             detectLoading={detectLoading}
             projectRootLoading={projectRootLoading}
             pricingLoading={pricingLoading}
+            subscriptionLoading={subscriptionLoading}
             projectRoot={projectRoot}
             onProjectRootChange={updateProjectRoot}
+            onProjectRootCommit={commitProjectRoot}
             onRebuildProjects={doRebuildProjects}
             projects={projects}
             onRenameProject={renameProject}
@@ -1150,8 +1254,10 @@ function SettingsView(props: {
   detectLoading: boolean;
   projectRootLoading: boolean;
   pricingLoading: boolean;
+  subscriptionLoading: boolean;
   projectRoot: string | null;
   onProjectRootChange: (value: string) => void;
+  onProjectRootCommit: (value: string) => void;
   onRebuildProjects: () => void;
   projects: Project[];
   onRenameProject: (projectId: string, customName: string) => void;
@@ -1255,6 +1361,13 @@ function SettingsView(props: {
             type="text"
             value={props.projectRoot ?? ""}
             onChange={(e) => props.onProjectRootChange(e.target.value)}
+            onBlur={(e) => props.onProjectRootCommit(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.currentTarget.blur();
+                props.onProjectRootCommit(e.currentTarget.value);
+              }
+            }}
             placeholder="~/Developer"
             disabled={props.projectRootLoading}
           />
@@ -1371,9 +1484,9 @@ function SettingsView(props: {
           <input value={props.subForm.product_name} onChange={(e) => props.setSubForm({ ...props.subForm, product_name: e.target.value })} placeholder="product" />
           <input value={props.subForm.monthly_amount} onChange={(e) => props.setSubForm({ ...props.subForm, monthly_amount: e.target.value })} placeholder="amount" />
           <input value={props.subForm.billing_anchor_day} onChange={(e) => props.setSubForm({ ...props.subForm, billing_anchor_day: e.target.value })} placeholder="billing day" />
-          <button className="primary-button" onClick={props.addSubscription}>
-            <WalletCards size={16} />
-            Add
+          <button className="primary-button" onClick={props.addSubscription} disabled={props.subscriptionLoading}>
+            <WalletCards size={16} className={props.subscriptionLoading ? "spin" : undefined} />
+            {props.subscriptionLoading ? "Adding..." : "Add"}
           </button>
         </div>
         <table>
