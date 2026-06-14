@@ -321,7 +321,18 @@ function App() {
   useEffect(() => {
     let unlisten: (() => void) | undefined;
     listen("sync-progress", (event) => {
-      const payload = event.payload as { uploaded: number; total: number };
+      const payload = event.payload as Record<string, unknown>;
+      if (
+        typeof payload !== "object" ||
+        payload === null ||
+        typeof payload.uploaded !== "number" ||
+        typeof payload.total !== "number" ||
+        Number.isNaN(payload.uploaded) ||
+        Number.isNaN(payload.total)
+      ) {
+        console.warn("[MEtR] Invalid sync-progress payload:", event.payload);
+        return;
+      }
       setStatus(`Syncing... ${payload.uploaded.toLocaleString()} / ${payload.total.toLocaleString()} events uploaded`);
     }).then((fn) => {
       unlisten = fn;
@@ -1639,11 +1650,13 @@ const DISPLAY_TIME_ZONE = "Asia/Dubai";
 
 function date(value: string | null) {
   if (!value) return "Never";
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return "Invalid date";
   return new Intl.DateTimeFormat(undefined, {
     dateStyle: "medium",
     timeStyle: "short",
     timeZone: DISPLAY_TIME_ZONE,
-  }).format(new Date(value));
+  }).format(parsed);
 }
 
 function providerLabel(providerId: string) {
@@ -1714,7 +1727,9 @@ function durationLabel(firstSeen: string | null, lastSeen: string | null) {
   if (!firstSeen || !lastSeen) return "Unknown";
   const start = new Date(firstSeen).getTime();
   const end = new Date(lastSeen).getTime();
+  if (Number.isNaN(start) || Number.isNaN(end)) return "Invalid";
   const diff = Math.max(0, end - start);
+  if (Number.isNaN(diff)) return "Invalid";
   const days = Math.floor(diff / 86_400_000);
   if (days >= 1) return `${days}d`;
   const hours = Math.floor(diff / 3_600_000);
