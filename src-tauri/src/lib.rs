@@ -3533,7 +3533,7 @@ fn int_field(value: &Value, names: &[&str]) -> i64 {
             return number;
         }
         if let Some(number) = value.get(*name).and_then(|v| v.as_u64()) {
-            return number as i64;
+            return number.min(i64::MAX as u64) as i64;
         }
     }
     0
