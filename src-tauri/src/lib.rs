@@ -1807,12 +1807,20 @@ fn debug_sync_state(state: State<AppState>) -> Result<Value, String> {
 
     let sample_events: Vec<Value> = stmt
         .query_map([], |r| {
+            let source_file_path: Option<String> = r.get(4)?;
+            let redacted_path = source_file_path.as_deref().map(|p| {
+                Path::new(p)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("<redacted>")
+                    .to_string()
+            });
             Ok(serde_json::json!({
                 "id": r.get::<_, String>(0)?,
                 "provider_id": r.get::<_, String>(1)?,
                 "timestamp": r.get::<_, String>(2)?,
                 "model": r.get::<_, Option<String>>(3)?,
-                "source_file_path": r.get::<_, Option<String>>(4)?,
+                "source_file_basename": redacted_path,
                 "sync_error": r.get::<_, Option<String>>(5)?,
             }))
         })
@@ -1822,7 +1830,7 @@ fn debug_sync_state(state: State<AppState>) -> Result<Value, String> {
 
     let sync_config: Value = conn
         .query_row(
-            "SELECT server_url, auth_token IS NOT NULL, username, last_sync_at, last_sync_error, sync_enabled, device_uuid, last_sync_attempt_at
+            "SELECT server_url, auth_token IS NOT NULL, username, last_sync_at, last_sync_error, sync_enabled, NULL, last_sync_attempt_at
              FROM sync_config WHERE id = 1",
             [],
             |r| {
@@ -1833,7 +1841,7 @@ fn debug_sync_state(state: State<AppState>) -> Result<Value, String> {
                     "last_sync_at": r.get::<_, Option<String>>(3)?,
                     "last_sync_error": r.get::<_, Option<String>>(4)?,
                     "sync_enabled": r.get::<_, i64>(5)? == 1,
-                    "device_uuid": r.get::<_, Option<String>>(6)?,
+                    "device_uuid": None::<Option<String>>,
                     "last_sync_attempt_at": r.get::<_, Option<String>>(7)?,
                 }))
             },
