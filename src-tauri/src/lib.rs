@@ -839,13 +839,14 @@ fn pull_pricing(state: State<AppState>) -> Result<Value, String> {
 fn push_pricing(state: State<AppState>) -> Result<Value, String> {
     let conn = state.db.lock().map_err(to_string)?;
     ensure_sync_config(&conn)?;
-    let (token, server_url): (String, String) = conn
+    let server_url: String = conn
         .query_row(
-            "SELECT auth_token, server_url FROM sync_config WHERE id = 1",
+            "SELECT server_url FROM sync_config WHERE id = 1",
             [],
-            |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+            |r| r.get(0),
         )
-        .map_err(|_| "Not logged in. Please log in first.".to_string())?;
+        .map_err(to_string)?;
+    let token = get_sync_token(&conn)?.ok_or("Not logged in. Please log in first.")?;
 
     let mut stmt = conn
         .prepare(
@@ -1065,7 +1066,7 @@ fn get_sync_config(conn: &Connection) -> Result<SyncStatus, String> {
     ensure_sync_config(conn)?;
     let row = conn
         .query_row(
-            "SELECT server_url, auth_token, device_name, username, last_sync_at, sync_enabled, last_sync_error, last_sync_attempt_at, project_root
+            "SELECT server_url, device_name, username, last_sync_at, sync_enabled, last_sync_error, last_sync_attempt_at, project_root
              FROM sync_config WHERE id = 1",
             [],
             |r| {
@@ -1074,15 +1075,15 @@ fn get_sync_config(conn: &Connection) -> Result<SyncStatus, String> {
                     r.get::<_, Option<String>>(1)?,
                     r.get::<_, Option<String>>(2)?,
                     r.get::<_, Option<String>>(3)?,
-                    r.get::<_, Option<String>>(4)?,
-                    r.get::<_, i64>(5)? == 1,
+                    r.get::<_, i64>(4)? == 1,
+                    r.get::<_, Option<String>>(5)?,
                     r.get::<_, Option<String>>(6)?,
                     r.get::<_, Option<String>>(7)?,
-                    r.get::<_, Option<String>>(8)?,
                 ))
             },
         )
         .map_err(to_string)?;
+    let token = get_sync_token(conn)?;
 
     let pending: i64 = conn
         .query_row(
@@ -1103,16 +1104,16 @@ fn get_sync_config(conn: &Connection) -> Result<SyncStatus, String> {
     Ok(SyncStatus {
         configured: true,
         server_url: row.0,
-        logged_in: row.1.is_some(),
-        username: row.3,
-        device_name: row.2,
-        last_sync_at: row.4,
-        last_sync_attempt_at: row.7,
+        logged_in: token.is_some(),
+        username: row.2,
+        device_name: row.1,
+        last_sync_at: row.3,
+        last_sync_attempt_at: row.6,
         pending_events: pending,
         sync_error_count,
-        last_sync_error: row.6,
-        sync_enabled: row.5,
-        project_root: row.8,
+        last_sync_error: row.5,
+        sync_enabled: row.4,
+        project_root: row.7,
     })
 }
 
@@ -1241,11 +1242,10 @@ fn login_sync(state: State<AppState>, input: LoginInput) -> Result<SyncStatus, S
         whoami::fallible::hostname().unwrap_or_else(|_| "unknown".to_string())
     );
 
+    let (validated, _warning) = validate_server_url(&input.server_url)?;
+
     let client = reqwest::blocking::Client::new();
-    let url = format!(
-        "{}/api/v1/auth/login",
-        input.server_url.trim_end_matches('/')
-    );
+    let url = format!("{}/api/v1/auth/login", validated.trim_end_matches('/'));
     let resp = client
         .post(&url)
         .json(&serde_json::json!({
@@ -1277,10 +1277,11 @@ fn login_sync(state: State<AppState>, input: LoginInput) -> Result<SyncStatus, S
 
     let now = now();
     conn.execute(
-        "UPDATE sync_config SET server_url = ?1, auth_token = ?2, username = ?3, device_name = ?4, sync_enabled = 1, updated_at = ?5 WHERE id = 1",
-        params![input.server_url, token, username, device_name, now],
+        "UPDATE sync_config SET server_url = ?1, auth_token = NULL, username = ?2, device_name = ?3, sync_enabled = 1, updated_at = ?4 WHERE id = 1",
+        params![validated, username, device_name, now],
     )
     .map_err(to_string)?;
+    set_sync_token(&conn, token)?;
     let _ = pull_pricing_from_server(&conn);
     recalculate_event_costs(&conn).map_err(to_string)?;
 
@@ -1292,11 +1293,14 @@ fn logout_sync(state: State<AppState>) -> Result<SyncStatus, String> {
     let conn = state.db.lock().map_err(to_string)?;
     ensure_sync_config(&conn)?;
 
-    if let Ok((Some(token), server_url)) = conn.query_row(
-        "SELECT auth_token, server_url FROM sync_config WHERE id = 1",
-        [],
-        |r| Ok((r.get::<_, Option<String>>(0)?, r.get::<_, String>(1)?)),
-    ) {
+    let server_url: String = conn
+        .query_row(
+            "SELECT server_url FROM sync_config WHERE id = 1",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(to_string)?;
+    if let Some(token) = get_sync_token(&conn)? {
         let _ = reqwest::blocking::Client::new()
             .post(format!(
                 "{}/api/v1/auth/logout",
@@ -1307,6 +1311,7 @@ fn logout_sync(state: State<AppState>) -> Result<SyncStatus, String> {
             .send();
     }
 
+    delete_sync_token(&conn)?;
     let now = now();
     conn.execute(
         "UPDATE sync_config SET auth_token = NULL, username = NULL, user_id = NULL, last_sync_at = NULL, sync_enabled = 0, updated_at = ?1 WHERE id = 1",
@@ -1447,19 +1452,23 @@ where
 {
     ensure_sync_config(conn)?;
 
-    let (token, server_url, device_uuid): (String, String, Option<String>) = conn
+    let server_url: String = conn
         .query_row(
-            "SELECT auth_token, server_url, device_uuid FROM sync_config WHERE id = 1",
+            "SELECT server_url FROM sync_config WHERE id = 1",
             [],
-            |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, Option<String>>(2)?,
-                ))
-            },
+            |r| r.get(0),
         )
-        .map_err(|_| "Not logged in. Please log in first.".to_string())?;
+        .map_err(to_string)?;
+    let token = get_sync_token(conn)?.ok_or("Not logged in. Please log in first.")?;
+    let device_uuid: Option<String> = conn
+        .query_row(
+            "SELECT device_uuid FROM sync_config WHERE id = 1",
+            [],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(to_string)?
+        .flatten();
 
     let device_uuid = match device_uuid {
         Some(uuid) => uuid,
@@ -1845,13 +1854,14 @@ fn sync_subscriptions(
 
 fn pull_pricing_from_server(conn: &Connection) -> Result<usize, String> {
     ensure_sync_config(conn)?;
-    let (token, server_url): (String, String) = conn
+    let server_url: String = conn
         .query_row(
-            "SELECT auth_token, server_url FROM sync_config WHERE id = 1",
+            "SELECT server_url FROM sync_config WHERE id = 1",
             [],
-            |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+            |r| r.get(0),
         )
-        .map_err(|_| "Not logged in. Please log in first.".to_string())?;
+        .map_err(to_string)?;
+    let token = get_sync_token(conn)?.ok_or("Not logged in. Please log in first.")?;
 
     let base_url = server_url.trim_end_matches('/');
     let client = reqwest::blocking::Client::new();
