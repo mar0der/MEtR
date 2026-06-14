@@ -175,7 +175,7 @@ type SyncResult = {
   errors: string[];
 };
 
-type Tab = "all" | "settings" | string;
+type Tab = "all" | "settings";
 type SubscriptionForm = {
   provider_id: string;
   product_name: string;
@@ -184,7 +184,7 @@ type SubscriptionForm = {
   billing_anchor_day: string;
 };
 
-function providerForTab(tab: Tab): string | undefined {
+function providerForTab(tab: Tab | string): string | undefined {
   return tab === "all" || tab === "settings" ? undefined : tab;
 }
 
@@ -206,7 +206,7 @@ function App() {
   const [subscriptions, setSubscriptions] = useState<Subscription[]>([]);
   const [pricing, setPricing] = useState<PricingEntry[]>([]);
   const [missingModels, setMissingModels] = useState<MissingModel[]>([]);
-  const [activeTab, setActiveTab] = useState<Tab>("all");
+  const [activeTab, setActiveTab] = useState<Tab | string>("all");
   const [status, setStatus] = useState("Ready");
   const [manualPath, setManualPath] = useState("");
   const [subForm, setSubForm] = useState({
