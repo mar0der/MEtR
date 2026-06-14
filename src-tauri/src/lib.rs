@@ -465,7 +465,7 @@ fn rename_project(state: State<AppState>, project_id: String, custom_name: Optio
 #[tauri::command]
 fn merge_projects(state: State<AppState>, target_project_id: String, source_project_ids: Vec<String>) -> Result<Value, String> {
     {
-        let conn = state.db.lock().map_err(to_string)?;
+        let mut conn = state.db.lock().map_err(to_string)?;
         let tx = conn.transaction().map_err(to_string)?;
         validate_merge_target(&tx, &target_project_id)?;
         let target_provider: String = tx
@@ -517,7 +517,7 @@ fn validate_merge_target(conn: &Connection, target_id: &str) -> Result<(), Strin
 #[tauri::command]
 fn unmerge_project(state: State<AppState>, project_id: String) -> Result<Value, String> {
     {
-        let conn = state.db.lock().map_err(to_string)?;
+        let mut conn = state.db.lock().map_err(to_string)?;
         let tx = conn.transaction().map_err(to_string)?;
         let target_id: Option<String> = tx
             .query_row(
@@ -1266,7 +1266,7 @@ fn rebuild_projects(state: State<AppState>) -> Result<Value, String> {
         };
 
         if let Some(path) = project_path {
-            let project_id = upsert_project(&conn, &provider_id, &path, &timestamp)?;
+            let project_id = upsert_project(&conn, provider_id, &path, timestamp)?;
             conn.execute(
                 "UPDATE usage_events SET project_id = ?1 WHERE id = ?2",
                 params![project_id, id],
