@@ -15,6 +15,9 @@ use uuid::Uuid;
 use walkdir::WalkDir;
 
 const MAX_SCAN_FILES_PER_SOURCE: usize = 50_000;
+const MAX_SOURCE_TOTAL_BYTES: u64 = 5 * 1024 * 1024 * 1024; // 5 GB
+const MAX_LINE_LENGTH: usize = 1_048_576; // 1 MB
+const MAX_JSON_DEPTH: usize = 64;
 const PARSER_VERSION: &str = "0.1.9";
 
 struct AppState {
@@ -2405,6 +2408,7 @@ fn scan_source(conn: &Connection, source: &Source, full_scan: bool) -> Result<us
     let mut scanned_files = 0usize;
     let mut skipped_unchanged = 0usize;
     let mut skipped_after_limit = false;
+    let mut total_bytes_scanned: u64 = 0;
     for entry in WalkDir::new(&root)
         .max_depth(8)
         .into_iter()
@@ -2422,6 +2426,11 @@ fn scan_source(conn: &Connection, source: &Source, full_scan: bool) -> Result<us
             Ok(metadata) => metadata,
             Err(_) => continue,
         };
+        if total_bytes_scanned + metadata.len() > MAX_SOURCE_TOTAL_BYTES {
+            skipped_after_limit = true;
+            break;
+        }
+        total_bytes_scanned += metadata.len();
         let modified = metadata
             .modified()
             .ok()
@@ -2440,17 +2449,9 @@ fn scan_source(conn: &Connection, source: &Source, full_scan: bool) -> Result<us
             metadata.len(),
             modified
         ));
-        let events = if source.parser_id == "codex" && metadata.len() > 100 * 1024 * 1024 {
-            match parse_file_streaming(source, entry.path()) {
-                Ok(events) => events,
-                Err(_) => continue,
-            }
-        } else {
-            let content = match fs::read_to_string(entry.path()) {
-                Ok(content) => content,
-                Err(_) => continue,
-            };
-            parse_content(source, entry.path(), &content)
+        let events = match parse_file_streaming(source, entry.path()) {
+            Ok(events) => events,
+            Err(_) => continue,
         };
         for event in events {
             if insert_event(conn, source, entry.path(), &modified, &source_hash, event, custom_root.as_deref())? {
@@ -2472,7 +2473,7 @@ fn scan_source(conn: &Connection, source: &Source, full_scan: bool) -> Result<us
         params![
             now(),
             format!(
-                "{} {scanned_files} file(s), imported {imported} new model calls{}{}.",
+                "{} {scanned_files} file(s), imported {imported} new model calls{}{}{}.",
                 if full_scan {
                     "Full scanned"
                 } else {
@@ -2483,9 +2484,16 @@ fn scan_source(conn: &Connection, source: &Source, full_scan: bool) -> Result<us
                 } else {
                     String::new()
                 },
-
                 if skipped_after_limit {
-                    format!(", stopped at the {MAX_SCAN_FILES_PER_SOURCE} file safety limit")
+                    format!(", stopped at the {MAX_SCAN_FILES_PER_SOURCE} file / {} GB safety limit",
+                        MAX_SOURCE_TOTAL_BYTES / (1024 * 1024 * 1024)
+                    )
+                } else {
+                    String::new()
+                },
+                if total_bytes_scanned > 0 {
+                    format!(", total {} MB scanned", total_bytes_scanned / (1024 * 1024)
+                    )
                 } else {
                     String::new()
                 }
@@ -2577,6 +2585,10 @@ fn parse_content(source: &Source, path: &Path, content: &str) -> Vec<ParsedEvent
     let mut codex_context = CodexParseContext::default();
     let mut generic_context = GenericParseContext::default();
     for line in content.lines() {
+        if line.len() > MAX_LINE_LENGTH {
+            offset += line.len() as i64 + 1;
+            continue;
+        }
         let trimmed = line.trim();
         parse_line_into_events(
             source,
@@ -2591,7 +2603,7 @@ fn parse_content(source: &Source, path: &Path, content: &str) -> Vec<ParsedEvent
     }
     if events.is_empty() {
         if let Ok(value) = serde_json::from_str::<Value>(content) {
-            collect_json_events(source, path, &value, &mut events);
+            collect_json_events(source, path, &value, &mut events, 0);
         }
     }
     events
@@ -2599,6 +2611,7 @@ fn parse_content(source: &Source, path: &Path, content: &str) -> Vec<ParsedEvent
 
 fn parse_file_streaming(source: &Source, path: &Path) -> Result<Vec<ParsedEvent>, String> {
     let file = fs::File::open(path).map_err(to_string)?;
+    let metadata = file.metadata().map_err(to_string)?;
     let reader = BufReader::new(file);
     let mut events = Vec::new();
     let mut offset = 0i64;
@@ -2607,6 +2620,10 @@ fn parse_file_streaming(source: &Source, path: &Path) -> Result<Vec<ParsedEvent>
 
     for line in reader.lines() {
         let line = line.map_err(to_string)?;
+        if line.len() > MAX_LINE_LENGTH {
+            offset += line.len() as i64 + 1;
+            continue;
+        }
         let trimmed = line.trim();
         parse_line_into_events(
             source,
@@ -2618,6 +2635,14 @@ fn parse_file_streaming(source: &Source, path: &Path) -> Result<Vec<ParsedEvent>
             &mut events,
         );
         offset += line.len() as i64 + 1;
+    }
+
+    // If no JSONL events were found and the file is small enough, try parsing it as a
+    // single JSON object/array. Files larger than 100 MB are not read into memory.
+    if events.is_empty() && metadata.len() <= 100 * 1024 * 1024 {
+        if let Ok(content) = fs::read_to_string(path) {
+            events.extend(parse_content(source, path, &content));
+        }
     }
 
     Ok(events)
@@ -2788,20 +2813,29 @@ fn parse_codex_value(
     })
 }
 
-fn collect_json_events(source: &Source, path: &Path, value: &Value, events: &mut Vec<ParsedEvent>) {
+fn collect_json_events(
+    source: &Source,
+    path: &Path,
+    value: &Value,
+    events: &mut Vec<ParsedEvent>,
+    depth: usize,
+) {
+    if depth > MAX_JSON_DEPTH {
+        return;
+    }
     if let Some(event) = parse_value(source, path, value, None, &value.to_string(), None) {
         events.push(event);
     }
     match value {
         Value::Array(items) => {
             for item in items {
-                collect_json_events(source, path, item, events);
+                collect_json_events(source, path, item, events, depth + 1);
             }
         }
         Value::Object(map) => {
             for item in map.values() {
                 if item.is_array() || item.is_object() {
-                    collect_json_events(source, path, item, events);
+                    collect_json_events(source, path, item, events, depth + 1);
                 }
             }
         }
