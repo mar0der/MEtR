@@ -466,25 +466,52 @@ fn rename_project(state: State<AppState>, project_id: String, custom_name: Optio
 fn merge_projects(state: State<AppState>, target_project_id: String, source_project_ids: Vec<String>) -> Result<Value, String> {
     {
         let conn = state.db.lock().map_err(to_string)?;
+        let tx = conn.transaction().map_err(to_string)?;
+        validate_merge_target(&tx, &target_project_id)?;
+        let target_provider: String = tx
+            .query_row("SELECT provider_id FROM projects WHERE id = ?1", params![&target_project_id], |r| r.get(0))
+            .map_err(|_| "Target project not found".to_string())?;
         let now = now();
         for source_id in &source_project_ids {
             if source_id == &target_project_id {
-                continue;
+                return Err("Cannot merge a project into itself.".to_string());
             }
-            let provider_id: String = conn
+            let source_provider: String = tx
                 .query_row("SELECT provider_id FROM projects WHERE id = ?1", params![source_id], |r| r.get(0))
                 .map_err(|_| format!("Source project {} not found", source_id))?;
-            conn.execute(
+            if source_provider != target_provider {
+                return Err(format!(
+                    "Project {} belongs to a different provider than the target project.",
+                    source_id
+                ));
+            }
+            tx.execute(
                 "INSERT INTO project_management (id, provider_id, merged_into_project_id, created_at, updated_at)
                  VALUES (?1, ?2, ?3, ?4, ?4)
                  ON CONFLICT(id) DO UPDATE SET merged_into_project_id = excluded.merged_into_project_id, updated_at = excluded.updated_at",
-                params![source_id, provider_id, target_project_id, now],
+                params![source_id, source_provider, target_project_id, now],
             )
             .map_err(to_string)?;
         }
-        apply_project_management(&conn).map_err(to_string)?;
+        apply_project_management(&tx).map_err(to_string)?;
+        tx.commit().map_err(to_string)?;
     }
     list_projects(state)
+}
+
+fn validate_merge_target(conn: &Connection, target_id: &str) -> Result<(), String> {
+    let merged_into: Option<String> = conn
+        .query_row(
+            "SELECT merged_into_project_id FROM project_management WHERE id = ?1",
+            params![target_id],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(to_string)?;
+    if merged_into.is_some() {
+        return Err("Target project is itself merged into another project.".to_string());
+    }
+    Ok(())
 }
 
 #[tauri::command]
