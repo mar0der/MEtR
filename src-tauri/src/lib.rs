@@ -518,12 +518,42 @@ fn validate_merge_target(conn: &Connection, target_id: &str) -> Result<(), Strin
 fn unmerge_project(state: State<AppState>, project_id: String) -> Result<Value, String> {
     {
         let conn = state.db.lock().map_err(to_string)?;
-        conn.execute(
+        let tx = conn.transaction().map_err(to_string)?;
+        let target_id: Option<String> = tx
+            .query_row(
+                "SELECT merged_into_project_id FROM project_management WHERE id = ?1",
+                params![&project_id],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(to_string)?;
+        tx.execute(
             "UPDATE project_management SET merged_into_project_id = NULL, updated_at = ?1 WHERE id = ?2",
             params![now(), project_id],
         )
         .map_err(to_string)?;
-        apply_project_management(&conn).map_err(to_string)?;
+        // Restore events and conversations that were moved from this source project back to it.
+        tx.execute(
+            "UPDATE usage_events SET project_id = ?1, merged_from_project_id = NULL WHERE merged_from_project_id = ?1",
+            params![&project_id],
+        )
+        .map_err(to_string)?;
+        tx.execute(
+            "UPDATE conversations SET project_id = ?1, merged_from_project_id = NULL WHERE merged_from_project_id = ?1",
+            params![&project_id],
+        )
+        .map_err(to_string)?;
+        // Ensure the source project row is restored if it was previously deleted.
+        if let Some(target_id) = target_id {
+            let _ = tx.execute(
+                "INSERT OR IGNORE INTO projects (id, provider_id, display_name, path, normalized_path_hash, first_seen_at, last_seen_at, created_at, updated_at)
+                 SELECT ?1, provider_id, display_name, path, normalized_path_hash, first_seen_at, last_seen_at, created_at, updated_at
+                 FROM projects WHERE id = ?2",
+                params![&project_id, target_id],
+            );
+        }
+        apply_project_management(&tx).map_err(to_string)?;
+        tx.commit().map_err(to_string)?;
     }
     list_projects(state)
 }
@@ -2207,6 +2237,8 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     add_column_if_missing(conn, "sync_config", "last_sync_attempt_at", "TEXT")?;
     add_column_if_missing(conn, "sync_config", "project_root", "TEXT")?;
     add_column_if_missing(conn, "usage_events", "source_project_path", "TEXT")?;
+    add_column_if_missing(conn, "usage_events", "merged_from_project_id", "TEXT")?;
+    add_column_if_missing(conn, "conversations", "merged_from_project_id", "TEXT")?;
     create_project_management_table(conn)?;
     Ok(())
 }
@@ -3264,7 +3296,8 @@ fn apply_project_management(conn: &Connection) -> rusqlite::Result<()> {
         [],
     )?;
 
-    // Apply merges: redirect events and conversations, then delete merged projects.
+    // Apply merges: redirect events and conversations to the target project.
+    // Keep the source project row intact so unmerge can restore it.
     let mut stmt = conn.prepare(
         "SELECT id, merged_into_project_id FROM project_management
          WHERE merged_into_project_id IS NOT NULL"
@@ -3276,14 +3309,14 @@ fn apply_project_management(conn: &Connection) -> rusqlite::Result<()> {
 
     for (source_id, target_id) in merges {
         conn.execute(
-            "UPDATE usage_events SET project_id = ?1 WHERE project_id = ?2",
+            "UPDATE usage_events SET project_id = ?1, merged_from_project_id = COALESCE(merged_from_project_id, ?2) WHERE project_id = ?2",
             params![target_id, source_id],
         )?;
         conn.execute(
-            "UPDATE conversations SET project_id = ?1 WHERE project_id = ?2",
+            "UPDATE conversations SET project_id = ?1, merged_from_project_id = COALESCE(merged_from_project_id, ?2) WHERE project_id = ?2",
             params![target_id, source_id],
         )?;
-        conn.execute("DELETE FROM projects WHERE id = ?1", params![source_id])?;
+        // Do not delete the source project row; unmerge relies on its existence.
     }
 
     Ok(())
