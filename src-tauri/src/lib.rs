@@ -322,7 +322,11 @@ fn list_sources(state: State<AppState>) -> Result<Vec<Source>, String> {
 
 #[tauri::command]
 fn add_source(state: State<AppState>, input: AddSourceInput) -> Result<Source, String> {
-    let path = PathBuf::from(&input.path);
+    let path = validate_source_path(&input.path)?;
+    let input = AddSourceInput {
+        path: path.to_string_lossy().to_string(),
+        ..input
+    };
     let (provider_id, parser_id, name) = match (&input.provider_id, &input.parser_id) {
         (Some(provider), Some(parser)) => (
             provider.clone(),
@@ -2373,6 +2377,7 @@ fn candidate_sources() -> Vec<CandidateSource> {
 fn count_candidate_files(path: &Path) -> usize {
     WalkDir::new(path)
         .max_depth(5)
+        .follow_links(false)
         .into_iter()
         .filter_map(Result::ok)
         .filter(|e| e.file_type().is_file())
@@ -2506,6 +2511,7 @@ fn scan_source(conn: &Connection, source: &Source, full_scan: bool) -> Result<us
     let mut skipped_after_limit = false;
     for entry in WalkDir::new(&root)
         .max_depth(8)
+        .follow_links(false)
         .into_iter()
         .filter_entry(|e| !e.file_type().is_dir() || !is_skipped_dir(e.path()))
         .filter_map(Result::ok)
