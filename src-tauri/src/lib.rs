@@ -1910,6 +1910,11 @@ fn pull_pricing_from_server(conn: &Connection) -> Result<usize, String> {
         .and_then(Value::as_array)
         .ok_or("Missing model_prices in sync settings response".to_string())?;
 
+    if prices.is_empty() {
+        // Do not delete any local server-managed pricing when the server returns an empty list.
+        return Ok(0);
+    }
+
     let mut pulled = 0usize;
     let now_ts = now();
     for item in prices {
@@ -1995,18 +2000,18 @@ fn pull_pricing_from_server(conn: &Connection) -> Result<usize, String> {
         .map_err(to_string)?;
     drop(stmt);
 
-    let mut kept_ids = Vec::new();
+    let mut kept_ids = std::collections::HashSet::new();
     for item in prices {
         let provider_id = item.get("provider_id").and_then(Value::as_str).unwrap_or("");
         let model = item.get("model").and_then(Value::as_str).unwrap_or("");
         if !provider_id.is_empty() && !model.is_empty() {
-            kept_ids.push(format!("{}:{}", provider_id, model.to_ascii_lowercase()));
+            kept_ids.insert(format!("{}:{}", provider_id, model.to_ascii_lowercase()));
         }
     }
 
     let removed: usize = existing_ids
         .iter()
-        .filter(|id| !kept_ids.contains(id))
+        .filter(|id| !kept_ids.contains(id.as_str()))
         .filter_map(|id| {
             conn.execute("DELETE FROM pricing_catalogs WHERE id = ?1", params![id])
                 .ok()
