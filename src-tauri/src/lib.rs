@@ -1119,14 +1119,18 @@ fn get_sync_config(conn: &Connection) -> Result<SyncStatus, String> {
 
 #[tauri::command]
 fn configure_sync_server(state: State<AppState>, server_url: String) -> Result<SyncStatus, String> {
+    let (validated, warning) = validate_server_url(&server_url)?;
     let conn = state.db.lock().map_err(to_string)?;
     ensure_sync_config(&conn)?;
     let now = now();
     conn.execute(
         "UPDATE sync_config SET server_url = ?1, updated_at = ?2 WHERE id = 1",
-        params![server_url, now],
+        params![validated, now],
     )
     .map_err(to_string)?;
+    if let Some(warning) = warning {
+        eprintln!("[configure_sync_server] {}", warning);
+    }
     get_sync_config(&conn)
 }
 
