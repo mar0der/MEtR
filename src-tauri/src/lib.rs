@@ -1096,7 +1096,7 @@ async fn rebuild_projects(state: State<'_, AppState>) -> Result<Value, String> {
             };
 
             if let Some(path) = project_path {
-                let project_id = upsert_project(&conn, &provider_id, &path, &timestamp)?;
+                let project_id = upsert_project(&conn, provider_id, &path, timestamp)?;
                 conn.execute(
                     "UPDATE usage_events SET project_id = ?1 WHERE id = ?2",
                     params![project_id, id],
@@ -1181,7 +1181,7 @@ async fn login_sync(state: State<'_, AppState>, input: LoginInput) -> Result<Syn
         let _ = pull_pricing_from_server(&conn);
         recalculate_event_costs(&conn).map_err(to_string)?;
 
-        Ok::<_, String>(get_sync_config(&conn)?)
+        get_sync_config(&conn)
     })
     .await
     .map_err(|e| e.to_string())?
