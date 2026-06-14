@@ -7,7 +7,6 @@ use std::error::Error;
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::{Arc, Mutex};
 use tauri::{Emitter, Manager, State};
 use uuid::Uuid;
@@ -499,30 +498,45 @@ fn unmerge_project(state: State<AppState>, project_id: String) -> Result<Value, 
 }
 
 #[tauri::command]
-fn open_project_path(path: String) -> Result<(), String> {
-    #[cfg(target_os = "windows")]
-    {
-        Command::new("explorer")
-            .arg(path)
-            .spawn()
-            .map_err(to_string)?;
-        return Ok(());
+fn open_project_path(state: State<AppState>, path: String) -> Result<(), String> {
+    let canonical = validate_project_path(&path, &state)?;
+    opener::open(&canonical).map_err(|e| format!("Failed to open folder: {}", e))
+}
+
+fn validate_project_path(path: &str, state: &AppState) -> Result<PathBuf, String> {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return Err("Path is empty.".to_string());
     }
-    #[cfg(target_os = "macos")]
-    {
-        Command::new("open").arg(path).spawn().map_err(to_string)?;
-        return Ok(());
+    if trimmed.starts_with('-') {
+        return Err("Path cannot start with '-'.".to_string());
     }
-    #[cfg(target_os = "linux")]
-    {
-        Command::new("xdg-open")
-            .arg(path)
-            .spawn()
-            .map_err(to_string)?;
-        return Ok(());
+    if trimmed.contains("://") || trimmed.starts_with("\\\\") {
+        return Err("URL-like or network paths are not allowed.".to_string());
     }
-    #[allow(unreachable_code)]
-    Err("Opening folders is not supported on this platform.".to_string())
+
+    let expanded = expand_tilde(trimmed);
+    let canonical = std::fs::canonicalize(&expanded)
+        .map_err(|e| format!("Path does not exist: {}", e))?;
+    if !canonical.is_dir() {
+        return Err("Path is not a directory.".to_string());
+    }
+
+    let conn = state.db.lock().map_err(to_string)?;
+    let project_root = project_root_from_conn(&conn);
+    let home = dirs::home_dir();
+    let allowed = match (project_root.as_deref(), home.as_deref()) {
+        (Some(root), Some(h)) => canonical.starts_with(root) || canonical.starts_with(h),
+        (Some(root), None) => canonical.starts_with(root),
+        (None, Some(h)) => canonical.starts_with(h),
+        (None, None) => false,
+    };
+    if !allowed {
+        return Err(
+            "Path is outside the configured project root or home directory.".to_string(),
+        );
+    }
+    Ok(canonical)
 }
 
 #[tauri::command]
