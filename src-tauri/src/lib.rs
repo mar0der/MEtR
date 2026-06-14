@@ -524,25 +524,35 @@ fn open_project_path(path: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn rescan_all(state: State<AppState>) -> Result<Value, String> {
-    let conn = state.db.blocking_lock();
-    let sources = query_sources(&conn)?;
-    let mut imported = 0usize;
-    for source in sources.into_iter().filter(|s| s.enabled) {
-        imported += scan_source(&conn, &source, false)?;
-    }
-    Ok(serde_json::json!({ "imported": imported }))
+async fn rescan_all(state: State<'_, AppState>) -> Result<Value, String> {
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn = db.blocking_lock();
+        let sources = query_sources(&conn)?;
+        let mut imported = 0usize;
+        for source in sources.into_iter().filter(|s| s.enabled) {
+            imported += scan_source(&conn, &source, false)?;
+        }
+        Ok::<_, String>(serde_json::json!({ "imported": imported }))
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-fn rescan_all_full(state: State<AppState>) -> Result<Value, String> {
-    let conn = state.db.blocking_lock();
-    let sources = query_sources(&conn)?;
-    let mut imported = 0usize;
-    for source in sources.into_iter().filter(|s| s.enabled) {
-        imported += scan_source(&conn, &source, true)?;
-    }
-    Ok(serde_json::json!({ "imported": imported }))
+async fn rescan_all_full(state: State<'_, AppState>) -> Result<Value, String> {
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn = db.blocking_lock();
+        let sources = query_sources(&conn)?;
+        let mut imported = 0usize;
+        for source in sources.into_iter().filter(|s| s.enabled) {
+            imported += scan_source(&conn, &source, true)?;
+        }
+        Ok::<_, String>(serde_json::json!({ "imported": imported }))
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -733,45 +743,50 @@ struct AddPricingInput {
 }
 
 #[tauri::command]
-fn add_pricing(state: State<AppState>, input: AddPricingInput) -> Result<Value, String> {
-    let conn = state.db.blocking_lock();
-    let id = format!("{}:{}", input.provider_id, input.model.to_ascii_lowercase());
-    let now_ts = now();
-    conn.execute(
-        "INSERT INTO pricing_catalogs
-         (id, provider_id, model, aliases_json, source_url, catalog_version, effective_from,
-          input_per_1m, output_per_1m, cached_input_per_1m, cache_write_per_1m, cache_read_per_1m,
-          reasoning_per_1m, tool_per_1m, user_override, created_at, updated_at)
-         VALUES (?1, ?2, ?3, '[]', ?4, 'user', '2026-01-01', ?5, ?6, ?7, ?8, ?9, ?10, ?11, 1, ?12, ?12)
-         ON CONFLICT(id) DO UPDATE SET
-           input_per_1m = excluded.input_per_1m,
-           output_per_1m = excluded.output_per_1m,
-           cached_input_per_1m = excluded.cached_input_per_1m,
-           cache_write_per_1m = excluded.cache_write_per_1m,
-           cache_read_per_1m = excluded.cache_read_per_1m,
-           reasoning_per_1m = excluded.reasoning_per_1m,
-           tool_per_1m = excluded.tool_per_1m,
-           source_url = excluded.source_url,
-           user_override = 1,
-           updated_at = excluded.updated_at",
-        params![
-            id,
-            input.provider_id,
-            input.model,
-            input.source_url,
-            input.input_per_1m,
-            input.output_per_1m,
-            input.cached_input_per_1m,
-            input.cache_write_per_1m,
-            input.cache_read_per_1m,
-            input.reasoning_per_1m,
-            input.tool_per_1m,
-            now_ts
-        ],
-    )
-    .map_err(to_string)?;
-    recalculate_event_costs(&conn).map_err(to_string)?;
-    Ok(serde_json::json!({ "id": id, "updated": true }))
+async fn add_pricing(state: State<'_, AppState>, input: AddPricingInput) -> Result<Value, String> {
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn = db.blocking_lock();
+        let id = format!("{}:{}", input.provider_id, input.model.to_ascii_lowercase());
+        let now_ts = now();
+        conn.execute(
+            "INSERT INTO pricing_catalogs
+             (id, provider_id, model, aliases_json, source_url, catalog_version, effective_from,
+              input_per_1m, output_per_1m, cached_input_per_1m, cache_write_per_1m, cache_read_per_1m,
+              reasoning_per_1m, tool_per_1m, user_override, created_at, updated_at)
+             VALUES (?1, ?2, ?3, '[]', ?4, 'user', '2026-01-01', ?5, ?6, ?7, ?8, ?9, ?10, ?11, 1, ?12, ?12)
+             ON CONFLICT(id) DO UPDATE SET
+               input_per_1m = excluded.input_per_1m,
+               output_per_1m = excluded.output_per_1m,
+               cached_input_per_1m = excluded.cached_input_per_1m,
+               cache_write_per_1m = excluded.cache_write_per_1m,
+               cache_read_per_1m = excluded.cache_read_per_1m,
+               reasoning_per_1m = excluded.reasoning_per_1m,
+               tool_per_1m = excluded.tool_per_1m,
+               source_url = excluded.source_url,
+               user_override = 1,
+               updated_at = excluded.updated_at",
+            params![
+                id,
+                input.provider_id,
+                input.model,
+                input.source_url,
+                input.input_per_1m,
+                input.output_per_1m,
+                input.cached_input_per_1m,
+                input.cache_write_per_1m,
+                input.cache_read_per_1m,
+                input.reasoning_per_1m,
+                input.tool_per_1m,
+                now_ts
+            ],
+        )
+        .map_err(to_string)?;
+        recalculate_event_costs(&conn).map_err(to_string)?;
+        Ok::<_, String>(serde_json::json!({ "id": id, "updated": true }))
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -808,78 +823,88 @@ fn list_missing_models(state: State<AppState>) -> Result<Vec<Value>, String> {
 }
 
 #[tauri::command]
-fn pull_pricing(state: State<AppState>) -> Result<Value, String> {
-    let conn = state.db.blocking_lock();
-    let count = pull_pricing_from_server(&conn)?;
-    recalculate_event_costs(&conn).map_err(to_string)?;
-    Ok(serde_json::json!({ "pulled": count }))
+async fn pull_pricing(state: State<'_, AppState>) -> Result<Value, String> {
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn = db.blocking_lock();
+        let count = pull_pricing_from_server(&conn)?;
+        recalculate_event_costs(&conn).map_err(to_string)?;
+        Ok::<_, String>(serde_json::json!({ "pulled": count }))
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-fn push_pricing(state: State<AppState>) -> Result<Value, String> {
-    let conn = state.db.blocking_lock();
-    ensure_sync_config(&conn)?;
-    let (token, server_url): (String, String) = conn
-        .query_row(
-            "SELECT auth_token, server_url FROM sync_config WHERE id = 1",
-            [],
-            |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
-        )
-        .map_err(|_| "Not logged in. Please log in first.".to_string())?;
+async fn push_pricing(state: State<'_, AppState>) -> Result<Value, String> {
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn = db.blocking_lock();
+        ensure_sync_config(&conn)?;
+        let (token, server_url): (String, String) = conn
+            .query_row(
+                "SELECT auth_token, server_url FROM sync_config WHERE id = 1",
+                [],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+            )
+            .map_err(|_| "Not logged in. Please log in first.".to_string())?;
 
-    let mut stmt = conn
-        .prepare(
-            "SELECT provider_id, model, aliases_json, input_per_1m, output_per_1m,
-             cached_input_per_1m, cache_write_per_1m, cache_read_per_1m,
-             reasoning_per_1m, tool_per_1m, source_url, catalog_version
-             FROM pricing_catalogs",
-        )
-        .map_err(to_string)?;
-    let prices: Vec<Value> = stmt
-        .query_map([], |r| {
-            let aliases_json: String = r.get::<_, String>(2)?;
-            let aliases: Vec<String> = serde_json::from_str(&aliases_json).unwrap_or_default();
-            Ok(serde_json::json!({
-                "provider_id": r.get::<_, String>(0)?,
-                "model": r.get::<_, String>(1)?,
-                "aliases_json": aliases,
-                "input_per_1m": r.get::<_, Option<f64>>(3)?,
-                "output_per_1m": r.get::<_, Option<f64>>(4)?,
-                "cached_input_per_1m": r.get::<_, Option<f64>>(5)?,
-                "cache_write_per_1m": r.get::<_, Option<f64>>(6)?,
-                "cache_read_per_1m": r.get::<_, Option<f64>>(7)?,
-                "reasoning_per_1m": r.get::<_, Option<f64>>(8)?,
-                "tool_per_1m": r.get::<_, Option<f64>>(9)?,
-                "source_url": r.get::<_, Option<String>>(10)?,
-                "catalog_version": r.get::<_, Option<String>>(11)?,
-            }))
-        })
-        .map_err(to_string)?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(to_string)?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT provider_id, model, aliases_json, input_per_1m, output_per_1m,
+                 cached_input_per_1m, cache_write_per_1m, cache_read_per_1m,
+                 reasoning_per_1m, tool_per_1m, source_url, catalog_version
+                 FROM pricing_catalogs",
+            )
+            .map_err(to_string)?;
+        let prices: Vec<Value> = stmt
+            .query_map([], |r| {
+                let aliases_json: String = r.get::<_, String>(2)?;
+                let aliases: Vec<String> = serde_json::from_str(&aliases_json).unwrap_or_default();
+                Ok(serde_json::json!({
+                    "provider_id": r.get::<_, String>(0)?,
+                    "model": r.get::<_, String>(1)?,
+                    "aliases_json": aliases,
+                    "input_per_1m": r.get::<_, Option<f64>>(3)?,
+                    "output_per_1m": r.get::<_, Option<f64>>(4)?,
+                    "cached_input_per_1m": r.get::<_, Option<f64>>(5)?,
+                    "cache_write_per_1m": r.get::<_, Option<f64>>(6)?,
+                    "cache_read_per_1m": r.get::<_, Option<f64>>(7)?,
+                    "reasoning_per_1m": r.get::<_, Option<f64>>(8)?,
+                    "tool_per_1m": r.get::<_, Option<f64>>(9)?,
+                    "source_url": r.get::<_, Option<String>>(10)?,
+                    "catalog_version": r.get::<_, Option<String>>(11)?,
+                }))
+            })
+            .map_err(to_string)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(to_string)?;
 
-    if prices.is_empty() {
-        return Ok(serde_json::json!({ "pushed": 0 }));
-    }
+        if prices.is_empty() {
+            return Ok::<_, String>(serde_json::json!({ "pushed": 0 }));
+        }
 
-    let base_url = server_url.trim_end_matches('/');
-    let client = reqwest::blocking::Client::new();
-    let resp = client
-        .post(format!("{}/api/v1/sync/pricing", base_url))
-        .header("Authorization", format!("Bearer {}", token))
-        .header("Accept", "application/json")
-        .json(&serde_json::json!({ "prices": prices }))
-        .send()
-        .map_err(|e| format!("Pricing push request failed: {}", e))?;
+        let base_url = server_url.trim_end_matches('/');
+        let client = reqwest::blocking::Client::new();
+        let resp = client
+            .post(format!("{}/api/v1/sync/pricing", base_url))
+            .header("Authorization", format!("Bearer {}", token))
+            .header("Accept", "application/json")
+            .json(&serde_json::json!({ "prices": prices }))
+            .send()
+            .map_err(|e| format!("Pricing push request failed: {}", e))?;
 
-    if !resp.status().is_success() {
-        let body = resp.text().unwrap_or_default();
-        return Err(format!("Pricing push failed: {}", body));
-    }
+        if !resp.status().is_success() {
+            let body = resp.text().unwrap_or_default();
+            return Err(format!("Pricing push failed: {}", body));
+        }
 
-    let data: Value = resp.json().map_err(|e| format!("Invalid pricing push response: {}", e))?;
-    let pushed = data.get("synced").and_then(Value::as_u64).unwrap_or(0);
-    Ok(serde_json::json!({ "pushed": pushed }))
+        let data: Value = resp.json().map_err(|e| format!("Invalid pricing push response: {}", e))?;
+        let pushed = data.get("synced").and_then(Value::as_u64).unwrap_or(0);
+        Ok::<_, String>(serde_json::json!({ "pushed": pushed }))
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 fn ensure_sync_config(conn: &Connection) -> Result<(), String> {
@@ -1020,133 +1045,143 @@ fn set_project_root(state: State<AppState>, project_root: Option<String>) -> Res
 }
 
 #[tauri::command]
-fn rebuild_projects(state: State<AppState>) -> Result<Value, String> {
-    let conn = state.db.blocking_lock();
-    ensure_sync_config(&conn)?;
-    let custom_root = project_root_from_conn(&conn);
+async fn rebuild_projects(state: State<'_, AppState>) -> Result<Value, String> {
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn = db.blocking_lock();
+        ensure_sync_config(&conn)?;
+        let custom_root = project_root_from_conn(&conn);
 
-    // Clear existing project assignments.
-    conn.execute("UPDATE usage_events SET project_id = NULL", [])
-        .map_err(to_string)?;
-    conn.execute("UPDATE conversations SET project_id = NULL", [])
-        .map_err(to_string)?;
-    conn.execute("DELETE FROM projects", [])
-        .map_err(to_string)?;
-
-    // Re-infer projects for all events, preferring the original cwd/project_path
-    // captured during parsing (stored in source_project_path) over the log file path.
-    let mut stmt = conn
-        .prepare("SELECT id, provider_id, source_file_path, source_project_path, timestamp FROM usage_events")
-        .map_err(to_string)?;
-    let rows: Vec<(String, String, String, Option<String>, String)> = stmt
-        .query_map([], |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
-        })
-        .map_err(to_string)?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(to_string)?;
-    drop(stmt);
-
-    for (id, provider_id, source_file_path, source_project_path, timestamp) in &rows {
-        let raw_path = source_project_path
-            .clone()
-            .map(|p| expand_tilde(&p).to_string_lossy().to_string())
-            .or_else(|| infer_project_from_path(Path::new(&source_file_path)));
-        let project_path = if let Some(root) = custom_root.as_deref() {
-            if let Some(p) = raw_path
-                .as_deref()
-                .and_then(|p| project_under_root(Path::new(p), root))
-            {
-                Some(p)
-            } else {
-                project_under_root(Path::new(&source_file_path), root)
-            }
-        } else {
-            raw_path
-        };
-
-        if let Some(path) = project_path {
-            let project_id = upsert_project(&conn, &provider_id, &path, &timestamp)?;
-            conn.execute(
-                "UPDATE usage_events SET project_id = ?1 WHERE id = ?2",
-                params![project_id, id],
-            )
+        // Clear existing project assignments.
+        conn.execute("UPDATE usage_events SET project_id = NULL", [])
             .map_err(to_string)?;
+        conn.execute("UPDATE conversations SET project_id = NULL", [])
+            .map_err(to_string)?;
+        conn.execute("DELETE FROM projects", [])
+            .map_err(to_string)?;
+
+        // Re-infer projects for all events, preferring the original cwd/project_path
+        // captured during parsing (stored in source_project_path) over the log file path.
+        let mut stmt = conn
+            .prepare("SELECT id, provider_id, source_file_path, source_project_path, timestamp FROM usage_events")
+            .map_err(to_string)?;
+        let rows: Vec<(String, String, String, Option<String>, String)> = stmt
+            .query_map([], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+            })
+            .map_err(to_string)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(to_string)?;
+        drop(stmt);
+
+        for (id, provider_id, source_file_path, source_project_path, timestamp) in &rows {
+            let raw_path = source_project_path
+                .clone()
+                .map(|p| expand_tilde(&p).to_string_lossy().to_string())
+                .or_else(|| infer_project_from_path(Path::new(&source_file_path)));
+            let project_path = if let Some(root) = custom_root.as_deref() {
+                if let Some(p) = raw_path
+                    .as_deref()
+                    .and_then(|p| project_under_root(Path::new(p), root))
+                {
+                    Some(p)
+                } else {
+                    project_under_root(Path::new(&source_file_path), root)
+                }
+            } else {
+                raw_path
+            };
+
+            if let Some(path) = project_path {
+                let project_id = upsert_project(&conn, &provider_id, &path, &timestamp)?;
+                conn.execute(
+                    "UPDATE usage_events SET project_id = ?1 WHERE id = ?2",
+                    params![project_id, id],
+                )
+                .map_err(to_string)?;
+            }
         }
-    }
 
-    // Rebuild conversation project links from their events.
-    conn.execute(
-        "UPDATE conversations
-         SET project_id = (
-             SELECT project_id FROM usage_events
-             WHERE usage_events.conversation_id = conversations.id AND project_id IS NOT NULL
-             ORDER BY timestamp ASC LIMIT 1
-         )",
-        [],
-    )
-    .map_err(to_string)?;
+        // Rebuild conversation project links from their events.
+        conn.execute(
+            "UPDATE conversations
+             SET project_id = (
+                 SELECT project_id FROM usage_events
+                 WHERE usage_events.conversation_id = conversations.id AND project_id IS NOT NULL
+                 ORDER BY timestamp ASC LIMIT 1
+             )",
+            [],
+        )
+        .map_err(to_string)?;
 
-    apply_project_management(&conn).map_err(to_string)?;
+        apply_project_management(&conn).map_err(to_string)?;
 
-    Ok(serde_json::json!({ "rebuilt": rows.len() }))
+        Ok::<_, String>(serde_json::json!({ "rebuilt": rows.len() }))
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-fn login_sync(state: State<AppState>, input: LoginInput) -> Result<SyncStatus, String> {
-    let conn = state.db.blocking_lock();
-    ensure_sync_config(&conn)?;
+async fn login_sync(state: State<'_, AppState>, input: LoginInput) -> Result<SyncStatus, String> {
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn = db.blocking_lock();
+        ensure_sync_config(&conn)?;
 
-    let device_name = format!(
-        "{}-{}",
-        std::env::consts::OS,
-        whoami::fallible::hostname().unwrap_or_else(|_| "unknown".to_string())
-    );
+        let device_name = format!(
+            "{}-{}",
+            std::env::consts::OS,
+            whoami::fallible::hostname().unwrap_or_else(|_| "unknown".to_string())
+        );
 
-    let client = reqwest::blocking::Client::new();
-    let url = format!(
-        "{}/api/v1/auth/login",
-        input.server_url.trim_end_matches('/')
-    );
-    let resp = client
-        .post(&url)
-        .json(&serde_json::json!({
-            "login": input.login,
-            "password": input.password,
-            "device_name": device_name,
-        }))
-        .send()
-        .map_err(|e| format!("Login request failed: {}", e))?;
+        let client = reqwest::blocking::Client::new();
+        let url = format!(
+            "{}/api/v1/auth/login",
+            input.server_url.trim_end_matches('/')
+        );
+        let resp = client
+            .post(&url)
+            .json(&serde_json::json!({
+                "login": input.login,
+                "password": input.password,
+                "device_name": device_name,
+            }))
+            .send()
+            .map_err(|e| format!("Login request failed: {}", e))?;
 
-    if !resp.status().is_success() {
-        let body = resp.text().unwrap_or_default();
-        return Err(format!("Login failed: {}", body));
-    }
+        if !resp.status().is_success() {
+            let body = resp.text().unwrap_or_default();
+            return Err(format!("Login failed: {}", body));
+        }
 
-    let data: Value = resp
-        .json()
-        .map_err(|e| format!("Invalid login response: {}", e))?;
-    let token = data
-        .get("token")
-        .and_then(|t| t.as_str())
-        .ok_or("No token in login response")?;
-    let username = data
-        .get("user")
-        .and_then(|u| u.get("username"))
-        .and_then(|u| u.as_str())
-        .unwrap_or(&input.login)
-        .to_string();
+        let data: Value = resp
+            .json()
+            .map_err(|e| format!("Invalid login response: {}", e))?;
+        let token = data
+            .get("token")
+            .and_then(|t| t.as_str())
+            .ok_or("No token in login response")?;
+        let username = data
+            .get("user")
+            .and_then(|u| u.get("username"))
+            .and_then(|u| u.as_str())
+            .unwrap_or(&input.login)
+            .to_string();
 
-    let now = now();
-    conn.execute(
-        "UPDATE sync_config SET server_url = ?1, auth_token = ?2, username = ?3, device_name = ?4, sync_enabled = 1, updated_at = ?5 WHERE id = 1",
-        params![input.server_url, token, username, device_name, now],
-    )
-    .map_err(to_string)?;
-    let _ = pull_pricing_from_server(&conn);
-    recalculate_event_costs(&conn).map_err(to_string)?;
+        let now = now();
+        conn.execute(
+            "UPDATE sync_config SET server_url = ?1, auth_token = ?2, username = ?3, device_name = ?4, sync_enabled = 1, updated_at = ?5 WHERE id = 1",
+            params![input.server_url, token, username, device_name, now],
+        )
+        .map_err(to_string)?;
+        let _ = pull_pricing_from_server(&conn);
+        recalculate_event_costs(&conn).map_err(to_string)?;
 
-    get_sync_config(&conn)
+        Ok::<_, String>(get_sync_config(&conn)?)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
