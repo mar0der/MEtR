@@ -8,7 +8,7 @@ on:
 
 env:
   CARGO_INCREMENTAL: 0
-  NODE_VERSION: 20.14.0
+  NODE_VERSION: 20.19.0
   RUST_VERSION: 1.79.0
 
 # Minimal top-level permissions; write access is granted only to the release job.
