@@ -1,6 +1,6 @@
 [package]
 name = "metr"
-version = "26.24.10"
+version = "26.24.11"
 description = "Local LLM usage tracker"
 authors = ["MEtR"]
 edition = "2021"
