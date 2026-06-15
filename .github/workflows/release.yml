@@ -8,25 +8,55 @@ on:
 
 env:
   CARGO_INCREMENTAL: 0
+  NODE_VERSION: 20.14.0
+  RUST_VERSION: 1.79.0
 
-permissions:
-  contents: write
+# Minimal top-level permissions; write access is granted only to the release job.
+permissions: {}
 
 jobs:
-  build-macos:
-    runs-on: macos-latest
+  validate-version:
+    name: Validate version sync
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Verify version sync across package.json, Cargo.toml, and tauri.conf.json
+        run: |
+          PKG_VERSION=$(node -p "require('./package.json').version")
+          CARGO_VERSION=$(grep '^version' src-tauri/Cargo.toml | head -1 | sed 's/.*"\([^"]*\)".*/\1/')
+          TAURI_VERSION=$(grep '"version"' src-tauri/tauri.conf.json | head -1 | sed 's/.*"version": *"\([^"]*\)".*/\1/')
+          echo "package.json:     $PKG_VERSION"
+          echo "src-tauri/Cargo.toml:  $CARGO_VERSION"
+          echo "src-tauri/tauri.conf.json: $TAURI_VERSION"
+          if [ -z "$PKG_VERSION" ] || [ "$PKG_VERSION" != "$CARGO_VERSION" ] || [ "$PKG_VERSION" != "$TAURI_VERSION" ]; then
+            echo "ERROR: Version mismatch across package.json, Cargo.toml, and tauri.conf.json"
+            exit 1
+          fi
+          echo "All version files are in sync."
+
+  build-macos:
+    needs: [validate-version]
+    runs-on: macos-14
+    permissions:
+      contents: read
+      actions: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: 20
+          node-version: ${{ env.NODE_VERSION }}
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
+          toolchain: ${{ env.RUST_VERSION }}
           targets: aarch64-apple-darwin
 
       - name: Install dependencies
@@ -52,7 +82,7 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
 
       - name: Upload macOS artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: macos-artifacts
           path: |
@@ -61,19 +91,24 @@ jobs:
             src-tauri/target/release/bundle/macos/*.sig
 
   build-windows:
-    runs-on: windows-latest
+    needs: [validate-version]
+    runs-on: windows-2022
+    permissions:
+      contents: read
+      actions: write
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: 20
+          node-version: ${{ env.NODE_VERSION }}
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
+          toolchain: ${{ env.RUST_VERSION }}
           targets: x86_64-pc-windows-msvc
 
       - name: Install dependencies
@@ -86,7 +121,7 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
 
       - name: Upload Windows artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: windows-artifacts
           path: |
@@ -94,19 +129,24 @@ jobs:
             src-tauri/target/release/bundle/msi/*.sig
 
   build-linux:
-    runs-on: ubuntu-latest
+    needs: [validate-version]
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+      actions: write
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: 20
+          node-version: ${{ env.NODE_VERSION }}
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
+          toolchain: ${{ env.RUST_VERSION }}
           targets: x86_64-unknown-linux-gnu
 
       - name: Install Linux dependencies
@@ -124,7 +164,7 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
 
       - name: Upload Linux artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: linux-artifacts
           path: |
@@ -134,10 +174,13 @@ jobs:
 
   release:
     needs: [build-macos, build-windows, build-linux]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+      actions: read
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Extract version
         run: |
@@ -145,19 +188,19 @@ jobs:
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
 
       - name: Download macOS artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: macos-artifacts
           path: ./macos
 
       - name: Download Windows artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: windows-artifacts
           path: ./windows
 
       - name: Download Linux artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: linux-artifacts
           path: ./linux
@@ -179,9 +222,14 @@ jobs:
           mv ./macos/MEtR.app.tar.gz "./macos/MEtR_${VERSION}_aarch64.app.tar.gz"
           mv ./macos/MEtR.app.tar.gz.sig "./macos/MEtR_${VERSION}_aarch64.app.tar.gz.sig"
 
+      - name: Generate SHA256SUMS
+        run: |
+          find ./macos ./windows ./linux -maxdepth 1 -type f -print0 | xargs -0 sha256sum > SHA256SUMS
+          cat SHA256SUMS
+
       - name: Create GitHub Release
         if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           name: MEtR v${{ env.VERSION }}
           files: |
@@ -193,15 +241,18 @@ jobs:
             ./linux/*.deb
             ./linux/*.AppImage
             ./linux/*.sig
+            ./SHA256SUMS
           generate_release_notes: true
 
       - name: Connect to Tailscale
-        uses: tailscale/github-action@v3
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: tailscale/github-action@6cae46e2d796f265265cfcf628b72a32b4d7cade # v3
         with:
           authkey: ${{ secrets.TAILSCALE_AUTH_KEY }}
           args: --accept-dns=true
 
       - name: Setup SSH
+        if: startsWith(github.ref, 'refs/tags/')
         run: |
           mkdir -p ~/.ssh
           echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/deploy_key
@@ -209,6 +260,7 @@ jobs:
           ssh-keyscan -H ${{ secrets.DEPLOY_HOST }} >> ~/.ssh/known_hosts 2>/dev/null
 
       - name: Upload artifacts to server
+        if: startsWith(github.ref, 'refs/tags/')
         run: |
           # macOS installer → public releases
           scp -i ~/.ssh/deploy_key ./macos/*.dmg ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:/opt/metr-sync/site/storage/releases/
@@ -235,6 +287,25 @@ jobs:
           ssh -i ~/.ssh/deploy_key ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} "cp /opt/metr-sync/site/storage/releases/MEtR_${VERSION}_aarch64.dmg /opt/metr-sync/site/backend/storage/app/updates/ && cp /opt/metr-sync/site/storage/releases/MEtR_${VERSION}_x64_en-US.msi /opt/metr-sync/site/backend/storage/app/updates/ && cp /opt/metr-sync/site/storage/releases/MEtR_${VERSION}_amd64.deb /opt/metr-sync/site/backend/storage/app/updates/ 2>/dev/null || true"
 
       - name: Publish release to update server
+        if: startsWith(github.ref, 'refs/tags/')
         run: |
           NOTES="Auto-release from GitHub Actions"
-          ssh -i ~/.ssh/deploy_key ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} "docker exec metr-sync-php php artisan metr:release:publish --release-version=${VERSION} --notes='${NOTES}' --darwin-tgz=/var/www/html/storage/app/updates/MEtR_${VERSION}_aarch64.app.tar.gz --darwin-sig=/var/www/html/storage/app/updates/MEtR_${VERSION}_aarch64.app.tar.gz.sig --darwin-dmg=/var/www/html/storage/app/updates/MEtR_${VERSION}_aarch64.dmg --windows-msi=/var/www/html/storage/app/updates/MEtR_${VERSION}_x64_en-US.msi --windows-sig=/var/www/html/storage/app/updates/MEtR_${VERSION}_x64_en-US.msi.sig --linux-deb=/var/www/html/storage/app/updates/MEtR_${VERSION}_amd64.deb --linux-appimage=/var/www/html/storage/app/updates/MEtR_${VERSION}_amd64.AppImage --force"
+          ssh -i ~/.ssh/deploy_key ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} "docker exec metr-sync-php php artisan metr:release:publish --release-version=${VERSION} --notes='${NOTES}' --darwin-tgz=/var/www/html/storage/app/updates/MEtR_${VERSION}_aarch64.app.tar.gz --darwin-sig=/var/www/html/storage/app/updates/MEtR_${VERSION}_aarch64.app.tar.gz.sig --darwin-dmg=/var/www/html/storage/app/updates/MEtR_${VERSION}_aarch64.dmg --windows-msi=/var/www/html/storage/app/updates/MEtR_${VERSION}_x64_en-US.msi --windows-sig=/var/www/html/storage/app/updates/MEtR_${VERSION}_x64_en-US.msi.sig --linux-deb=/var/www/html/storage/app/updates/MEtR_${VERSION}_amd64.deb --linux-appimage=/var/www/html/storage/app/updates/MEtR_${VERSION}_amd64.AppImage"
+
+      - name: Post-publish smoke test
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          set -e
+          ENDPOINT="https://metr.petarpetkov.com/api/v1/update/darwin/aarch64/${VERSION}"
+          echo "Smoke-testing update endpoint: $ENDPOINT"
+          for i in 1 2 3 4 5; do
+            RESPONSE=$(curl -sSf "$ENDPOINT" || true)
+            if [ -n "$RESPONSE" ] && echo "$RESPONSE" | grep -q "\"version\".*\"${VERSION}\""; then
+              echo "Smoke test passed: endpoint returned version ${VERSION}"
+              exit 0
+            fi
+            echo "Attempt $i failed, retrying in 10s..."
+            sleep 10
+          done
+          echo "ERROR: Update endpoint did not return expected version ${VERSION}"
+          exit 1
