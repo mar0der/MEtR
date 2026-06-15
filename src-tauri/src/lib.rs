@@ -7,12 +7,16 @@ use std::error::Error;
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use tauri::{Emitter, Manager, State};
+use tokio::sync::Mutex;
 use uuid::Uuid;
 use walkdir::WalkDir;
 
 const MAX_SCAN_FILES_PER_SOURCE: usize = 50_000;
+const MAX_SOURCE_TOTAL_BYTES: u64 = 5 * 1024 * 1024 * 1024; // 5 GB
+const MAX_LINE_LENGTH: usize = 1_048_576; // 1 MB
+const MAX_JSON_DEPTH: usize = 64;
 const PARSER_VERSION: &str = "0.1.9";
 const KEYRING_SERVICE: &str = "com.petarpetkov.metr.sync";
 const KEYRING_USERNAME: &str = "auth_token";
@@ -232,7 +236,7 @@ pub fn run() {
             });
             // Run expensive maintenance in background so UI loads instantly
             let maint_db_path = db_path.join("metr.db");
-            std::thread::spawn(move || {
+            tauri::async_runtime::spawn_blocking(move || {
                 if let Ok(conn) = Connection::open(&maint_db_path) {
                     let _ = cleanup_known_bad_imports(&conn);
                     let _ = recalculate_event_costs(&conn);
@@ -316,7 +320,7 @@ fn detect_sources() -> Result<Vec<DetectedSource>, String> {
 
 #[tauri::command]
 fn list_sources(state: State<AppState>) -> Result<Vec<Source>, String> {
-    let conn = state.db.lock().map_err(to_string)?;
+    let conn = state.db.blocking_lock();
     query_sources(&conn)
 }
 
@@ -338,7 +342,7 @@ fn add_source(state: State<AppState>, input: AddSourceInput) -> Result<Source, S
         _ => infer_source(&path),
     };
     let now = now();
-    let conn = state.db.lock().map_err(to_string)?;
+    let conn = state.db.blocking_lock();
     ensure_provider(&conn, &provider_id, provider_display_name(&provider_id)).map_err(to_string)?;
     let existing: Option<String> = conn
         .query_row(
@@ -372,7 +376,7 @@ fn add_source(state: State<AppState>, input: AddSourceInput) -> Result<Source, S
 
 #[tauri::command]
 fn remove_source(state: State<AppState>, source_id: String) -> Result<(), String> {
-    let conn = state.db.lock().map_err(to_string)?;
+    let conn = state.db.blocking_lock();
     conn.execute("DELETE FROM log_sources WHERE id = ?1", params![source_id])
         .map_err(to_string)?;
     Ok(())
@@ -380,7 +384,7 @@ fn remove_source(state: State<AppState>, source_id: String) -> Result<(), String
 
 #[tauri::command]
 fn clear_parsed_data(state: State<AppState>) -> Result<(), String> {
-    let conn = state.db.lock().map_err(to_string)?;
+    let conn = state.db.blocking_lock();
     conn.execute_batch(
         "
         DELETE FROM usage_events;
@@ -400,7 +404,7 @@ fn clear_parsed_data(state: State<AppState>) -> Result<(), String> {
 
 #[tauri::command]
 fn list_projects(state: State<AppState>) -> Result<Value, String> {
-    let conn = state.db.lock().map_err(to_string)?;
+    let conn = state.db.blocking_lock();
     let mut stmt = conn
         .prepare(
             "SELECT p.id, p.provider_id, p.display_name, p.path, pm.custom_name, pm.merged_into_project_id
@@ -436,7 +440,7 @@ fn list_projects(state: State<AppState>) -> Result<Value, String> {
 #[tauri::command]
 fn rename_project(state: State<AppState>, project_id: String, custom_name: Option<String>) -> Result<Value, String> {
     {
-        let conn = state.db.lock().map_err(to_string)?;
+        let conn = state.db.blocking_lock();
         let provider_id: String = conn
             .query_row("SELECT provider_id FROM projects WHERE id = ?1", params![project_id], |r| r.get(0))
             .map_err(|_| "Project not found")?;
@@ -465,7 +469,7 @@ fn rename_project(state: State<AppState>, project_id: String, custom_name: Optio
 #[tauri::command]
 fn merge_projects(state: State<AppState>, target_project_id: String, source_project_ids: Vec<String>) -> Result<Value, String> {
     {
-        let mut conn = state.db.lock().map_err(to_string)?;
+        let mut conn = state.db.blocking_lock();
         let tx = conn.transaction().map_err(to_string)?;
         validate_merge_target(&tx, &target_project_id)?;
         let target_provider: String = tx
@@ -517,7 +521,7 @@ fn validate_merge_target(conn: &Connection, target_id: &str) -> Result<(), Strin
 #[tauri::command]
 fn unmerge_project(state: State<AppState>, project_id: String) -> Result<Value, String> {
     {
-        let mut conn = state.db.lock().map_err(to_string)?;
+        let mut conn = state.db.blocking_lock();
         let tx = conn.transaction().map_err(to_string)?;
         let target_id: Option<String> = tx
             .query_row(
@@ -583,7 +587,7 @@ fn validate_project_path(path: &str, state: &AppState) -> Result<PathBuf, String
         return Err("Path is not a directory.".to_string());
     }
 
-    let conn = state.db.lock().map_err(to_string)?;
+    let conn = state.db.blocking_lock();
     let project_root = project_root_from_conn(&conn);
     let home = dirs::home_dir();
     let allowed = match (project_root.as_deref(), home.as_deref()) {
@@ -601,30 +605,40 @@ fn validate_project_path(path: &str, state: &AppState) -> Result<PathBuf, String
 }
 
 #[tauri::command]
-fn rescan_all(state: State<AppState>) -> Result<Value, String> {
-    let conn = state.db.lock().map_err(to_string)?;
-    let sources = query_sources(&conn)?;
-    let mut imported = 0usize;
-    for source in sources.into_iter().filter(|s| s.enabled) {
-        imported += scan_source(&conn, &source, false)?;
-    }
-    Ok(serde_json::json!({ "imported": imported }))
+async fn rescan_all(state: State<'_, AppState>) -> Result<Value, String> {
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn = db.blocking_lock();
+        let sources = query_sources(&conn)?;
+        let mut imported = 0usize;
+        for source in sources.into_iter().filter(|s| s.enabled) {
+            imported += scan_source(&conn, &source, false)?;
+        }
+        Ok::<_, String>(serde_json::json!({ "imported": imported }))
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-fn rescan_all_full(state: State<AppState>) -> Result<Value, String> {
-    let conn = state.db.lock().map_err(to_string)?;
-    let sources = query_sources(&conn)?;
-    let mut imported = 0usize;
-    for source in sources.into_iter().filter(|s| s.enabled) {
-        imported += scan_source(&conn, &source, true)?;
-    }
-    Ok(serde_json::json!({ "imported": imported }))
+async fn rescan_all_full(state: State<'_, AppState>) -> Result<Value, String> {
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn = db.blocking_lock();
+        let sources = query_sources(&conn)?;
+        let mut imported = 0usize;
+        for source in sources.into_iter().filter(|s| s.enabled) {
+            imported += scan_source(&conn, &source, true)?;
+        }
+        Ok::<_, String>(serde_json::json!({ "imported": imported }))
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
 fn rescan_source(state: State<AppState>, source_id: String) -> Result<Value, String> {
-    let conn = state.db.lock().map_err(to_string)?;
+    let conn = state.db.blocking_lock();
     let source = query_source(&conn, &source_id)?;
     let imported = scan_source(&conn, &source, false)?;
     Ok(serde_json::json!({ "imported": imported }))
@@ -632,7 +646,7 @@ fn rescan_source(state: State<AppState>, source_id: String) -> Result<Value, Str
 
 #[tauri::command]
 fn get_dashboard_summary(state: State<AppState>) -> Result<DashboardSummary, String> {
-    let conn = state.db.lock().map_err(to_string)?;
+    let conn = state.db.blocking_lock();
     let providers = query_provider_summaries(&conn)?;
     let top_projects = query_top_projects(&conn)?;
     let (recent_sessions, _) = query_recent_sessions(&conn, None, 0, 30)?;
@@ -669,14 +683,14 @@ fn get_recent_sessions(
     offset: usize,
     limit: usize,
 ) -> Result<RecentSessionsResult, String> {
-    let conn = state.db.lock().map_err(to_string)?;
+    let conn = state.db.blocking_lock();
     let (sessions, total_count) = query_recent_sessions(&conn, provider_id.as_deref(), offset, limit)?;
     Ok(RecentSessionsResult { sessions, total_count })
 }
 
 #[tauri::command]
 fn list_subscriptions(state: State<AppState>) -> Result<Vec<Subscription>, String> {
-    let conn = state.db.lock().map_err(to_string)?;
+    let conn = state.db.blocking_lock();
     let mut stmt = conn
         .prepare(
             "SELECT id, provider_id, product_name, monthly_amount, currency, billing_anchor_day, enabled
@@ -710,7 +724,7 @@ fn create_subscription(
     if input.billing_anchor_day < 1 || input.billing_anchor_day > 28 {
         return Err("Billing anchor day must be between 1 and 28 (not all months have 29-31 days).".to_string());
     }
-    let conn = state.db.lock().map_err(to_string)?;
+    let conn = state.db.blocking_lock();
     ensure_provider(
         &conn,
         &input.provider_id,
@@ -755,7 +769,7 @@ fn create_subscription(
 
 #[tauri::command]
 fn delete_subscription(state: State<AppState>, id: String) -> Result<(), String> {
-    let conn = state.db.lock().map_err(to_string)?;
+    let conn = state.db.blocking_lock();
     conn.execute("DELETE FROM subscriptions WHERE id = ?1", params![id])
         .map_err(to_string)?;
     Ok(())
@@ -763,7 +777,7 @@ fn delete_subscription(state: State<AppState>, id: String) -> Result<(), String>
 
 #[tauri::command]
 fn list_pricing_catalog(state: State<AppState>) -> Result<Vec<Value>, String> {
-    let conn = state.db.lock().map_err(to_string)?;
+    let conn = state.db.blocking_lock();
     let mut stmt = conn
         .prepare(
             "SELECT id, provider_id, model, aliases_json, input_per_1m, output_per_1m,
@@ -810,50 +824,55 @@ struct AddPricingInput {
 }
 
 #[tauri::command]
-fn add_pricing(state: State<AppState>, input: AddPricingInput) -> Result<Value, String> {
-    let conn = state.db.lock().map_err(to_string)?;
-    let id = format!("{}:{}", input.provider_id, input.model.to_ascii_lowercase());
-    let now_ts = now();
-    conn.execute(
-        "INSERT INTO pricing_catalogs
-         (id, provider_id, model, aliases_json, source_url, catalog_version, effective_from,
-          input_per_1m, output_per_1m, cached_input_per_1m, cache_write_per_1m, cache_read_per_1m,
-          reasoning_per_1m, tool_per_1m, user_override, created_at, updated_at)
-         VALUES (?1, ?2, ?3, '[]', ?4, 'user', '2026-01-01', ?5, ?6, ?7, ?8, ?9, ?10, ?11, 1, ?12, ?12)
-         ON CONFLICT(id) DO UPDATE SET
-           input_per_1m = excluded.input_per_1m,
-           output_per_1m = excluded.output_per_1m,
-           cached_input_per_1m = excluded.cached_input_per_1m,
-           cache_write_per_1m = excluded.cache_write_per_1m,
-           cache_read_per_1m = excluded.cache_read_per_1m,
-           reasoning_per_1m = excluded.reasoning_per_1m,
-           tool_per_1m = excluded.tool_per_1m,
-           source_url = excluded.source_url,
-           user_override = 1,
-           updated_at = excluded.updated_at",
-        params![
-            id,
-            input.provider_id,
-            input.model,
-            input.source_url,
-            input.input_per_1m,
-            input.output_per_1m,
-            input.cached_input_per_1m,
-            input.cache_write_per_1m,
-            input.cache_read_per_1m,
-            input.reasoning_per_1m,
-            input.tool_per_1m,
-            now_ts
-        ],
-    )
-    .map_err(to_string)?;
-    recalculate_event_costs(&conn).map_err(to_string)?;
-    Ok(serde_json::json!({ "id": id, "updated": true }))
+async fn add_pricing(state: State<'_, AppState>, input: AddPricingInput) -> Result<Value, String> {
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn = db.blocking_lock();
+        let id = format!("{}:{}", input.provider_id, input.model.to_ascii_lowercase());
+        let now_ts = now();
+        conn.execute(
+            "INSERT INTO pricing_catalogs
+             (id, provider_id, model, aliases_json, source_url, catalog_version, effective_from,
+              input_per_1m, output_per_1m, cached_input_per_1m, cache_write_per_1m, cache_read_per_1m,
+              reasoning_per_1m, tool_per_1m, user_override, created_at, updated_at)
+             VALUES (?1, ?2, ?3, '[]', ?4, 'user', '2026-01-01', ?5, ?6, ?7, ?8, ?9, ?10, ?11, 1, ?12, ?12)
+             ON CONFLICT(id) DO UPDATE SET
+               input_per_1m = excluded.input_per_1m,
+               output_per_1m = excluded.output_per_1m,
+               cached_input_per_1m = excluded.cached_input_per_1m,
+               cache_write_per_1m = excluded.cache_write_per_1m,
+               cache_read_per_1m = excluded.cache_read_per_1m,
+               reasoning_per_1m = excluded.reasoning_per_1m,
+               tool_per_1m = excluded.tool_per_1m,
+               source_url = excluded.source_url,
+               user_override = 1,
+               updated_at = excluded.updated_at",
+            params![
+                id,
+                input.provider_id,
+                input.model,
+                input.source_url,
+                input.input_per_1m,
+                input.output_per_1m,
+                input.cached_input_per_1m,
+                input.cache_write_per_1m,
+                input.cache_read_per_1m,
+                input.reasoning_per_1m,
+                input.tool_per_1m,
+                now_ts
+            ],
+        )
+        .map_err(to_string)?;
+        recalculate_event_costs(&conn).map_err(to_string)?;
+        Ok::<_, String>(serde_json::json!({ "id": id, "updated": true }))
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
 fn list_missing_models(state: State<AppState>) -> Result<Vec<Value>, String> {
-    let conn = state.db.lock().map_err(to_string)?;
+    let conn = state.db.blocking_lock();
     let mut stmt = conn
         .prepare(
             "SELECT u.provider_id, u.model, COUNT(*) as event_count
@@ -885,79 +904,89 @@ fn list_missing_models(state: State<AppState>) -> Result<Vec<Value>, String> {
 }
 
 #[tauri::command]
-fn pull_pricing(state: State<AppState>) -> Result<Value, String> {
-    let conn = state.db.lock().map_err(to_string)?;
-    let count = pull_pricing_from_server(&conn)?;
-    recalculate_event_costs(&conn).map_err(to_string)?;
-    Ok(serde_json::json!({ "pulled": count }))
+async fn pull_pricing(state: State<'_, AppState>) -> Result<Value, String> {
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn = db.blocking_lock();
+        let count = pull_pricing_from_server(&conn)?;
+        recalculate_event_costs(&conn).map_err(to_string)?;
+        Ok::<_, String>(serde_json::json!({ "pulled": count }))
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-fn push_pricing(state: State<AppState>) -> Result<Value, String> {
-    let conn = state.db.lock().map_err(to_string)?;
-    ensure_sync_config(&conn)?;
-    let server_url: String = conn
-        .query_row(
-            "SELECT server_url FROM sync_config WHERE id = 1",
-            [],
-            |r| r.get(0),
-        )
-        .map_err(to_string)?;
-    let token = get_sync_token(&conn)?.ok_or("Not logged in. Please log in first.")?;
+async fn push_pricing(state: State<'_, AppState>) -> Result<Value, String> {
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn = db.blocking_lock();
+        ensure_sync_config(&conn)?;
+        let server_url: String = conn
+            .query_row(
+                "SELECT server_url FROM sync_config WHERE id = 1",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(to_string)?;
+        let token = get_sync_token(&conn)?.ok_or("Not logged in. Please log in first.")?;
 
-    let mut stmt = conn
-        .prepare(
-            "SELECT provider_id, model, aliases_json, input_per_1m, output_per_1m,
-             cached_input_per_1m, cache_write_per_1m, cache_read_per_1m,
-             reasoning_per_1m, tool_per_1m, source_url, catalog_version
-             FROM pricing_catalogs",
-        )
-        .map_err(to_string)?;
-    let prices: Vec<Value> = stmt
-        .query_map([], |r| {
-            let aliases_json: String = r.get::<_, String>(2)?;
-            let aliases: Vec<String> = serde_json::from_str(&aliases_json).unwrap_or_default();
-            Ok(serde_json::json!({
-                "provider_id": r.get::<_, String>(0)?,
-                "model": r.get::<_, String>(1)?,
-                "aliases_json": aliases,
-                "input_per_1m": r.get::<_, Option<f64>>(3)?,
-                "output_per_1m": r.get::<_, Option<f64>>(4)?,
-                "cached_input_per_1m": r.get::<_, Option<f64>>(5)?,
-                "cache_write_per_1m": r.get::<_, Option<f64>>(6)?,
-                "cache_read_per_1m": r.get::<_, Option<f64>>(7)?,
-                "reasoning_per_1m": r.get::<_, Option<f64>>(8)?,
-                "tool_per_1m": r.get::<_, Option<f64>>(9)?,
-                "source_url": r.get::<_, Option<String>>(10)?,
-                "catalog_version": r.get::<_, Option<String>>(11)?,
-            }))
-        })
-        .map_err(to_string)?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(to_string)?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT provider_id, model, aliases_json, input_per_1m, output_per_1m,
+                 cached_input_per_1m, cache_write_per_1m, cache_read_per_1m,
+                 reasoning_per_1m, tool_per_1m, source_url, catalog_version
+                 FROM pricing_catalogs",
+            )
+            .map_err(to_string)?;
+        let prices: Vec<Value> = stmt
+            .query_map([], |r| {
+                let aliases_json: String = r.get::<_, String>(2)?;
+                let aliases: Vec<String> = serde_json::from_str(&aliases_json).unwrap_or_default();
+                Ok(serde_json::json!({
+                    "provider_id": r.get::<_, String>(0)?,
+                    "model": r.get::<_, String>(1)?,
+                    "aliases_json": aliases,
+                    "input_per_1m": r.get::<_, Option<f64>>(3)?,
+                    "output_per_1m": r.get::<_, Option<f64>>(4)?,
+                    "cached_input_per_1m": r.get::<_, Option<f64>>(5)?,
+                    "cache_write_per_1m": r.get::<_, Option<f64>>(6)?,
+                    "cache_read_per_1m": r.get::<_, Option<f64>>(7)?,
+                    "reasoning_per_1m": r.get::<_, Option<f64>>(8)?,
+                    "tool_per_1m": r.get::<_, Option<f64>>(9)?,
+                    "source_url": r.get::<_, Option<String>>(10)?,
+                    "catalog_version": r.get::<_, Option<String>>(11)?,
+                }))
+            })
+            .map_err(to_string)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(to_string)?;
 
-    if prices.is_empty() {
-        return Ok(serde_json::json!({ "pushed": 0 }));
-    }
+        if prices.is_empty() {
+            return Ok::<_, String>(serde_json::json!({ "pushed": 0 }));
+        }
 
-    let base_url = server_url.trim_end_matches('/');
-    let client = reqwest::blocking::Client::new();
-    let resp = client
-        .post(format!("{}/api/v1/sync/pricing", base_url))
-        .header("Authorization", format!("Bearer {}", token))
-        .header("Accept", "application/json")
-        .json(&serde_json::json!({ "prices": prices }))
-        .send()
-        .map_err(|e| format!("Pricing push request failed: {}", e))?;
+        let base_url = server_url.trim_end_matches('/');
+        let client = reqwest::blocking::Client::new();
+        let resp = client
+            .post(format!("{}/api/v1/sync/pricing", base_url))
+            .header("Authorization", format!("Bearer {}", token))
+            .header("Accept", "application/json")
+            .json(&serde_json::json!({ "prices": prices }))
+            .send()
+            .map_err(|e| format!("Pricing push request failed: {}", e))?;
 
-    if !resp.status().is_success() {
-        let body = resp.text().unwrap_or_default();
-        return Err(format!("Pricing push failed: {}", body));
-    }
+        if !resp.status().is_success() {
+            let body = resp.text().unwrap_or_default();
+            return Err(format!("Pricing push failed: {}", body));
+        }
 
-    let data: Value = resp.json().map_err(|e| format!("Invalid pricing push response: {}", e))?;
-    let pushed = data.get("synced").and_then(Value::as_u64).unwrap_or(0);
-    Ok(serde_json::json!({ "pushed": pushed }))
+        let data: Value = resp.json().map_err(|e| format!("Invalid pricing push response: {}", e))?;
+        let pushed = data.get("synced").and_then(Value::as_u64).unwrap_or(0);
+        Ok::<_, String>(serde_json::json!({ "pushed": pushed }))
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 fn ensure_sync_config(conn: &Connection) -> Result<(), String> {
@@ -1177,7 +1206,7 @@ fn get_sync_config(conn: &Connection) -> Result<SyncStatus, String> {
 #[tauri::command]
 fn configure_sync_server(state: State<AppState>, server_url: String) -> Result<SyncStatus, String> {
     let (validated, warning) = validate_server_url(&server_url)?;
-    let conn = state.db.lock().map_err(to_string)?;
+    let conn = state.db.blocking_lock();
     ensure_sync_config(&conn)?;
     let now = now();
     conn.execute(
@@ -1193,7 +1222,7 @@ fn configure_sync_server(state: State<AppState>, server_url: String) -> Result<S
 
 #[tauri::command]
 fn get_project_root(state: State<AppState>) -> Result<Option<String>, String> {
-    let conn = state.db.lock().map_err(to_string)?;
+    let conn = state.db.blocking_lock();
     ensure_sync_config(&conn)?;
     let root: Option<String> = conn
         .query_row(
@@ -1207,7 +1236,7 @@ fn get_project_root(state: State<AppState>) -> Result<Option<String>, String> {
 
 #[tauri::command]
 fn set_project_root(state: State<AppState>, project_root: Option<String>) -> Result<SyncStatus, String> {
-    let conn = state.db.lock().map_err(to_string)?;
+    let conn = state.db.blocking_lock();
     ensure_sync_config(&conn)?;
     let now = now();
     let value = project_root.as_deref().unwrap_or("");
@@ -1220,138 +1249,148 @@ fn set_project_root(state: State<AppState>, project_root: Option<String>) -> Res
 }
 
 #[tauri::command]
-fn rebuild_projects(state: State<AppState>) -> Result<Value, String> {
-    let conn = state.db.lock().map_err(to_string)?;
-    ensure_sync_config(&conn)?;
-    let custom_root = project_root_from_conn(&conn);
+async fn rebuild_projects(state: State<'_, AppState>) -> Result<Value, String> {
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn = db.blocking_lock();
+        ensure_sync_config(&conn)?;
+        let custom_root = project_root_from_conn(&conn);
 
-    // Clear existing project assignments.
-    conn.execute("UPDATE usage_events SET project_id = NULL", [])
-        .map_err(to_string)?;
-    conn.execute("UPDATE conversations SET project_id = NULL", [])
-        .map_err(to_string)?;
-    conn.execute("DELETE FROM projects", [])
-        .map_err(to_string)?;
-
-    // Re-infer projects for all events, preferring the original cwd/project_path
-    // captured during parsing (stored in source_project_path) over the log file path.
-    let mut stmt = conn
-        .prepare("SELECT id, provider_id, source_file_path, source_project_path, timestamp FROM usage_events")
-        .map_err(to_string)?;
-    let rows: Vec<(String, String, String, Option<String>, String)> = stmt
-        .query_map([], |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
-        })
-        .map_err(to_string)?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(to_string)?;
-    drop(stmt);
-
-    for (id, provider_id, source_file_path, source_project_path, timestamp) in &rows {
-        let raw_path = source_project_path
-            .clone()
-            .map(|p| expand_tilde(&p).to_string_lossy().to_string())
-            .or_else(|| infer_project_from_path(Path::new(&source_file_path)));
-        let project_path = if let Some(root) = custom_root.as_deref() {
-            if let Some(p) = raw_path
-                .as_deref()
-                .and_then(|p| project_under_root(Path::new(p), root))
-            {
-                Some(p)
-            } else {
-                project_under_root(Path::new(&source_file_path), root)
-            }
-        } else {
-            raw_path
-        };
-
-        if let Some(path) = project_path {
-            let project_id = upsert_project(&conn, provider_id, &path, timestamp)?;
-            conn.execute(
-                "UPDATE usage_events SET project_id = ?1 WHERE id = ?2",
-                params![project_id, id],
-            )
+        // Clear existing project assignments.
+        conn.execute("UPDATE usage_events SET project_id = NULL", [])
             .map_err(to_string)?;
+        conn.execute("UPDATE conversations SET project_id = NULL", [])
+            .map_err(to_string)?;
+        conn.execute("DELETE FROM projects", [])
+            .map_err(to_string)?;
+
+        // Re-infer projects for all events, preferring the original cwd/project_path
+        // captured during parsing (stored in source_project_path) over the log file path.
+        let mut stmt = conn
+            .prepare("SELECT id, provider_id, source_file_path, source_project_path, timestamp FROM usage_events")
+            .map_err(to_string)?;
+        let rows: Vec<(String, String, String, Option<String>, String)> = stmt
+            .query_map([], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+            })
+            .map_err(to_string)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(to_string)?;
+        drop(stmt);
+
+        for (id, provider_id, source_file_path, source_project_path, timestamp) in &rows {
+            let raw_path = source_project_path
+                .clone()
+                .map(|p| expand_tilde(&p).to_string_lossy().to_string())
+                .or_else(|| infer_project_from_path(Path::new(&source_file_path)));
+            let project_path = if let Some(root) = custom_root.as_deref() {
+                if let Some(p) = raw_path
+                    .as_deref()
+                    .and_then(|p| project_under_root(Path::new(p), root))
+                {
+                    Some(p)
+                } else {
+                    project_under_root(Path::new(&source_file_path), root)
+                }
+            } else {
+                raw_path
+            };
+
+            if let Some(path) = project_path {
+                let project_id = upsert_project(&conn, provider_id, &path, timestamp)?;
+                conn.execute(
+                    "UPDATE usage_events SET project_id = ?1 WHERE id = ?2",
+                    params![project_id, id],
+                )
+                .map_err(to_string)?;
+            }
         }
-    }
 
-    // Rebuild conversation project links from their events.
-    conn.execute(
-        "UPDATE conversations
-         SET project_id = (
-             SELECT project_id FROM usage_events
-             WHERE usage_events.conversation_id = conversations.id AND project_id IS NOT NULL
-             ORDER BY timestamp ASC LIMIT 1
-         )",
-        [],
-    )
-    .map_err(to_string)?;
+        // Rebuild conversation project links from their events.
+        conn.execute(
+            "UPDATE conversations
+             SET project_id = (
+                 SELECT project_id FROM usage_events
+                 WHERE usage_events.conversation_id = conversations.id AND project_id IS NOT NULL
+                 ORDER BY timestamp ASC LIMIT 1
+             )",
+            [],
+        )
+        .map_err(to_string)?;
 
-    apply_project_management(&conn).map_err(to_string)?;
+        apply_project_management(&conn).map_err(to_string)?;
 
-    Ok(serde_json::json!({ "rebuilt": rows.len() }))
+        Ok::<_, String>(serde_json::json!({ "rebuilt": rows.len() }))
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-fn login_sync(state: State<AppState>, input: LoginInput) -> Result<SyncStatus, String> {
-    let conn = state.db.lock().map_err(to_string)?;
-    ensure_sync_config(&conn)?;
+async fn login_sync(state: State<'_, AppState>, input: LoginInput) -> Result<SyncStatus, String> {
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn = db.blocking_lock();
+        ensure_sync_config(&conn)?;
 
-    let device_name = format!(
-        "{}-{}",
-        std::env::consts::OS,
-        whoami::fallible::hostname().unwrap_or_else(|_| "unknown".to_string())
-    );
+        let device_name = format!(
+            "{}-{}",
+            std::env::consts::OS,
+            whoami::fallible::hostname().unwrap_or_else(|_| "unknown".to_string())
+        );
 
-    let (validated, _warning) = validate_server_url(&input.server_url)?;
+        let (validated, _warning) = validate_server_url(&input.server_url)?;
 
-    let client = reqwest::blocking::Client::new();
-    let url = format!("{}/api/v1/auth/login", validated.trim_end_matches('/'));
-    let resp = client
-        .post(&url)
-        .json(&serde_json::json!({
-            "login": input.login,
-            "password": input.password,
-            "device_name": device_name,
-        }))
-        .send()
-        .map_err(|e| format!("Login request failed: {}", e))?;
+        let client = reqwest::blocking::Client::new();
+        let url = format!("{}/api/v1/auth/login", validated.trim_end_matches('/'));
+        let resp = client
+            .post(&url)
+            .json(&serde_json::json!({
+                "login": input.login,
+                "password": input.password,
+                "device_name": device_name,
+            }))
+            .send()
+            .map_err(|e| format!("Login request failed: {}", e))?;
 
-    if !resp.status().is_success() {
-        let body = resp.text().unwrap_or_default();
-        return Err(format!("Login failed: {}", body));
-    }
+        if !resp.status().is_success() {
+            let body = resp.text().unwrap_or_default();
+            return Err(format!("Login failed: {}", body));
+        }
 
-    let data: Value = resp
-        .json()
-        .map_err(|e| format!("Invalid login response: {}", e))?;
-    let token = data
-        .get("token")
-        .and_then(|t| t.as_str())
-        .ok_or("No token in login response")?;
-    let username = data
-        .get("user")
-        .and_then(|u| u.get("username"))
-        .and_then(|u| u.as_str())
-        .unwrap_or(&input.login)
-        .to_string();
+        let data: Value = resp
+            .json()
+            .map_err(|e| format!("Invalid login response: {}", e))?;
+        let token = data
+            .get("token")
+            .and_then(|t| t.as_str())
+            .ok_or("No token in login response")?;
+        let username = data
+            .get("user")
+            .and_then(|u| u.get("username"))
+            .and_then(|u| u.as_str())
+            .unwrap_or(&input.login)
+            .to_string();
 
-    let now = now();
-    conn.execute(
-        "UPDATE sync_config SET server_url = ?1, auth_token = NULL, username = ?2, device_name = ?3, sync_enabled = 1, updated_at = ?4 WHERE id = 1",
-        params![validated, username, device_name, now],
-    )
-    .map_err(to_string)?;
-    set_sync_token(&conn, token)?;
-    let _ = pull_pricing_from_server(&conn);
-    recalculate_event_costs(&conn).map_err(to_string)?;
+        let now = now();
+        conn.execute(
+            "UPDATE sync_config SET server_url = ?1, auth_token = NULL, username = ?2, device_name = ?3, sync_enabled = 1, updated_at = ?4 WHERE id = 1",
+            params![validated, username, device_name, now],
+        )
+        .map_err(to_string)?;
+        set_sync_token(&conn, token)?;
+        let _ = pull_pricing_from_server(&conn);
+        recalculate_event_costs(&conn).map_err(to_string)?;
 
-    get_sync_config(&conn)
+        get_sync_config(&conn)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
 fn logout_sync(state: State<AppState>) -> Result<SyncStatus, String> {
-    let conn = state.db.lock().map_err(to_string)?;
+    let conn = state.db.blocking_lock();
     ensure_sync_config(&conn)?;
 
     let server_url: String = conn
@@ -1385,7 +1424,7 @@ fn logout_sync(state: State<AppState>) -> Result<SyncStatus, String> {
 
 #[tauri::command]
 fn get_sync_status(state: State<AppState>) -> Result<SyncStatus, String> {
-    let conn = state.db.lock().map_err(to_string)?;
+    let conn = state.db.blocking_lock();
     get_sync_config(&conn)
 }
 
@@ -1393,7 +1432,7 @@ fn get_sync_status(state: State<AppState>) -> Result<SyncStatus, String> {
 async fn sync_now(state: State<'_, AppState>, app: tauri::AppHandle) -> Result<SyncResult, String> {
     let db = state.db.clone();
     {
-        let conn = db.lock().map_err(to_string)?;
+        let conn = db.lock().await;
         let now = now();
         conn.execute(
             "UPDATE sync_config SET last_sync_attempt_at = ?1, updated_at = ?1 WHERE id = 1",
@@ -1406,7 +1445,7 @@ async fn sync_now(state: State<'_, AppState>, app: tauri::AppHandle) -> Result<S
     let progress_tx_clone = progress_tx.clone();
 
     let sync_task = tauri::async_runtime::spawn_blocking(move || {
-        let conn = db.lock().map_err(to_string)?;
+        let conn = db.blocking_lock();
         let result = perform_sync(&conn, false, |uploaded, total| {
             let _ = progress_tx_clone.send((uploaded, total));
         });
@@ -1426,7 +1465,7 @@ async fn sync_now(state: State<'_, AppState>, app: tauri::AppHandle) -> Result<S
     let result = match sync_task.await {
         Ok(Ok(result)) => Ok(result),
         Ok(Err(err)) => {
-            let conn = state.db.lock().map_err(to_string)?;
+            let conn = state.db.lock().await;
             let _ = conn.execute(
                 "UPDATE sync_config SET last_sync_error = ?1, updated_at = ?2 WHERE id = 1",
                 params![&err, now()],
@@ -1435,7 +1474,7 @@ async fn sync_now(state: State<'_, AppState>, app: tauri::AppHandle) -> Result<S
         }
         Err(e) => {
             let err = format!("Sync task failed: {:?}", e);
-            let conn = state.db.lock().map_err(to_string)?;
+            let conn = state.db.lock().await;
             let _ = conn.execute(
                 "UPDATE sync_config SET last_sync_error = ?1, updated_at = ?2 WHERE id = 1",
                 params![&err, now()],
@@ -1452,7 +1491,7 @@ async fn sync_now(state: State<'_, AppState>, app: tauri::AppHandle) -> Result<S
 async fn full_resync(state: State<'_, AppState>, app: tauri::AppHandle) -> Result<SyncResult, String> {
     let db = state.db.clone();
     {
-        let conn = db.lock().map_err(to_string)?;
+        let conn = db.lock().await;
         let now = now();
         conn.execute(
             "UPDATE sync_config SET last_sync_attempt_at = ?1, updated_at = ?1 WHERE id = 1",
@@ -1465,7 +1504,7 @@ async fn full_resync(state: State<'_, AppState>, app: tauri::AppHandle) -> Resul
     let progress_tx_clone = progress_tx.clone();
 
     let sync_task = tauri::async_runtime::spawn_blocking(move || {
-        let conn = db.lock().map_err(to_string)?;
+        let conn = db.blocking_lock();
         let result = perform_sync(&conn, true, |uploaded, total| {
             let _ = progress_tx_clone.send((uploaded, total));
         });
@@ -1485,7 +1524,7 @@ async fn full_resync(state: State<'_, AppState>, app: tauri::AppHandle) -> Resul
     let result = match sync_task.await {
         Ok(Ok(result)) => Ok(result),
         Ok(Err(err)) => {
-            let conn = state.db.lock().map_err(to_string)?;
+            let conn = state.db.lock().await;
             let _ = conn.execute(
                 "UPDATE sync_config SET last_sync_error = ?1, updated_at = ?2 WHERE id = 1",
                 params![&err, now()],
@@ -1494,7 +1533,7 @@ async fn full_resync(state: State<'_, AppState>, app: tauri::AppHandle) -> Resul
         }
         Err(e) => {
             let err = format!("Sync task failed: {:?}", e);
-            let conn = state.db.lock().map_err(to_string)?;
+            let conn = state.db.lock().await;
             let _ = conn.execute(
                 "UPDATE sync_config SET last_sync_error = ?1, updated_at = ?2 WHERE id = 1",
                 params![&err, now()],
@@ -1781,7 +1820,7 @@ where
 
 #[tauri::command]
 fn debug_sync_state(state: State<AppState>) -> Result<Value, String> {
-    let conn = state.db.lock().map_err(to_string)?;
+    let conn = state.db.blocking_lock();
 
     let pending: i64 = conn
         .query_row("SELECT COUNT(*) FROM usage_events WHERE synced_at IS NULL", [], |r| r.get(0))
@@ -2595,6 +2634,7 @@ fn scan_source(conn: &Connection, source: &Source, full_scan: bool) -> Result<us
     let mut scanned_files = 0usize;
     let mut skipped_unchanged = 0usize;
     let mut skipped_after_limit = false;
+    let mut total_bytes_scanned: u64 = 0;
     for entry in WalkDir::new(&root)
         .max_depth(8)
         .follow_links(false)
@@ -2613,6 +2653,11 @@ fn scan_source(conn: &Connection, source: &Source, full_scan: bool) -> Result<us
             Ok(metadata) => metadata,
             Err(_) => continue,
         };
+        if total_bytes_scanned + metadata.len() > MAX_SOURCE_TOTAL_BYTES {
+            skipped_after_limit = true;
+            break;
+        }
+        total_bytes_scanned += metadata.len();
         let modified = metadata
             .modified()
             .ok()
@@ -2631,17 +2676,9 @@ fn scan_source(conn: &Connection, source: &Source, full_scan: bool) -> Result<us
             metadata.len(),
             modified
         ));
-        let events = if source.parser_id == "codex" && metadata.len() > 100 * 1024 * 1024 {
-            match parse_file_streaming(source, entry.path()) {
-                Ok(events) => events,
-                Err(_) => continue,
-            }
-        } else {
-            let content = match fs::read_to_string(entry.path()) {
-                Ok(content) => content,
-                Err(_) => continue,
-            };
-            parse_content(source, entry.path(), &content)
+        let events = match parse_file_streaming(source, entry.path()) {
+            Ok(events) => events,
+            Err(_) => continue,
         };
         for event in events {
             if insert_event(conn, source, entry.path(), &modified, &source_hash, event, custom_root.as_deref())? {
@@ -2663,7 +2700,7 @@ fn scan_source(conn: &Connection, source: &Source, full_scan: bool) -> Result<us
         params![
             now(),
             format!(
-                "{} {scanned_files} file(s), imported {imported} new model calls{}{}.",
+                "{} {scanned_files} file(s), imported {imported} new model calls{}{}{}.",
                 if full_scan {
                     "Full scanned"
                 } else {
@@ -2674,9 +2711,16 @@ fn scan_source(conn: &Connection, source: &Source, full_scan: bool) -> Result<us
                 } else {
                     String::new()
                 },
-
                 if skipped_after_limit {
-                    format!(", stopped at the {MAX_SCAN_FILES_PER_SOURCE} file safety limit")
+                    format!(", stopped at the {MAX_SCAN_FILES_PER_SOURCE} file / {} GB safety limit",
+                        MAX_SOURCE_TOTAL_BYTES / (1024 * 1024 * 1024)
+                    )
+                } else {
+                    String::new()
+                },
+                if total_bytes_scanned > 0 {
+                    format!(", total {} MB scanned", total_bytes_scanned / (1024 * 1024)
+                    )
                 } else {
                     String::new()
                 }
@@ -2768,6 +2812,10 @@ fn parse_content(source: &Source, path: &Path, content: &str) -> Vec<ParsedEvent
     let mut codex_context = CodexParseContext::default();
     let mut generic_context = GenericParseContext::default();
     for line in content.lines() {
+        if line.len() > MAX_LINE_LENGTH {
+            offset += line.len() as i64 + 1;
+            continue;
+        }
         let trimmed = line.trim();
         parse_line_into_events(
             source,
@@ -2782,7 +2830,7 @@ fn parse_content(source: &Source, path: &Path, content: &str) -> Vec<ParsedEvent
     }
     if events.is_empty() {
         if let Ok(value) = serde_json::from_str::<Value>(content) {
-            collect_json_events(source, path, &value, &mut events);
+            collect_json_events(source, path, &value, &mut events, 0);
         }
     }
     events
@@ -2790,6 +2838,7 @@ fn parse_content(source: &Source, path: &Path, content: &str) -> Vec<ParsedEvent
 
 fn parse_file_streaming(source: &Source, path: &Path) -> Result<Vec<ParsedEvent>, String> {
     let file = fs::File::open(path).map_err(to_string)?;
+    let metadata = file.metadata().map_err(to_string)?;
     let reader = BufReader::new(file);
     let mut events = Vec::new();
     let mut offset = 0i64;
@@ -2798,6 +2847,10 @@ fn parse_file_streaming(source: &Source, path: &Path) -> Result<Vec<ParsedEvent>
 
     for line in reader.lines() {
         let line = line.map_err(to_string)?;
+        if line.len() > MAX_LINE_LENGTH {
+            offset += line.len() as i64 + 1;
+            continue;
+        }
         let trimmed = line.trim();
         parse_line_into_events(
             source,
@@ -2809,6 +2862,14 @@ fn parse_file_streaming(source: &Source, path: &Path) -> Result<Vec<ParsedEvent>
             &mut events,
         );
         offset += line.len() as i64 + 1;
+    }
+
+    // If no JSONL events were found and the file is small enough, try parsing it as a
+    // single JSON object/array. Files larger than 100 MB are not read into memory.
+    if events.is_empty() && metadata.len() <= 100 * 1024 * 1024 {
+        if let Ok(content) = fs::read_to_string(path) {
+            events.extend(parse_content(source, path, &content));
+        }
     }
 
     Ok(events)
@@ -2979,20 +3040,29 @@ fn parse_codex_value(
     })
 }
 
-fn collect_json_events(source: &Source, path: &Path, value: &Value, events: &mut Vec<ParsedEvent>) {
+fn collect_json_events(
+    source: &Source,
+    path: &Path,
+    value: &Value,
+    events: &mut Vec<ParsedEvent>,
+    depth: usize,
+) {
+    if depth > MAX_JSON_DEPTH {
+        return;
+    }
     if let Some(event) = parse_value(source, path, value, None, &value.to_string(), None) {
         events.push(event);
     }
     match value {
         Value::Array(items) => {
             for item in items {
-                collect_json_events(source, path, item, events);
+                collect_json_events(source, path, item, events, depth + 1);
             }
         }
         Value::Object(map) => {
             for item in map.values() {
                 if item.is_array() || item.is_object() {
-                    collect_json_events(source, path, item, events);
+                    collect_json_events(source, path, item, events, depth + 1);
                 }
             }
         }
@@ -3691,7 +3761,7 @@ fn int_field(value: &Value, names: &[&str]) -> i64 {
             return number;
         }
         if let Some(number) = value.get(*name).and_then(|v| v.as_u64()) {
-            return number as i64;
+            return number.min(i64::MAX as u64) as i64;
         }
     }
     0
