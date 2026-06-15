@@ -296,16 +296,34 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         run: |
           set -e
-          ENDPOINT="https://metr.petarpetkov.com/api/v1/update/darwin/aarch64/${VERSION}"
-          echo "Smoke-testing update endpoint: $ENDPOINT"
-          for i in 1 2 3 4 5; do
-            RESPONSE=$(curl -sSf "$ENDPOINT" || true)
-            if [ -n "$RESPONSE" ] && echo "$RESPONSE" | grep -q "\"version\".*\"${VERSION}\""; then
-              echo "Smoke test passed: endpoint returned version ${VERSION}"
-              exit 0
-            fi
-            echo "Attempt $i failed, retrying in 10s..."
-            sleep 10
-          done
-          echo "ERROR: Update endpoint did not return expected version ${VERSION}"
-          exit 1
+          test_endpoint() {
+            local endpoint="$1"
+            local attempt=0
+            local max_attempts=12
+            local sleep_seconds=15
+            while [ $attempt -lt $max_attempts ]; do
+              attempt=$((attempt + 1))
+              RESPONSE=$(curl -sSf "$endpoint" || true)
+              if [ -n "$RESPONSE" ] && echo "$RESPONSE" | grep -q "\"version\".*\"${VERSION}\""; then
+                echo "OK: $endpoint returned version ${VERSION}"
+                return 0
+              fi
+              echo "Attempt $attempt/$max_attempts failed for $endpoint, retrying in ${sleep_seconds}s..."
+              sleep $sleep_seconds
+            done
+            echo "ERROR: $endpoint did not return expected version ${VERSION}"
+            return 1
+          }
+
+          # Give the Laravel publish command a moment to warm caches/replicate.
+          sleep 15
+
+          test_endpoint "https://metr.petarpetkov.com/api/v1/update/darwin/aarch64/${VERSION}" || EXIT=1
+          test_endpoint "https://metr.petarpetkov.com/api/v1/update/windows/x86_64/${VERSION}" || EXIT=1
+          test_endpoint "https://metr.petarpetkov.com/api/v1/update/linux/x86_64/${VERSION}" || EXIT=1
+
+          if [ -n "$EXIT" ]; then
+            echo "ERROR: One or more smoke tests failed"
+            exit 1
+          fi
+          echo "All smoke tests passed"
