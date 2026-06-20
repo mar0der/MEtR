@@ -515,6 +515,9 @@ class WebController extends Controller
         if (request()->filled('provider_id')) {
             $query->where('provider_id', request('provider_id'));
         }
+        if (request()->filled('plan_name')) {
+            $query->where('plan_name', request('plan_name'));
+        }
         if (request()->filled('active')) {
             $query->where('active', request('active') === '1');
         }
@@ -577,6 +580,7 @@ class WebController extends Controller
             'subscriptions' => $query->orderByDesc('active')->orderBy('provider_id')->paginate($this->perPage(request(), 25))->withQueryString(),
             'providers' => Provider::orderBy('display_name')->get(),
             'accounts' => ProviderAccount::where('user_id', Auth::id())->orderBy('label')->get(),
+            'plans' => Subscription::where('user_id', Auth::id())->distinct()->orderBy('plan_name')->pluck('plan_name'),
             'subscriptionGroups' => $subscriptionGroups,
             'tab' => in_array(request('tab'), ['accounts', 'instances'], true) ? request('tab') : 'accounts',
         ]);

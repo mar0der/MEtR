@@ -156,6 +156,15 @@
                 </select>
             </div>
             <div>
+                <label>Plan</label>
+                <select name="plan_name">
+                    <option value="">All plans</option>
+                    @foreach($plans as $plan)
+                        <option value="{{ $plan }}" @selected(request('plan_name') === $plan)>{{ $plan }}</option>
+                    @endforeach
+                </select>
+            </div>
+            <div>
                 <label>Status</label>
                 <select name="active">
                     <option value="">All subscriptions</option>
