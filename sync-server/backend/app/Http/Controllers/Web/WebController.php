@@ -560,6 +560,7 @@ class WebController extends Controller
             'started_on' => ['nullable', 'date'],
             'ended_on' => ['nullable', 'date', 'after_or_equal:started_on'],
             'active' => ['boolean'],
+            'autorenew' => ['boolean'],
             'notes' => ['nullable', 'string'],
         ]);
 
@@ -574,6 +575,7 @@ class WebController extends Controller
             'user_id' => Auth::id(),
             'currency' => strtoupper($validated['currency']),
             'active' => $validated['active'] ?? true,
+            'autorenew' => $validated['autorenew'] ?? false,
         ]));
 
         return redirect('/subscriptions')->with('success', 'Subscription added.');
@@ -608,6 +610,7 @@ class WebController extends Controller
             'started_on' => ['nullable', 'date'],
             'ended_on' => ['nullable', 'date', 'after_or_equal:started_on'],
             'active' => ['boolean'],
+            'autorenew' => ['boolean'],
             'notes' => ['nullable', 'string'],
         ]);
 
@@ -621,6 +624,7 @@ class WebController extends Controller
         $subscription->update(array_merge($validated, [
             'currency' => strtoupper($validated['currency']),
             'active' => $validated['active'] ?? true,
+            'autorenew' => $validated['autorenew'] ?? false,
         ]));
 
         return redirect('/subscriptions')->with('success', 'Subscription updated.');

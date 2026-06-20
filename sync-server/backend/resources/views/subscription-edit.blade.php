@@ -69,6 +69,13 @@
                 <option value="0" @selected(old('active', (string) (int) $subscription->active) === '0')>Inactive</option>
             </select>
         </div>
+        <div>
+            <label>Auto-renew</label>
+            <select name="autorenew">
+                <option value="1" @selected(old('autorenew', (string) (int) $subscription->autorenew) === '1')>Yes</option>
+                <option value="0" @selected(old('autorenew', (string) (int) $subscription->autorenew) === '0')>No</option>
+            </select>
+        </div>
         <div class="wide">
             <label>Notes</label>
             <input type="text" name="notes" value="{{ old('notes', $subscription->notes) }}">

@@ -22,6 +22,7 @@ class Subscription extends Model
         'started_on',
         'ended_on',
         'active',
+        'autorenew',
         'notes',
     ];
 
@@ -31,6 +32,7 @@ class Subscription extends Model
         'started_on' => 'date',
         'ended_on' => 'date',
         'active' => 'boolean',
+        'autorenew' => 'boolean',
     ];
 
     public function user()
