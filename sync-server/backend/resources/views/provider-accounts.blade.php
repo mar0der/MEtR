@@ -12,6 +12,45 @@
 </div>
 
 <div class="card">
+    <h3 style="margin-top:0;">Add account</h3>
+    <form method="POST" action="/provider-accounts" class="filters">
+        @csrf
+        <div>
+            <label>Provider</label>
+            <select name="provider_id" required>
+                <option value="">Choose provider</option>
+                @foreach($providers as $provider)
+                    <option value="{{ $provider->id }}" @selected(old('provider_id') === $provider->id)>{{ $provider->display_name }}</option>
+                @endforeach
+            </select>
+        </div>
+        <div>
+            <label>Label</label>
+            <input type="text" name="label" value="{{ old('label') }}" placeholder="e.g. Personal" required>
+        </div>
+        <div>
+            <label>Type</label>
+            <input type="text" name="account_type" value="{{ old('account_type') }}" placeholder="e.g. personal">
+        </div>
+        <div>
+            <label>Active</label>
+            <select name="active">
+                <option value="1" @selected(old('active', '1') === '1')>Active</option>
+                <option value="0" @selected(old('active') === '0')>Inactive</option>
+            </select>
+        </div>
+        <div class="wide">
+            <label>Notes</label>
+            <input type="text" name="notes" value="{{ old('notes') }}" placeholder="Optional notes">
+        </div>
+        <div>
+            <label>&nbsp;</label>
+            <button class="btn">Add</button>
+        </div>
+    </form>
+</div>
+
+<div class="card">
     <form method="GET" action="/provider-accounts" class="filters">
         <div class="wide">
             <label>Search</label>
@@ -56,18 +95,26 @@
     <div class="table-wrap">
         <table>
             <thead>
-                <tr><th>Label</th><th>Provider</th><th>Type</th><th>Active</th></tr>
+                <tr><th>Label</th><th>Provider</th><th>Type</th><th>Active</th><th></th></tr>
             </thead>
             <tbody>
                 @forelse($accounts as $a)
                 <tr>
                     <td>{{ $a->label }}</td>
-                    <td>{{ $a->provider->display_name }}</td>
+                    <td>{{ $a->provider?->display_name ?? $a->provider_id }}</td>
                     <td>{{ $a->account_type }}</td>
                     <td><span class="pill {{ $a->active ? 'success' : 'warning' }}">{{ $a->active ? 'Active' : 'Inactive' }}</span></td>
+                    <td>
+                        <a class="btn secondary" href="/provider-accounts/{{ $a->id }}/edit">Edit</a>
+                        <form method="POST" action="/provider-accounts/{{ $a->id }}" style="display:inline">
+                            @csrf
+                            @method('DELETE')
+                            <button class="btn danger" type="submit" onclick="return confirm('Delete this account?')">Delete</button>
+                        </form>
+                    </td>
                 </tr>
                 @empty
-                <tr><td colspan="4" class="muted">No accounts match these filters.</td></tr>
+                <tr><td colspan="5" class="muted">No accounts match these filters.</td></tr>
                 @endforelse
             </tbody>
         </table>

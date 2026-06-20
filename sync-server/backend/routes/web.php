@@ -69,6 +69,10 @@ Route::middleware(['auth', 'throttle:120,1'])->group(function () {
     Route::post('/devices/{id}/alias', [WebController::class, 'updateDeviceAlias']);
     Route::post('/devices/{id}/delete', [WebController::class, 'deleteDevice']);
     Route::get('/provider-accounts', [WebController::class, 'providerAccounts']);
+    Route::post('/provider-accounts', [WebController::class, 'storeProviderAccount']);
+    Route::get('/provider-accounts/{account}/edit', [WebController::class, 'editProviderAccount']);
+    Route::put('/provider-accounts/{account}', [WebController::class, 'updateProviderAccount']);
+    Route::delete('/provider-accounts/{account}', [WebController::class, 'destroyProviderAccount']);
     Route::get('/subscriptions', [WebController::class, 'subscriptions']);
     Route::post('/subscriptions', [WebController::class, 'storeSubscription']);
     Route::get('/subscriptions/{subscription}/edit', [WebController::class, 'editSubscription']);

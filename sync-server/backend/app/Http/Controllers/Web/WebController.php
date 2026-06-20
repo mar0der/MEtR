@@ -521,9 +521,6 @@ class WebController extends Controller
         if (request()->filled('provider_id')) {
             $query->where('provider_id', request('provider_id'));
         }
-        if (request()->filled('plan_name')) {
-            $query->where('plan_name', request('plan_name'));
-        }
         if (request()->filled('active')) {
             $query->where('active', request('active') === '1');
         }
@@ -532,6 +529,80 @@ class WebController extends Controller
             'accounts' => $query->orderBy('provider_id')->orderBy('label')->paginate($this->perPage(request(), 25))->withQueryString(),
             'providers' => Provider::orderBy('display_name')->get(),
         ]);
+    }
+
+    public function storeProviderAccount(Request $request)
+    {
+        if ($this->isDemoUser()) {
+            return redirect('/provider-accounts')->withErrors(['demo' => 'Demo account data cannot be modified.']);
+        }
+
+        $validated = $request->validate([
+            'provider_id' => ['required', 'string', 'exists:providers,id'],
+            'label' => ['required', 'string', 'max:255'],
+            'account_type' => ['nullable', 'string', 'max:255'],
+            'active' => ['boolean'],
+            'notes' => ['nullable', 'string'],
+        ]);
+
+        ProviderAccount::create([
+            'user_id' => Auth::id(),
+            'provider_id' => $validated['provider_id'],
+            'label' => $validated['label'],
+            'account_type' => $validated['account_type'] ?: 'manual',
+            'active' => $validated['active'] ?? true,
+            'notes' => $validated['notes'] ?? null,
+        ]);
+
+        return redirect('/provider-accounts')->with('success', 'Account added.');
+    }
+
+    public function editProviderAccount($id)
+    {
+        $account = ProviderAccount::where('user_id', Auth::id())->findOrFail($id);
+
+        return view('provider-account-edit', [
+            'account' => $account,
+            'providers' => Provider::orderBy('display_name')->get(),
+        ]);
+    }
+
+    public function updateProviderAccount(Request $request, $id)
+    {
+        if ($this->isDemoUser()) {
+            return redirect('/provider-accounts')->withErrors(['demo' => 'Demo account data cannot be modified.']);
+        }
+
+        $account = ProviderAccount::where('user_id', Auth::id())->findOrFail($id);
+
+        $validated = $request->validate([
+            'provider_id' => ['required', 'string', 'exists:providers,id'],
+            'label' => ['required', 'string', 'max:255'],
+            'account_type' => ['nullable', 'string', 'max:255'],
+            'active' => ['boolean'],
+            'notes' => ['nullable', 'string'],
+        ]);
+
+        $account->update([
+            'provider_id' => $validated['provider_id'],
+            'label' => $validated['label'],
+            'account_type' => $validated['account_type'] ?: $account->account_type,
+            'active' => $validated['active'] ?? true,
+            'notes' => $validated['notes'] ?? null,
+        ]);
+
+        return redirect('/provider-accounts')->with('success', 'Account updated.');
+    }
+
+    public function destroyProviderAccount($id)
+    {
+        if ($this->isDemoUser()) {
+            return redirect('/provider-accounts')->withErrors(['demo' => 'Demo account data cannot be modified.']);
+        }
+
+        ProviderAccount::where('user_id', Auth::id())->where('id', $id)->delete();
+
+        return redirect('/provider-accounts')->with('success', 'Account deleted.');
     }
 
     public function subscriptions()
