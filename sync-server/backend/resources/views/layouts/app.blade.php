@@ -145,6 +145,10 @@
         }
         .btn.secondary:hover { background: rgba(0,0,0,0.03); }
         @media (prefers-color-scheme: dark) { .btn.secondary:hover { background: rgba(255,255,255,0.05); } }
+        .btn.danger {
+            background: var(--danger);
+            color: #fff;
+        }
         form label { display: block; font-size: 13px; font-weight: 600; margin-bottom: 4px; color: var(--muted); }
         form input, form select, .favorite-select {
             width: 100%;
@@ -362,7 +366,13 @@
             font-size: 14px;
             font-weight: 500;
         }
+        .flash-error {
+            background: var(--danger-soft);
+            color: #991b1b;
+            border-color: var(--danger);
+        }
         @media (prefers-color-scheme: dark) { .flash { color: #d1fae5; border-color: #059669; } }
+        @media (prefers-color-scheme: dark) { .flash-error { color: #fecaca; border-color: #f87171; } }
         .tabs { display: flex; gap: 4px; border-bottom: 2px solid var(--border); margin-bottom: 16px; }
         .tab-btn {
             display: inline-flex;

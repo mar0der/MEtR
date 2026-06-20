@@ -540,7 +540,101 @@ class WebController extends Controller
         return view('subscriptions', [
             'subscriptions' => $query->orderByDesc('active')->orderBy('provider_id')->paginate($this->perPage(request(), 25))->withQueryString(),
             'providers' => Provider::orderBy('display_name')->get(),
+            'accounts' => ProviderAccount::where('user_id', Auth::id())->orderBy('label')->get(),
         ]);
+    }
+
+    public function storeSubscription(Request $request)
+    {
+        if ($this->isDemoUser()) {
+            return redirect('/subscriptions')->withErrors(['demo' => 'Demo account data cannot be modified.']);
+        }
+
+        $validated = $request->validate([
+            'provider_id' => ['required', 'string', 'exists:providers,id'],
+            'provider_account_id' => ['nullable', 'string', 'exists:provider_accounts,id'],
+            'plan_name' => ['required', 'string', 'max:255'],
+            'monthly_price' => ['required', 'numeric', 'min:0'],
+            'currency' => ['required', 'string', 'max:8'],
+            'billing_anchor_day' => ['nullable', 'integer', 'min:1', 'max:31'],
+            'started_on' => ['nullable', 'date'],
+            'ended_on' => ['nullable', 'date', 'after_or_equal:started_on'],
+            'active' => ['boolean'],
+            'notes' => ['nullable', 'string'],
+        ]);
+
+        if (! empty($validated['provider_account_id'])) {
+            $account = ProviderAccount::where('user_id', Auth::id())->where('id', $validated['provider_account_id'])->first();
+            if (! $account) {
+                return redirect('/subscriptions')->withErrors(['provider_account_id' => 'Invalid provider account.']);
+            }
+        }
+
+        Subscription::create(array_merge($validated, [
+            'user_id' => Auth::id(),
+            'currency' => strtoupper($validated['currency']),
+            'active' => $validated['active'] ?? true,
+        ]));
+
+        return redirect('/subscriptions')->with('success', 'Subscription added.');
+    }
+
+    public function editSubscription($id)
+    {
+        $subscription = Subscription::where('user_id', Auth::id())->findOrFail($id);
+
+        return view('subscription-edit', [
+            'subscription' => $subscription,
+            'providers' => Provider::orderBy('display_name')->get(),
+            'accounts' => ProviderAccount::where('user_id', Auth::id())->orderBy('label')->get(),
+        ]);
+    }
+
+    public function updateSubscription(Request $request, $id)
+    {
+        if ($this->isDemoUser()) {
+            return redirect('/subscriptions')->withErrors(['demo' => 'Demo account data cannot be modified.']);
+        }
+
+        $subscription = Subscription::where('user_id', Auth::id())->findOrFail($id);
+
+        $validated = $request->validate([
+            'provider_id' => ['required', 'string', 'exists:providers,id'],
+            'provider_account_id' => ['nullable', 'string', 'exists:provider_accounts,id'],
+            'plan_name' => ['required', 'string', 'max:255'],
+            'monthly_price' => ['required', 'numeric', 'min:0'],
+            'currency' => ['required', 'string', 'max:8'],
+            'billing_anchor_day' => ['nullable', 'integer', 'min:1', 'max:31'],
+            'started_on' => ['nullable', 'date'],
+            'ended_on' => ['nullable', 'date', 'after_or_equal:started_on'],
+            'active' => ['boolean'],
+            'notes' => ['nullable', 'string'],
+        ]);
+
+        if (! empty($validated['provider_account_id'])) {
+            $account = ProviderAccount::where('user_id', Auth::id())->where('id', $validated['provider_account_id'])->first();
+            if (! $account) {
+                return redirect('/subscriptions')->withErrors(['provider_account_id' => 'Invalid provider account.']);
+            }
+        }
+
+        $subscription->update(array_merge($validated, [
+            'currency' => strtoupper($validated['currency']),
+            'active' => $validated['active'] ?? true,
+        ]));
+
+        return redirect('/subscriptions')->with('success', 'Subscription updated.');
+    }
+
+    public function destroySubscription($id)
+    {
+        if ($this->isDemoUser()) {
+            return redirect('/subscriptions')->withErrors(['demo' => 'Demo account data cannot be modified.']);
+        }
+
+        Subscription::where('user_id', Auth::id())->where('id', $id)->delete();
+
+        return redirect('/subscriptions')->with('success', 'Subscription deleted.');
     }
 
     public function projects(Request $request)
