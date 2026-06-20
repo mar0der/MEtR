@@ -537,10 +537,40 @@ class WebController extends Controller
             $query->where('active', request('active') === '1');
         }
 
+        $subscriptionGroups = Subscription::where('user_id', Auth::id())
+            ->select('provider_id', 'plan_name')
+            ->selectRaw('SUM(monthly_price) as total_paid')
+            ->selectRaw('COUNT(*) as instance_count')
+            ->selectRaw('MAX(started_on) as latest_started_on')
+            ->groupBy('provider_id', 'plan_name')
+            ->orderBy('plan_name')
+            ->get()
+            ->map(function ($group) {
+                $latest = Subscription::where('user_id', Auth::id())
+                    ->where('provider_id', $group->provider_id)
+                    ->where('plan_name', $group->plan_name)
+                    ->whereDate('started_on', $group->latest_started_on)
+                    ->first();
+
+                return [
+                    'provider_id' => $group->provider_id,
+                    'plan_name' => $group->plan_name,
+                    'provider' => $latest?->provider,
+                    'total_paid' => (float) $group->total_paid,
+                    'instance_count' => (int) $group->instance_count,
+                    'current_price' => $latest ? (float) $latest->monthly_price : 0.0,
+                    'current_end' => $latest?->ended_on,
+                    'autorenew' => $latest?->autorenew ?? false,
+                    'active' => $latest?->active ?? false,
+                ];
+            });
+
         return view('subscriptions', [
             'subscriptions' => $query->orderByDesc('active')->orderBy('provider_id')->paginate($this->perPage(request(), 25))->withQueryString(),
             'providers' => Provider::orderBy('display_name')->get(),
             'accounts' => ProviderAccount::where('user_id', Auth::id())->orderBy('label')->get(),
+            'subscriptionGroups' => $subscriptionGroups,
+            'tab' => in_array(request('tab'), ['accounts', 'instances'], true) ? request('tab') : 'accounts',
         ]);
     }
 
