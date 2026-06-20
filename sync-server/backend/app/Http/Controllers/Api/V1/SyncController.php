@@ -71,8 +71,8 @@ class SyncController extends Controller
             return response()->json(['error' => 'Demo account does not accept sync uploads.'], 403);
         }
 
-        $data = $request->validate([
-            'subscriptions' => ['required', 'array'],
+        $request->validate([
+            'subscriptions' => ['sometimes', 'array'],
             'subscriptions.*.source_subscription_id' => ['required', 'string', 'max:255'],
             'subscriptions.*.provider_id' => ['required', 'string', 'exists:providers,id'],
             'subscriptions.*.product_name' => ['required', 'string', 'max:255'],
@@ -85,35 +85,11 @@ class SyncController extends Controller
             'subscriptions.*.notes' => ['nullable', 'string'],
         ]);
 
-        $synced = 0;
-
-        foreach ($data['subscriptions'] as $subscription) {
-            $match = [
-                'user_id' => $request->user()->id,
-                'source_subscription_id' => $subscription['source_subscription_id'],
-            ];
-
-            $payload = [
-                'provider_account_id' => null,
-                'provider_id' => $subscription['provider_id'],
-                'plan_name' => $subscription['product_name'],
-                'monthly_price' => $subscription['monthly_amount'],
-                'currency' => strtoupper($subscription['currency']),
-                'billing_anchor_day' => $subscription['billing_anchor_day'] ?? null,
-                'started_on' => $subscription['started_on'] ?? null,
-                'ended_on' => $subscription['ended_on'] ?? null,
-                'active' => $subscription['enabled'] ?? true,
-                'notes' => $subscription['notes'] ?? null,
-            ];
-
-            Subscription::updateOrCreate($match, $payload);
-
-            $synced++;
-        }
-
+        // Subscriptions are managed on the web; ignore desktop uploads so the
+        // server remains the source of truth.
         return response()->json([
             'ok' => true,
-            'synced' => $synced,
+            'synced' => 0,
         ]);
     }
 
