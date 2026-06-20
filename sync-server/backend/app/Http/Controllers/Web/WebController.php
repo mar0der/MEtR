@@ -380,7 +380,7 @@ class WebController extends Controller
 
         $maxValue = max(1, (float) $dailyRows->max('value'));
 
-        $byProject = $this->reportGroupBy($query, 'project_id', 'projects', "COALESCE(projects.manual_name, projects.canonical_name, 'Unknown project')", 'projects.provider_id', $subscriptionCost['by_provider']);
+        $byProject = $this->reportGroupBy($query, 'project_id', 'projects', "COALESCE(projects.manual_name, projects.canonical_name, 'Unknown project')", null, $subscriptionCost['by_provider']);
         $byProvider = $this->reportGroupBy($query, 'provider_id', null, null, 'usage_events.provider_id', $subscriptionCost['by_provider']);
         $byDevice = $this->reportGroupBy($query, 'device_id', 'devices', "COALESCE(devices.alias, devices.display_name, 'Unknown device')", null, $subscriptionCost['by_provider']);
         $byModel = $this->reportGroupBy($query, 'model', null, null, null, $subscriptionCost['by_provider']);
