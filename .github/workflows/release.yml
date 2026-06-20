@@ -296,6 +296,13 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         run: |
           set -e
+          PREVIOUS_VERSION=$(git tag --sort=-v:refname | sed -n '2p' | sed 's/^v//')
+          if [ -z "$PREVIOUS_VERSION" ]; then
+            echo "WARNING: Could not determine previous version; skipping smoke test."
+            exit 0
+          fi
+          echo "Smoke-testing update from previous version ${PREVIOUS_VERSION} to current ${VERSION}"
+
           test_endpoint() {
             local endpoint="$1"
             local attempt=0
@@ -318,9 +325,9 @@ jobs:
           # Give the Laravel publish command a moment to warm caches/replicate.
           sleep 15
 
-          test_endpoint "https://metr.petarpetkov.com/api/v1/update/darwin/aarch64/${VERSION}" || EXIT=1
-          test_endpoint "https://metr.petarpetkov.com/api/v1/update/windows/x86_64/${VERSION}" || EXIT=1
-          test_endpoint "https://metr.petarpetkov.com/api/v1/update/linux/x86_64/${VERSION}" || EXIT=1
+          test_endpoint "https://metr.petarpetkov.com/api/v1/update/darwin/aarch64/${PREVIOUS_VERSION}" || EXIT=1
+          test_endpoint "https://metr.petarpetkov.com/api/v1/update/windows/x86_64/${PREVIOUS_VERSION}" || EXIT=1
+          test_endpoint "https://metr.petarpetkov.com/api/v1/update/linux/x86_64/${PREVIOUS_VERSION}" || EXIT=1
 
           if [ -n "$EXIT" ]; then
             echo "ERROR: One or more smoke tests failed"
