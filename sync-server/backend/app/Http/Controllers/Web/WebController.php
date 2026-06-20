@@ -559,6 +559,7 @@ class WebController extends Controller
                     'total_paid' => (float) $group->total_paid,
                     'instance_count' => (int) $group->instance_count,
                     'current_price' => $latest ? (float) $latest->monthly_price : 0.0,
+                    'renews_at_price' => $latest?->renewal_price ? (float) $latest->renewal_price : ($latest ? (float) $latest->monthly_price : 0.0),
                     'current_end' => $latest?->ended_on,
                     'autorenew' => $latest?->autorenew ?? false,
                     'active' => $latest?->active ?? false,
@@ -585,6 +586,7 @@ class WebController extends Controller
             'provider_account_id' => ['nullable', 'string', 'exists:provider_accounts,id'],
             'plan_name' => ['required', 'string', 'max:255'],
             'monthly_price' => ['required', 'numeric', 'min:0'],
+            'renewal_price' => ['nullable', 'numeric', 'min:0'],
             'currency' => ['required', 'string', 'max:8'],
             'billing_anchor_day' => ['nullable', 'integer', 'min:1', 'max:31'],
             'started_on' => ['nullable', 'date'],
@@ -606,6 +608,7 @@ class WebController extends Controller
             'currency' => strtoupper($validated['currency']),
             'active' => $validated['active'] ?? true,
             'autorenew' => $validated['autorenew'] ?? false,
+            'renewal_price' => $validated['renewal_price'] ?? null,
         ]));
 
         return redirect('/subscriptions')->with('success', 'Subscription added.');
@@ -635,6 +638,7 @@ class WebController extends Controller
             'provider_account_id' => ['nullable', 'string', 'exists:provider_accounts,id'],
             'plan_name' => ['required', 'string', 'max:255'],
             'monthly_price' => ['required', 'numeric', 'min:0'],
+            'renewal_price' => ['nullable', 'numeric', 'min:0'],
             'currency' => ['required', 'string', 'max:8'],
             'billing_anchor_day' => ['nullable', 'integer', 'min:1', 'max:31'],
             'started_on' => ['nullable', 'date'],
@@ -655,6 +659,7 @@ class WebController extends Controller
             'currency' => strtoupper($validated['currency']),
             'active' => $validated['active'] ?? true,
             'autorenew' => $validated['autorenew'] ?? false,
+            'renewal_price' => $validated['renewal_price'] ?? null,
         ]));
 
         return redirect('/subscriptions')->with('success', 'Subscription updated.');

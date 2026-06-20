@@ -47,6 +47,10 @@
             <input type="number" step="0.01" min="0" name="monthly_price" value="{{ old('monthly_price', $subscription->monthly_price) }}" required>
         </div>
         <div>
+            <label>Renews at</label>
+            <input type="number" step="0.01" min="0" name="renewal_price" value="{{ old('renewal_price', $subscription->renewal_price) }}" placeholder="Normal price">
+        </div>
+        <div>
             <label>Currency</label>
             <input type="text" name="currency" value="{{ old('currency', $subscription->currency) }}" required>
         </div>

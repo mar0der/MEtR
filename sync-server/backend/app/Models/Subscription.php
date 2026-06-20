@@ -17,6 +17,7 @@ class Subscription extends Model
         'provider_id',
         'plan_name',
         'monthly_price',
+        'renewal_price',
         'currency',
         'billing_anchor_day',
         'started_on',
@@ -28,6 +29,7 @@ class Subscription extends Model
 
     protected $casts = [
         'monthly_price' => 'decimal:6',
+        'renewal_price' => 'decimal:6',
         'billing_anchor_day' => 'integer',
         'started_on' => 'date',
         'ended_on' => 'date',

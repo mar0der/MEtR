@@ -59,12 +59,15 @@ class RenewSubscriptions extends Command
                     break 2;
                 }
 
+                $renewalPrice = $subscription->renewal_price ?? $subscription->monthly_price;
+
                 Subscription::create([
                     'user_id' => $userId,
                     'provider_id' => $providerId,
                     'provider_account_id' => $subscription->provider_account_id,
                     'plan_name' => $planName,
-                    'monthly_price' => $subscription->monthly_price,
+                    'monthly_price' => $renewalPrice,
+                    'renewal_price' => $renewalPrice,
                     'currency' => $subscription->currency,
                     'billing_anchor_day' => $anchor,
                     'started_on' => $nextStart,

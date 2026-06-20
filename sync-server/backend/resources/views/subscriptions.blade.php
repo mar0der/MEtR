@@ -37,6 +37,7 @@
                         <th style="text-align:right;">Instances</th>
                         <th style="text-align:right;">Total Paid</th>
                         <th style="text-align:right;">Current Price</th>
+                        <th style="text-align:right;">Renews At</th>
                         <th>Current End</th>
                         <th>Auto-renew</th>
                         <th>Status</th>
@@ -50,12 +51,13 @@
                             <td style="text-align:right;">{{ number_format($group['instance_count']) }}</td>
                             <td style="text-align:right;">${{ number_format($group['total_paid'], 2) }}</td>
                             <td style="text-align:right;">${{ number_format($group['current_price'], 2) }}</td>
+                            <td style="text-align:right;">${{ number_format($group['renews_at_price'], 2) }}</td>
                             <td>{{ $group['current_end']?->format('Y-m-d') ?? '—' }}</td>
                             <td>{{ $group['autorenew'] ? 'Yes' : 'No' }}</td>
                             <td><span class="pill {{ $group['active'] ? 'success' : 'warning' }}">{{ $group['active'] ? 'Active' : 'Inactive' }}</span></td>
                         </tr>
                     @empty
-                        <tr><td colspan="8" class="muted">No subscriptions found.</td></tr>
+                        <tr><td colspan="9" class="muted">No subscriptions found.</td></tr>
                     @endforelse
                 </tbody>
             </table>
@@ -91,6 +93,10 @@
             <div>
                 <label>Price</label>
                 <input type="number" step="0.01" min="0" name="monthly_price" value="{{ old('monthly_price') }}" placeholder="0.00" required>
+            </div>
+            <div>
+                <label>Renews at</label>
+                <input type="number" step="0.01" min="0" name="renewal_price" value="{{ old('renewal_price') }}" placeholder="Normal price">
             </div>
             <div>
                 <label>Currency</label>
@@ -185,6 +191,7 @@
                         <th>Provider</th>
                         <th>Account</th>
                         <th>Price</th>
+                        <th>Renews At</th>
                         <th>Billing Day</th>
                         <th>Start</th>
                         <th>End</th>
@@ -200,6 +207,7 @@
                         <td>{{ $s->provider?->display_name ?? $s->provider_id }}</td>
                         <td>{{ $s->providerAccount?->label ?? '—' }}</td>
                         <td>{{ $s->currency }} {{ number_format((float) $s->monthly_price, 2) }}</td>
+                        <td>{{ $s->renewal_price ? $s->currency.' '.number_format((float) $s->renewal_price, 2) : '—' }}</td>
                         <td>{{ $s->billing_anchor_day ?? '—' }}</td>
                         <td>{{ $s->started_on?->format('Y-m-d') ?? '—' }}</td>
                         <td>{{ $s->ended_on?->format('Y-m-d') ?? '—' }}</td>
@@ -215,7 +223,7 @@
                         </td>
                     </tr>
                     @empty
-                    <tr><td colspan="10" class="muted">No subscriptions match these filters.</td></tr>
+                    <tr><td colspan="11" class="muted">No subscriptions match these filters.</td></tr>
                     @endforelse
                 </tbody>
             </table>
