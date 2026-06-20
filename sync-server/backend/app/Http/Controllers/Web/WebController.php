@@ -982,6 +982,8 @@ class WebController extends Controller
             'this_week' => 'This week',
             'last_week' => 'Last week',
             'this_month' => 'This month',
+            'this_year' => 'This year',
+            'last_year' => 'Last year',
             'custom' => 'Custom',
         ];
     }
@@ -1032,6 +1034,16 @@ class WebController extends Controller
                 'preset' => $preset,
                 'from' => $now->copy()->startOfMonth(),
                 'to' => $now->copy()->endOfDay(),
+            ],
+            'this_year' => [
+                'preset' => $preset,
+                'from' => $now->copy()->startOfYear(),
+                'to' => $now->copy()->endOfDay(),
+            ],
+            'last_year' => [
+                'preset' => $preset,
+                'from' => $now->copy()->subYear()->startOfYear(),
+                'to' => $now->copy()->subYear()->endOfYear(),
             ],
             'custom' => [
                 'preset' => $preset,

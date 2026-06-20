@@ -339,13 +339,14 @@
         }
         .favorite-select {
             min-width: 260px;
+            margin-bottom: 0;
         }
         .inline-delete {
             display: inline-flex;
         }
         .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; }
         .grid.two-col { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-        .grid.stats-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+        .grid.stats-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
         @media (max-width: 768px) {
             .grid.two-col { grid-template-columns: 1fr; }
             .grid.stats-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
