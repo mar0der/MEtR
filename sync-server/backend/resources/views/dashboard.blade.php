@@ -17,10 +17,14 @@
 </div>
 
 <div class="grid stats-grid">
-    {{-- Row 1: Cost, Events, Total Tokens --}}
+    {{-- Row 1: Cost, Subscription Spend, Events, Total Tokens --}}
     <div class="card stat stat-accent">
         <div class="value" style="color:var(--accent);">{{ ($summary['total_cost'] ?? null) !== null ? '$'.number_format((float) $summary['total_cost'], 2) : '—' }}</div>
         <div class="label">API Equivalent Cost</div>
+    </div>
+    <div class="card stat stat-accent">
+        <div class="value" style="color:var(--accent);">${{ number_format((float) ($summary['subscription_cost'] ?? 0), 2) }}</div>
+        <div class="label">Total Cost Spent</div>
     </div>
     <div class="card stat">
         <div class="value">{{ number_format($summary['event_count'] ?? 0) }}</div>
@@ -31,7 +35,7 @@
         <div class="label">Total Tokens</div>
     </div>
 
-    {{-- Row 2: Cached (combined), Real Input, Output --}}
+    {{-- Row 2: Token breakdown --}}
     <div class="card stat">
         <div class="value">{{ number_format($summary['cached_tokens'] ?? 0) }}</div>
         <div class="label">Cached Tokens</div>
@@ -44,8 +48,6 @@
         <div class="value">{{ number_format($summary['output_tokens'] ?? 0) }}</div>
         <div class="label">Output Tokens</div>
     </div>
-
-    {{-- Row 3: Other tokens --}}
     <div class="card stat">
         <div class="value">{{ number_format($otherTokens) }}</div>
         <div class="label">Other Tokens</div>

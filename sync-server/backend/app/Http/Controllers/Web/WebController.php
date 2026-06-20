@@ -211,6 +211,12 @@ class WebController extends Controller
             }
         );
 
+        $dashboardFrom = $request->filled('from') ? Carbon::parse($request->input('from'))->startOfDay() : Carbon::create(2023, 1, 1)->startOfDay();
+        $dashboardTo = $request->filled('to') ? Carbon::parse($request->input('to'))->endOfDay() : now()->endOfDay();
+        $dashboardProviders = $request->filled('provider_id') ? [$request->input('provider_id')] : null;
+        $summary['subscription_cost'] = app(CalculateSubscriptionCost::class)
+            ->forPeriod($user, $dashboardFrom, $dashboardTo, $dashboardProviders)['total'];
+
         $byDevice = (clone $query)
             ->leftJoin('devices', 'devices.id', '=', 'usage_events.device_id')
             ->select([
