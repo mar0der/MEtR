@@ -23,6 +23,19 @@
 </div>
 
 @if($tab === 'accounts')
+    @php
+        $sortLink = function (string $column) use ($sort, $dir) {
+            $newDir = ($sort === $column && $dir === 'asc') ? 'desc' : 'asc';
+            return url('/subscriptions').'?'.http_build_query(array_merge(request()->except(['sort', 'dir']), ['tab' => 'accounts', 'sort' => $column, 'dir' => $newDir]));
+        };
+        $sortIcon = function (string $column) use ($sort, $dir) {
+            if ($sort !== $column) {
+                return '';
+            }
+
+            return $dir === 'asc' ? ' ↑' : ' ↓';
+        };
+    @endphp
     <div class="card">
         <div class="table-meta">
             <h3 style="margin:0;">Subscription accounts</h3>
@@ -32,15 +45,15 @@
             <table>
                 <thead>
                     <tr>
-                        <th>Account</th>
-                        <th>Provider</th>
-                        <th style="text-align:right;">Instances</th>
-                        <th style="text-align:right;">Total Paid</th>
-                        <th style="text-align:right;">Current Price</th>
-                        <th style="text-align:right;">Renews At</th>
-                        <th>Current End</th>
-                        <th>Auto-renew</th>
-                        <th>Status</th>
+                        <th><a href="{{ $sortLink('account') }}" style="color:inherit;text-decoration:none;">Account{!! $sortIcon('account') !!}</a></th>
+                        <th><a href="{{ $sortLink('provider') }}" style="color:inherit;text-decoration:none;">Provider{!! $sortIcon('provider') !!}</a></th>
+                        <th style="text-align:right;"><a href="{{ $sortLink('instances') }}" style="color:inherit;text-decoration:none;">Instances{!! $sortIcon('instances') !!}</a></th>
+                        <th style="text-align:right;"><a href="{{ $sortLink('total_paid') }}" style="color:inherit;text-decoration:none;">Total Paid{!! $sortIcon('total_paid') !!}</a></th>
+                        <th style="text-align:right;"><a href="{{ $sortLink('current_price') }}" style="color:inherit;text-decoration:none;">Current Price{!! $sortIcon('current_price') !!}</a></th>
+                        <th style="text-align:right;"><a href="{{ $sortLink('renews_at') }}" style="color:inherit;text-decoration:none;">Renews At{!! $sortIcon('renews_at') !!}</a></th>
+                        <th><a href="{{ $sortLink('current_end') }}" style="color:inherit;text-decoration:none;">Current End{!! $sortIcon('current_end') !!}</a></th>
+                        <th><a href="{{ $sortLink('autorenew') }}" style="color:inherit;text-decoration:none;">Auto-renew{!! $sortIcon('autorenew') !!}</a></th>
+                        <th><a href="{{ $sortLink('status') }}" style="color:inherit;text-decoration:none;">Status{!! $sortIcon('status') !!}</a></th>
                     </tr>
                 </thead>
                 <tbody>
@@ -60,6 +73,18 @@
                         <tr><td colspan="9" class="muted">No subscriptions found.</td></tr>
                     @endforelse
                 </tbody>
+                @if(count($subscriptionGroups))
+                    <tfoot>
+                        <tr style="font-weight:600;">
+                            <td colspan="2">Total</td>
+                            <td style="text-align:right;">{{ number_format($groupSums['instance_count']) }}</td>
+                            <td style="text-align:right;">${{ number_format($groupSums['total_paid'], 2) }}</td>
+                            <td style="text-align:right;">${{ number_format($groupSums['current_price'], 2) }}</td>
+                            <td style="text-align:right;">${{ number_format($groupSums['renews_at_price'], 2) }}</td>
+                            <td colspan="3"></td>
+                        </tr>
+                    </tfoot>
+                @endif
             </table>
         </div>
     </div>

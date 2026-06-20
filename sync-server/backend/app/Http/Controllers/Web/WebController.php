@@ -576,12 +576,47 @@ class WebController extends Controller
                 ];
             });
 
+        $sort = in_array(request('sort'), ['provider', 'account', 'instances', 'total_paid', 'current_price', 'renews_at', 'current_end', 'autorenew', 'status'], true)
+            ? request('sort')
+            : 'provider';
+        $dir = strtolower(request('dir', 'asc')) === 'desc' ? 'desc' : 'asc';
+
+        $subscriptionGroups = $subscriptionGroups->sort(function (array $a, array $b) use ($sort) {
+            $value = fn (array $row) => match ($sort) {
+                'provider' => $row['provider']?->display_name ?? $row['provider_id'],
+                'account' => $row['plan_name'],
+                'instances' => $row['instance_count'],
+                'total_paid' => $row['total_paid'],
+                'current_price' => $row['current_price'],
+                'renews_at' => $row['renews_at_price'],
+                'current_end' => $row['current_end']?->getTimestamp() ?? 0,
+                'autorenew' => $row['autorenew'],
+                'status' => $row['active'],
+                default => $row['provider']?->display_name ?? $row['provider_id'],
+            };
+
+            $valA = $value($a);
+            $valB = $value($b);
+
+            return is_string($valA) ? strcasecmp($valA, (string) $valB) : $valA <=> $valB;
+        }, SORT_REGULAR, $dir === 'desc')->values();
+
+        $groupSums = [
+            'instance_count' => $subscriptionGroups->sum('instance_count'),
+            'total_paid' => $subscriptionGroups->sum('total_paid'),
+            'current_price' => $subscriptionGroups->sum('current_price'),
+            'renews_at_price' => $subscriptionGroups->sum('renews_at_price'),
+        ];
+
         return view('subscriptions', [
             'subscriptions' => $query->orderByDesc('active')->orderBy('provider_id')->paginate($this->perPage(request(), 25))->withQueryString(),
             'providers' => Provider::orderBy('display_name')->get(),
             'accounts' => ProviderAccount::where('user_id', Auth::id())->orderBy('label')->get(),
             'plans' => Subscription::where('user_id', Auth::id())->distinct()->orderBy('plan_name')->pluck('plan_name'),
             'subscriptionGroups' => $subscriptionGroups,
+            'groupSums' => $groupSums,
+            'sort' => $sort,
+            'dir' => $dir,
             'tab' => in_array(request('tab'), ['accounts', 'instances'], true) ? request('tab') : 'accounts',
         ]);
     }
