@@ -380,7 +380,14 @@ class WebController extends Controller
 
         $maxValue = max(1, (float) $dailyRows->max('value'));
 
-        $byProject = $this->reportGroupBy($query, 'project_id', 'projects', "COALESCE(projects.manual_name, projects.canonical_name, 'Unknown project')", null, $subscriptionCost['by_provider']);
+        $subscriptionByProject = $this->subscriptionCostByProject($query, $subscriptionCost['by_provider']);
+        $byProject = collect($this->reportGroupBy($query, 'project_id', 'projects', "COALESCE(projects.manual_name, projects.canonical_name, 'Unknown project')", null, $subscriptionCost['by_provider']))
+            ->map(function (array $row) use ($subscriptionByProject) {
+                $row['subscription_cost'] = $subscriptionByProject[$row['group_id'] ?? null] ?? 0.0;
+
+                return $row;
+            })
+            ->all();
         $byProvider = $this->reportGroupBy($query, 'provider_id', null, null, 'usage_events.provider_id', $subscriptionCost['by_provider']);
         $byDevice = $this->reportGroupBy($query, 'device_id', 'devices', "COALESCE(devices.alias, devices.display_name, 'Unknown device')", null, $subscriptionCost['by_provider']);
         $byModel = $this->reportGroupBy($query, 'model', null, null, null, $subscriptionCost['by_provider']);
@@ -1109,6 +1116,7 @@ class WebController extends Controller
         }
 
         $groupBy = ["usage_events.{$groupColumn}"];
+        $select[] = DB::raw("usage_events.{$groupColumn} as row_group_id");
         if ($providerIdExpr !== null) {
             $select[] = DB::raw("{$providerIdExpr} as row_provider_id");
             $groupBy[] = DB::raw($providerIdExpr);
@@ -1126,6 +1134,7 @@ class WebController extends Controller
 
             return [
                 'label' => $row->label ?: 'Unknown',
+                'group_id' => $row->row_group_id,
                 'events' => $totals['events'],
                 'cost' => $totals['cost'],
                 'subscription_cost' => $providerId !== null ? ($subscriptionByProvider[$providerId] ?? 0.0) : 0.0,
@@ -1135,6 +1144,43 @@ class WebController extends Controller
                 'total_tokens' => $totals['total_tokens'],
             ];
         })->all();
+    }
+
+    /**
+     * Attribute provider-level subscription costs to projects proportionally
+     * based on each project's share of that provider's API cost.
+     *
+     * @param array<string, float> $subscriptionByProvider
+     *
+     * @return array<string|int, float>
+     */
+    private function subscriptionCostByProject(Builder $baseQuery, array $subscriptionByProvider): array
+    {
+        $providerTotals = (clone $baseQuery)
+            ->select(['provider_id', DB::raw('SUM(official_api_cost_usd) as cost')])
+            ->groupBy('provider_id')
+            ->pluck('cost', 'provider_id')
+            ->map(fn ($cost) => (float) $cost);
+
+        $projectProviderCosts = (clone $baseQuery)
+            ->select(['project_id', 'provider_id', DB::raw('SUM(official_api_cost_usd) as cost')])
+            ->whereNotNull('project_id')
+            ->groupBy('project_id', 'provider_id')
+            ->get();
+
+        $byProject = [];
+        foreach ($projectProviderCosts as $row) {
+            $providerTotal = $providerTotals[$row->provider_id] ?? 0.0;
+            if ($providerTotal <= 0.0) {
+                continue;
+            }
+
+            $share = (float) $row->cost / $providerTotal;
+            $byProject[$row->project_id] = ($byProject[$row->project_id] ?? 0.0)
+                + (($subscriptionByProvider[$row->provider_id] ?? 0.0) * $share);
+        }
+
+        return $byProject;
     }
 
     private function perPage(Request $request, int $default): int
