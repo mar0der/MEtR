@@ -474,6 +474,66 @@
             font-weight: 700;
             letter-spacing: 0.05em;
         }
+        .nav-notifications {
+            position: relative;
+            display: inline-flex;
+        }
+        .nav-notifications-toggle {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 34px;
+            height: 34px;
+            border-radius: 8px;
+            cursor: pointer;
+            color: var(--warning);
+            position: relative;
+            transition: background .15s;
+        }
+        .nav-notifications-toggle:hover { background: var(--warning-soft); }
+        .nav-notifications-toggle svg { width: 20px; height: 20px; }
+        .nav-notifications-badge {
+            position: absolute;
+            top: 2px;
+            right: 2px;
+            min-width: 16px;
+            height: 16px;
+            padding: 0 4px;
+            border-radius: 999px;
+            background: var(--danger);
+            color: #fff;
+            font-size: 10px;
+            font-weight: 700;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .nav-notifications-dropdown {
+            display: none;
+            position: absolute;
+            top: calc(100% + 8px);
+            right: 0;
+            min-width: 260px;
+            max-width: 320px;
+            background: var(--card);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.12);
+            padding: 8px 0;
+            z-index: 100;
+        }
+        .nav-notifications:hover .nav-notifications-dropdown,
+        .nav-notifications:focus-within .nav-notifications-dropdown { display: block; }
+        .nav-notification-item {
+            padding: 10px 14px;
+            border-bottom: 1px solid var(--border);
+            font-size: 13px;
+            line-height: 1.4;
+            white-space: normal;
+        }
+        .nav-notification-item:last-child { border-bottom: none; }
+        .nav-notification-item strong { color: var(--text); }
+        .nav-notification-item small { color: var(--muted); }
     </style>
 </head>
 <body>
@@ -499,7 +559,27 @@
             @endauth
         </div>
         @auth
-            <form method="POST" action="/logout" style="margin:0;">@csrf<button class="btn secondary" style="padding:6px 14px;font-size:13px;">Logout</button></form>
+            <div style="display:flex;gap:12px;align-items:center;">
+                @if($renewalNotifications->isNotEmpty())
+                    <div class="nav-notifications">
+                        <div class="nav-notifications-toggle" tabindex="0" role="button" aria-label="Upcoming renewals">
+                            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+                                <path stroke-linecap="round" stroke-linejoin="round" d="M14.857 17.082a23.848 23.848 0 005.454-1.31A8.967 8.967 0 0118 9.75V9A6 6 0 006 9v.75a8.967 8.967 0 01-2.312 6.022c1.733.64 3.56 1.085 5.455 1.31m5.714 0a24.255 24.255 0 01-5.714 0m5.714 0a3 3 0 11-5.714 0" />
+                            </svg>
+                            <span class="nav-notifications-badge">{{ $renewalNotifications->count() }}</span>
+                        </div>
+                        <div class="nav-notifications-dropdown">
+                            @foreach($renewalNotifications as $notification)
+                                <div class="nav-notification-item">
+                                    <strong>{{ $notification->plan_name }}</strong> ({{ $notification->provider?->display_name ?? $notification->provider_id }})<br>
+                                    <small>Renews {{ $notification->ended_on->addDay()->format('M j, Y') }}</small>
+                                </div>
+                            @endforeach
+                        </div>
+                    </div>
+                @endif
+                <form method="POST" action="/logout" style="margin:0;">@csrf<button class="btn secondary" style="padding:6px 14px;font-size:13px;">Logout</button></form>
+            </div>
         @else
             <a href="/register" class="btn" style="padding:6px 14px;font-size:13px;">Get Started</a>
         @endauth

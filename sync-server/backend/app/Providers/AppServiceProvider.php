@@ -2,9 +2,12 @@
 
 namespace App\Providers;
 
+use App\Models\User;
+use App\Services\Subscription\RenewalNotifier;
 use Illuminate\Cache\RateLimiting\Limit;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\RateLimiter;
+use Illuminate\Support\Facades\View;
 use Illuminate\Support\ServiceProvider;
 
 class AppServiceProvider extends ServiceProvider
@@ -33,6 +36,15 @@ class AppServiceProvider extends ServiceProvider
 
         RateLimiter::for('login', function (Request $request) {
             return Limit::perMinute(10)->by('login:'.$request->ip());
+        });
+
+        View::composer('layouts.app', function ($view) {
+            $user = auth()->user();
+            if ($user instanceof User) {
+                $view->with('renewalNotifications', app(RenewalNotifier::class)->upcoming($user));
+            } else {
+                $view->with('renewalNotifications', collect());
+            }
         });
     }
 }

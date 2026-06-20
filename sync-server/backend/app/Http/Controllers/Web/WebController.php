@@ -572,7 +572,9 @@ class WebController extends Controller
                     'renews_at_price' => $latest?->renewal_price ? (float) $latest->renewal_price : ($latest ? (float) $latest->monthly_price : 0.0),
                     'current_end' => $latest?->ended_on,
                     'autorenew' => $latest?->autorenew ?? false,
-                    'active' => $latest?->active ?? false,
+                    'active' => $latest !== null
+                        && $latest->active
+                        && ($latest->autorenew || $latest->ended_on === null || ! $latest->ended_on->isPast()),
                 ];
             });
 
