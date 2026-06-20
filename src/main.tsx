@@ -122,6 +122,9 @@ type Subscription = {
   currency: string;
   billing_anchor_day: number;
   enabled: boolean;
+  start_date: string;
+  end_date: string;
+  autorenew: boolean;
 };
 
 type PricingEntry = {
@@ -182,6 +185,9 @@ type SubscriptionForm = {
   monthly_amount: string;
   currency: string;
   billing_anchor_day: string;
+  start_date: string;
+  end_date: string;
+  autorenew: boolean;
 };
 
 function providerForTab(tab: Tab | string): string | undefined {
@@ -209,13 +215,18 @@ function App() {
   const [activeTab, setActiveTab] = useState<Tab | string>("all");
   const [status, setStatus] = useState("Ready");
   const [manualPath, setManualPath] = useState("");
-  const [subForm, setSubForm] = useState({
+  const { start: defaultSubStart, end: defaultSubEnd } = defaultSubscriptionDates();
+  const [subForm, setSubForm] = useState<SubscriptionForm>({
     provider_id: "openai",
     product_name: "ChatGPT",
     monthly_amount: "20",
     currency: "USD",
-    billing_anchor_day: "13"
+    billing_anchor_day: "13",
+    start_date: defaultSubStart,
+    end_date: defaultSubEnd,
+    autorenew: true
   });
+  const [editingSubId, setEditingSubId] = useState<string | null>(null);
   const [syncStatus, setSyncStatus] = useState<SyncStatus | null>(null);
   const [syncForm, setSyncForm] = useState({
     server_url: "https://metr.petarpetkov.com",
@@ -536,6 +547,21 @@ function App() {
     }
   };
 
+  const resetSubForm = () => {
+    const { start, end } = defaultSubscriptionDates();
+    setSubForm({
+      provider_id: "openai",
+      product_name: "ChatGPT",
+      monthly_amount: "20",
+      currency: "USD",
+      billing_anchor_day: "13",
+      start_date: start,
+      end_date: end,
+      autorenew: true
+    });
+    setEditingSubId(null);
+  };
+
   const addSubscription = async () => {
     setSubscriptionLoading(true);
     try {
@@ -545,10 +571,59 @@ function App() {
           product_name: subForm.product_name,
           monthly_amount: Number(subForm.monthly_amount),
           currency: subForm.currency,
-          billing_anchor_day: Number(subForm.billing_anchor_day)
+          billing_anchor_day: Number(subForm.billing_anchor_day),
+          start_date: subForm.start_date,
+          end_date: subForm.end_date,
+          autorenew: subForm.autorenew
         }
       });
       setStatus("Subscription added");
+      resetSubForm();
+      await refresh(false);
+    } catch (error) {
+      setStatus(message(error));
+    } finally {
+      setSubscriptionLoading(false);
+    }
+  };
+
+  const startSubscriptionEdit = (sub: Subscription) => {
+    setSubForm({
+      provider_id: sub.provider_id,
+      product_name: sub.product_name,
+      monthly_amount: String(sub.monthly_amount),
+      currency: sub.currency,
+      billing_anchor_day: String(sub.billing_anchor_day),
+      start_date: sub.start_date,
+      end_date: sub.end_date,
+      autorenew: sub.autorenew
+    });
+    setEditingSubId(sub.id);
+  };
+
+  const cancelSubscriptionEdit = () => {
+    resetSubForm();
+  };
+
+  const saveSubscription = async () => {
+    if (!editingSubId) return;
+    setSubscriptionLoading(true);
+    try {
+      await api("update_subscription", {
+        id: editingSubId,
+        input: {
+          provider_id: subForm.provider_id,
+          product_name: subForm.product_name,
+          monthly_amount: Number(subForm.monthly_amount),
+          currency: subForm.currency,
+          billing_anchor_day: Number(subForm.billing_anchor_day),
+          start_date: subForm.start_date,
+          end_date: subForm.end_date,
+          autorenew: subForm.autorenew
+        }
+      });
+      setStatus("Subscription updated");
+      resetSubForm();
       await refresh(false);
     } catch (error) {
       setStatus(message(error));
@@ -865,6 +940,7 @@ function App() {
             sources={sources}
             detected={detected}
             subscriptions={subscriptions}
+            providers={summary.providers}
             pricing={pricing}
             missingModels={missingModels}
             manualPath={manualPath}
@@ -877,7 +953,11 @@ function App() {
             addDetected={addDetected}
             addManual={addManual}
             addSubscription={addSubscription}
+            saveSubscription={saveSubscription}
+            cancelSubscriptionEdit={cancelSubscriptionEdit}
             deleteSubscription={deleteSubscription}
+            startSubscriptionEdit={startSubscriptionEdit}
+            editingSubId={editingSubId}
             removeSource={removeSource}
             syncStatus={syncStatus}
             syncForm={syncForm}
@@ -1230,6 +1310,7 @@ function SettingsView(props: {
   sources: Source[];
   detected: DetectedSource[];
   subscriptions: Subscription[];
+  providers: ProviderSummary[];
   pricing: PricingEntry[];
   missingModels: MissingModel[];
   manualPath: string;
@@ -1242,7 +1323,11 @@ function SettingsView(props: {
   addDetected: (source: DetectedSource) => void;
   addManual: () => void;
   addSubscription: () => void;
+  saveSubscription: () => void;
+  cancelSubscriptionEdit: () => void;
   deleteSubscription: (id: string) => void;
+  startSubscriptionEdit: (sub: Subscription) => void;
+  editingSubId: string | null;
   removeSource: (id: string) => void;
   syncStatus: SyncStatus | null;
   syncForm: { server_url: string; login: string; password: string };
@@ -1479,41 +1564,92 @@ function SettingsView(props: {
 
       <section className="panel">
         <h2>Subscriptions</h2>
-        <div className="subscription-form">
-          <input value={props.subForm.provider_id} onChange={(e) => props.setSubForm({ ...props.subForm, provider_id: e.target.value })} placeholder="provider id" />
-          <input value={props.subForm.product_name} onChange={(e) => props.setSubForm({ ...props.subForm, product_name: e.target.value })} placeholder="product" />
-          <input value={props.subForm.monthly_amount} onChange={(e) => props.setSubForm({ ...props.subForm, monthly_amount: e.target.value })} placeholder="amount" />
-          <input value={props.subForm.billing_anchor_day} onChange={(e) => props.setSubForm({ ...props.subForm, billing_anchor_day: e.target.value })} placeholder="billing day" />
-          <button className="primary-button" onClick={props.addSubscription} disabled={props.subscriptionLoading}>
-            <WalletCards size={16} className={props.subscriptionLoading ? "spin" : undefined} />
-            {props.subscriptionLoading ? "Adding..." : "Add"}
-          </button>
+        <div className="subscription-form" style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: 8, alignItems: "end" }}>
+          <label>
+            Provider
+            <select value={props.subForm.provider_id} onChange={(e) => props.setSubForm({ ...props.subForm, provider_id: e.target.value })}>
+              {props.providers.map((p) => (
+                <option key={p.provider_id} value={p.provider_id}>{providerLabel(p.provider_id)}</option>
+              ))}
+              {props.providers.find((p) => p.provider_id === props.subForm.provider_id) ? null : (
+                <option value={props.subForm.provider_id}>{props.subForm.provider_id}</option>
+              )}
+            </select>
+          </label>
+          <label>
+            Account name
+            <input value={props.subForm.product_name} onChange={(e) => props.setSubForm({ ...props.subForm, product_name: e.target.value })} placeholder="e.g. ChatGPT" />
+          </label>
+          <label>
+            Amount
+            <input type="number" min="0" step="0.01" value={props.subForm.monthly_amount} onChange={(e) => props.setSubForm({ ...props.subForm, monthly_amount: e.target.value })} placeholder="amount" />
+          </label>
+          <label>
+            Currency
+            <input value={props.subForm.currency} onChange={(e) => props.setSubForm({ ...props.subForm, currency: e.target.value })} placeholder="USD" />
+          </label>
+          <label>
+            Billing day
+            <input type="number" min="1" max="31" value={props.subForm.billing_anchor_day} onChange={(e) => props.setSubForm({ ...props.subForm, billing_anchor_day: e.target.value })} placeholder="billing day" />
+          </label>
+          <label>
+            Start
+            <input type="date" value={props.subForm.start_date} onChange={(e) => props.setSubForm({ ...props.subForm, start_date: e.target.value })} />
+          </label>
+          <label>
+            End
+            <input type="date" value={props.subForm.end_date} onChange={(e) => props.setSubForm({ ...props.subForm, end_date: e.target.value })} />
+          </label>
+          <label style={{ display: "flex", alignItems: "center", gap: 6 }}>
+            <input type="checkbox" checked={props.subForm.autorenew} onChange={(e) => props.setSubForm({ ...props.subForm, autorenew: e.target.checked })} />
+            Auto-renew
+          </label>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button className="primary-button" onClick={props.editingSubId ? props.saveSubscription : props.addSubscription} disabled={props.subscriptionLoading}>
+              <WalletCards size={16} className={props.subscriptionLoading ? "spin" : undefined} />
+              {props.subscriptionLoading ? (props.editingSubId ? "Saving..." : "Adding...") : (props.editingSubId ? "Save" : "Add")}
+            </button>
+            {props.editingSubId && (
+              <button className="secondary-button" onClick={props.cancelSubscriptionEdit} disabled={props.subscriptionLoading}>
+                Cancel
+              </button>
+            )}
+          </div>
         </div>
         <table>
           <thead>
             <tr>
               <th>Provider</th>
-              <th>Product</th>
+              <th>Account</th>
               <th>Amount</th>
               <th>Anchor</th>
+              <th>Start</th>
+              <th>End</th>
+              <th>Auto-renew</th>
               <th></th>
             </tr>
           </thead>
           <tbody>
             {props.subscriptions.map((sub) => (
               <tr key={sub.id}>
-                <td>{sub.provider_id}</td>
+                <td>{providerLabel(sub.provider_id)}</td>
                 <td>{sub.product_name}</td>
                 <td>{sub.currency} {sub.monthly_amount.toFixed(2)}</td>
                 <td>{sub.billing_anchor_day}</td>
+                <td>{sub.start_date}</td>
+                <td>{sub.end_date}</td>
+                <td>{sub.autorenew ? "Yes" : "No"}</td>
                 <td>
+                  <button className="icon-button" onClick={() => props.startSubscriptionEdit(sub)} title="Edit subscription">
+                    <Settings size={15} />
+                  </button>
                   <button className="icon-button" onClick={() => props.deleteSubscription(sub.id)} title="Delete subscription">
                     <Trash2 size={15} />
                   </button>
                 </td>
               </tr>
             ))}
-            {props.subscriptions.length === 0 && <EmptyRow colSpan={5} text="No subscriptions configured." />}
+            {props.subscriptions.length === 0 && <EmptyRow colSpan={8} text="No subscriptions configured." />}
           </tbody>
         </table>
       </section>
@@ -1760,6 +1896,22 @@ function percentPrecise(value: number) {
 }
 
 const DISPLAY_TIME_ZONE = "Asia/Dubai";
+
+function formatDateInput(d: Date) {
+  const year = d.getFullYear();
+  const month = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function defaultSubscriptionDates() {
+  const start = new Date();
+  start.setHours(0, 0, 0, 0);
+  const end = new Date(start);
+  end.setMonth(end.getMonth() + 1);
+  end.setDate(end.getDate() - 1);
+  return { start: formatDateInput(start), end: formatDateInput(end) };
+}
 
 function date(value: string | null) {
   if (!value) return "Never";

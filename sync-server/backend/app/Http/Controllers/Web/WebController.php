@@ -14,6 +14,7 @@ use App\Models\Subscription;
 use App\Models\UpdateRelease;
 use App\Models\UsageEvent;
 use App\Models\User;
+use App\Services\Subscription\CalculateSubscriptionCost;
 use Carbon\Carbon;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\Request;
@@ -322,6 +323,10 @@ class WebController extends Controller
 
         $query = $this->filteredUsageQuery($request, $user->id, $dateRange);
 
+        $providerIds = $request->filled('provider_id') ? [$request->input('provider_id')] : null;
+        $subscriptionCost = app(CalculateSubscriptionCost::class)
+            ->forPeriod($user, $dateRange['from'], $dateRange['to'], $providerIds);
+
         $summary = Cache::remember(
             $this->cacheKey('reports:summary', $request, ['metric' => $metric]),
             300,
@@ -341,11 +346,12 @@ class WebController extends Controller
                 return $this->reportTotals($summaryRaw);
             }
         );
+        $summary['subscription_cost'] = $subscriptionCost['total'];
 
         $dailyRows = Cache::remember(
             $this->cacheKey('reports:daily', $request, ['metric' => $metric]),
             300,
-            function () use ($query, $metric) {
+            function () use ($query, $metric, $subscriptionCost) {
                 return (clone $query)
                     ->select([
                         DB::raw('DATE(usage_events.timestamp) as bucket'),
@@ -363,16 +369,21 @@ class WebController extends Controller
                     ->groupBy(DB::raw('DATE(usage_events.timestamp)'))
                     ->orderBy('bucket')
                     ->get()
-                    ->map(fn ($row) => $this->reportChartRow($row, $metric));
+                    ->map(function ($row) use ($metric, $subscriptionCost) {
+                        $chartRow = $this->reportChartRow($row, $metric);
+                        $chartRow['subscription_cost'] = $subscriptionCost['daily_total'][$chartRow['bucket']] ?? 0.0;
+
+                        return $chartRow;
+                    });
             }
         );
 
         $maxValue = max(1, (float) $dailyRows->max('value'));
 
-        $byProject = $this->reportGroupBy($query, 'project_id', 'projects', "COALESCE(projects.manual_name, projects.canonical_name, 'Unknown project')");
-        $byProvider = $this->reportGroupBy($query, 'provider_id');
-        $byDevice = $this->reportGroupBy($query, 'device_id', 'devices', "COALESCE(devices.alias, devices.display_name, 'Unknown device')");
-        $byModel = $this->reportGroupBy($query, 'model');
+        $byProject = $this->reportGroupBy($query, 'project_id', 'projects', "COALESCE(projects.manual_name, projects.canonical_name, 'Unknown project')", 'projects.provider_id', $subscriptionCost['by_provider']);
+        $byProvider = $this->reportGroupBy($query, 'provider_id', null, null, 'usage_events.provider_id', $subscriptionCost['by_provider']);
+        $byDevice = $this->reportGroupBy($query, 'device_id', 'devices', "COALESCE(devices.alias, devices.display_name, 'Unknown device')", null, $subscriptionCost['by_provider']);
+        $byModel = $this->reportGroupBy($query, 'model', null, null, null, $subscriptionCost['by_provider']);
 
         return view('reports', [
             'summary' => $summary,
@@ -933,9 +944,11 @@ class WebController extends Controller
     }
 
     /**
+     * @param array<string, float> $subscriptionByProvider
+     *
      * @return array<int, array<string, mixed>>
      */
-    private function reportGroupBy(Builder $baseQuery, string $groupColumn, ?string $joinTable = null, ?string $labelExpr = null): array
+    private function reportGroupBy(Builder $baseQuery, string $groupColumn, ?string $joinTable = null, ?string $labelExpr = null, ?string $providerIdExpr = null, array $subscriptionByProvider = []): array
     {
         $query = clone $baseQuery;
 
@@ -962,19 +975,27 @@ class WebController extends Controller
             $select[] = DB::raw("usage_events.{$groupColumn} as label");
         }
 
+        $groupBy = ["usage_events.{$groupColumn}"];
+        if ($providerIdExpr !== null) {
+            $select[] = DB::raw("{$providerIdExpr} as row_provider_id");
+            $groupBy[] = DB::raw($providerIdExpr);
+        }
+
         $results = $query->select($select)
-            ->groupBy("usage_events.{$groupColumn}")
+            ->groupBy($groupBy)
             ->orderByDesc(DB::raw('total_cost'))
             ->limit(50)
             ->get();
 
-        return $results->map(function ($row) {
+        return $results->map(function ($row) use ($subscriptionByProvider) {
             $totals = $this->reportTotals($row);
+            $providerId = $row->row_provider_id ?? null;
 
             return [
                 'label' => $row->label ?: 'Unknown',
                 'events' => $totals['events'],
                 'cost' => $totals['cost'],
+                'subscription_cost' => $providerId !== null ? ($subscriptionByProvider[$providerId] ?? 0.0) : 0.0,
                 'cached' => $totals['cached'],
                 'input' => $totals['input'],
                 'output' => $totals['output'],

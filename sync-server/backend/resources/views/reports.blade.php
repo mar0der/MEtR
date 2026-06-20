@@ -65,6 +65,10 @@
         <div class="label">API Equivalent Cost</div>
     </div>
     <div class="card stat">
+        <div class="value">${{ number_format((float) ($summary['subscription_cost'] ?? 0), 2) }}</div>
+        <div class="label">Subscription Paid</div>
+    </div>
+    <div class="card stat">
         <div class="value">{{ number_format($summary['events']) }}</div>
         <div class="label">Events</div>
     </div>
@@ -218,6 +222,7 @@
                     <th>Day</th>
                     <th style="text-align:right;">Events</th>
                     <th style="text-align:right;">Cost</th>
+                    <th style="text-align:right;">Paid</th>
                     <th style="text-align:right;">Cached</th>
                     <th style="text-align:right;">Input</th>
                     <th style="text-align:right;">Output</th>
@@ -233,13 +238,14 @@
                         <td>{{ \Carbon\Carbon::parse($row['bucket'])->format('M j, Y') }}</td>
                         <td style="text-align:right;">{{ number_format($row['events']) }}</td>
                         <td style="text-align:right;">${{ number_format((float) $row['cost'], 2) }}</td>
+                        <td style="text-align:right;">${{ number_format((float) ($row['subscription_cost'] ?? 0), 2) }}</td>
                         <td style="text-align:right;">{{ number_format($segments['cached']['tokens'] ?? 0) }}</td>
                         <td style="text-align:right;">{{ number_format($segments['input']['tokens'] ?? 0) }}</td>
                         <td style="text-align:right;">{{ number_format($segments['output']['tokens'] ?? 0) }}</td>
                         <td style="text-align:right;">{{ number_format($row['total_tokens']) }}</td>
                     </tr>
                 @empty
-                    <tr><td colspan="7" class="muted">No report rows found.</td></tr>
+                    <tr><td colspan="8" class="muted">No report rows found.</td></tr>
                 @endforelse
             </tbody>
         </table>

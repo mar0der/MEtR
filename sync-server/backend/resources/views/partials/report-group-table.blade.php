@@ -14,6 +14,7 @@
                     <th>Name</th>
                     <th style="text-align:right;">Events</th>
                     <th style="text-align:right;">Cost</th>
+                    <th style="text-align:right;">Paid</th>
                     <th style="text-align:right;">Cached</th>
                     <th style="text-align:right;">Input</th>
                     <th style="text-align:right;">Output</th>
@@ -26,13 +27,14 @@
                         <td>{{ $row['label'] }}</td>
                         <td style="text-align:right;">{{ number_format($row['events']) }}</td>
                         <td style="text-align:right;">${{ number_format((float) $row['cost'], 2) }}</td>
+                        <td style="text-align:right;">${{ number_format((float) ($row['subscription_cost'] ?? 0), 2) }}</td>
                         <td style="text-align:right;">{{ number_format($row['cached']) }}</td>
                         <td style="text-align:right;">{{ number_format($row['input']) }}</td>
                         <td style="text-align:right;">{{ number_format($row['output']) }}</td>
                         <td style="text-align:right;">{{ number_format($row['total_tokens']) }}</td>
                     </tr>
                 @empty
-                    <tr><td colspan="7" class="muted">No data for this grouping.</td></tr>
+                    <tr><td colspan="8" class="muted">No data for this grouping.</td></tr>
                 @endforelse
             </tbody>
         </table>

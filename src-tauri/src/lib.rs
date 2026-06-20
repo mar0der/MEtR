@@ -3,6 +3,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::error::Error;
 use std::fs;
 use std::io::{BufRead, BufReader};
@@ -67,6 +68,9 @@ struct Subscription {
     currency: String,
     billing_anchor_day: i64,
     enabled: bool,
+    start_date: String,
+    end_date: String,
+    autorenew: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -76,6 +80,17 @@ struct SubscriptionInput {
     monthly_amount: f64,
     currency: String,
     billing_anchor_day: i64,
+    start_date: String,
+    end_date: String,
+    autorenew: bool,
+}
+
+#[derive(Debug, Default)]
+struct SubscriptionCostResult {
+    total: f64,
+    by_provider: HashMap<String, f64>,
+    daily_total: BTreeMap<String, f64>,
+    daily_by_provider: BTreeMap<String, HashMap<String, f64>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -231,6 +246,7 @@ pub fn run() {
             let conn = Connection::open(db_path.join("metr.db"))?;
             migrate(&conn)?;
             seed_defaults(&conn)?;
+            ensure_subscription_renewals(&conn).map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
             app.manage(AppState {
                 db: Arc::new(Mutex::new(conn)),
             });
@@ -257,6 +273,7 @@ pub fn run() {
             get_recent_sessions,
             list_subscriptions,
             create_subscription,
+            update_subscription,
             delete_subscription,
             list_pricing_catalog,
             clear_parsed_data,
@@ -647,12 +664,26 @@ fn rescan_source(state: State<AppState>, source_id: String) -> Result<Value, Str
 #[tauri::command]
 fn get_dashboard_summary(state: State<AppState>) -> Result<DashboardSummary, String> {
     let conn = state.db.blocking_lock();
-    let providers = query_provider_summaries(&conn)?;
+    let mut providers = query_provider_summaries(&conn)?;
     let top_projects = query_top_projects(&conn)?;
     let (recent_sessions, _) = query_recent_sessions(&conn, None, 0, 30)?;
+
+    let today = Local::now().date_naive();
+    let month_start = NaiveDate::from_ymd_opt(today.year(), today.month(), 1)
+        .unwrap_or(today);
+    let sub_costs = subscription_cost_for_period(&conn, month_start, today, None)?;
+
+    let mut subscriptions_total = 0.0;
+    let mut api_equivalent_total = 0.0;
+    for provider in &mut providers {
+        let sub = sub_costs.by_provider.get(&provider.provider_id).copied().unwrap_or(0.0);
+        provider.subscription_amount = sub;
+        provider.net_savings_vs_api = provider.api_equivalent_cost - sub;
+        subscriptions_total += sub;
+        api_equivalent_total += provider.api_equivalent_cost;
+    }
+
     let totals = sum_usage(&providers);
-    let subscriptions_total: f64 = providers.iter().map(|p| p.subscription_amount).sum();
-    let api_equivalent_total: f64 = providers.iter().map(|p| p.api_equivalent_cost).sum();
     let break_even_progress = if subscriptions_total > 0.0 {
         Some(api_equivalent_total / subscriptions_total)
     } else {
@@ -693,8 +724,9 @@ fn list_subscriptions(state: State<AppState>) -> Result<Vec<Subscription>, Strin
     let conn = state.db.blocking_lock();
     let mut stmt = conn
         .prepare(
-            "SELECT id, provider_id, product_name, monthly_amount, currency, billing_anchor_day, enabled
-             FROM subscriptions ORDER BY provider_id, product_name",
+            "SELECT id, provider_id, product_name, monthly_amount, currency, billing_anchor_day, enabled,
+             start_date, end_date, autorenew
+             FROM subscriptions ORDER BY provider_id, product_name, start_date",
         )
         .map_err(to_string)?;
     let rows = stmt
@@ -707,10 +739,85 @@ fn list_subscriptions(state: State<AppState>) -> Result<Vec<Subscription>, Strin
                 currency: r.get(4)?,
                 billing_anchor_day: r.get(5)?,
                 enabled: r.get::<_, i64>(6)? == 1,
+                start_date: r.get(7)?,
+                end_date: r.get(8)?,
+                autorenew: r.get::<_, i64>(9)? == 1,
             })
         })
         .map_err(to_string)?;
     rows.collect::<Result<Vec<_>, _>>().map_err(to_string)
+}
+
+fn parse_subscription_date(value: &str) -> Result<NaiveDate, String> {
+    NaiveDate::parse_from_str(value, "%Y-%m-%d")
+        .map_err(|_| format!("Invalid date '{}', expected YYYY-MM-DD", value))
+}
+
+fn subscription_overlaps(
+    conn: &Connection,
+    provider_id: &str,
+    product_name: &str,
+    start: NaiveDate,
+    end: NaiveDate,
+    exclude_id: Option<&str>,
+) -> Result<bool, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, start_date, end_date FROM subscriptions
+             WHERE provider_id = ?1 AND product_name = ?2 AND enabled = 1",
+        )
+        .map_err(to_string)?;
+    let rows = stmt
+        .query_map(params![provider_id, product_name], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })
+        .map_err(to_string)?;
+    for row in rows {
+        let (id, s, e) = row.map_err(to_string)?;
+        if exclude_id.map(|ex| ex == id).unwrap_or(false) {
+            continue;
+        }
+        let s = parse_subscription_date(&s)?;
+        let e = parse_subscription_date(&e)?;
+        if start <= e && s <= end {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn validate_subscription_input(input: &SubscriptionInput) -> Result<(NaiveDate, NaiveDate), String> {
+    if input.monthly_amount <= 0.0 {
+        return Err("Monthly amount must be greater than zero.".to_string());
+    }
+    if input.billing_anchor_day < 1 || input.billing_anchor_day > 31 {
+        return Err("Billing anchor day must be between 1 and 31.".to_string());
+    }
+    let start = parse_subscription_date(&input.start_date)?;
+    let end = parse_subscription_date(&input.end_date)?;
+    if end < start {
+        return Err("End date cannot be before start date.".to_string());
+    }
+    Ok((start, end))
+}
+
+fn row_to_subscription(r: &rusqlite::Row) -> Result<Subscription, rusqlite::Error> {
+    Ok(Subscription {
+        id: r.get(0)?,
+        provider_id: r.get(1)?,
+        product_name: r.get(2)?,
+        monthly_amount: r.get(3)?,
+        currency: r.get(4)?,
+        billing_anchor_day: r.get(5)?,
+        enabled: r.get::<_, i64>(6)? == 1,
+        start_date: r.get(7)?,
+        end_date: r.get(8)?,
+        autorenew: r.get::<_, i64>(9)? == 1,
+    })
 }
 
 #[tauri::command]
@@ -718,12 +825,7 @@ fn create_subscription(
     state: State<AppState>,
     input: SubscriptionInput,
 ) -> Result<Subscription, String> {
-    if input.monthly_amount <= 0.0 {
-        return Err("Monthly amount must be greater than zero.".to_string());
-    }
-    if input.billing_anchor_day < 1 || input.billing_anchor_day > 28 {
-        return Err("Billing anchor day must be between 1 and 28 (not all months have 29-31 days).".to_string());
-    }
+    let (start, end) = validate_subscription_input(&input)?;
     let conn = state.db.blocking_lock();
     ensure_provider(
         &conn,
@@ -731,12 +833,26 @@ fn create_subscription(
         provider_display_name(&input.provider_id),
     )
     .map_err(to_string)?;
+    if subscription_overlaps(
+        &conn,
+        &input.provider_id,
+        &input.product_name,
+        start,
+        end,
+        None,
+    )? {
+        return Err(
+            "A subscription for this provider and account already overlaps the selected dates."
+                .to_string(),
+        );
+    }
     let id = Uuid::new_v4().to_string();
     let now = now();
     conn.execute(
         "INSERT INTO subscriptions
-        (id, provider_id, product_name, monthly_amount, currency, billing_anchor_day, billing_anchor_time, enabled, created_at, updated_at)
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6, '00:00:00', 1, ?7, ?7)",
+        (id, provider_id, product_name, monthly_amount, currency, billing_anchor_day, billing_anchor_time,
+         start_date, end_date, autorenew, enabled, created_at, updated_at)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, '00:00:00', ?7, ?8, ?9, 1, ?10, ?10)",
         params![
             id,
             input.provider_id,
@@ -744,25 +860,76 @@ fn create_subscription(
             input.monthly_amount,
             input.currency,
             input.billing_anchor_day,
+            input.start_date,
+            input.end_date,
+            if input.autorenew { 1 } else { 0 },
             now
         ],
     )
     .map_err(to_string)?;
     conn.query_row(
-        "SELECT id, provider_id, product_name, monthly_amount, currency, billing_anchor_day, enabled
+        "SELECT id, provider_id, product_name, monthly_amount, currency, billing_anchor_day, enabled,
+         start_date, end_date, autorenew
          FROM subscriptions WHERE id = ?1",
         params![id],
-        |r| {
-            Ok(Subscription {
-                id: r.get(0)?,
-                provider_id: r.get(1)?,
-                product_name: r.get(2)?,
-                monthly_amount: r.get(3)?,
-                currency: r.get(4)?,
-                billing_anchor_day: r.get(5)?,
-                enabled: r.get::<_, i64>(6)? == 1,
-            })
-        },
+        row_to_subscription,
+    )
+    .map_err(to_string)
+}
+
+#[tauri::command]
+fn update_subscription(
+    state: State<AppState>,
+    id: String,
+    input: SubscriptionInput,
+) -> Result<Subscription, String> {
+    let (start, end) = validate_subscription_input(&input)?;
+    let conn = state.db.blocking_lock();
+    ensure_provider(
+        &conn,
+        &input.provider_id,
+        provider_display_name(&input.provider_id),
+    )
+    .map_err(to_string)?;
+    if subscription_overlaps(
+        &conn,
+        &input.provider_id,
+        &input.product_name,
+        start,
+        end,
+        Some(&id),
+    )? {
+        return Err(
+            "A subscription for this provider and account already overlaps the selected dates."
+                .to_string(),
+        );
+    }
+    conn.execute(
+        "UPDATE subscriptions SET
+         provider_id = ?1, product_name = ?2, monthly_amount = ?3, currency = ?4,
+         billing_anchor_day = ?5, start_date = ?6, end_date = ?7, autorenew = ?8,
+         updated_at = ?9
+         WHERE id = ?10",
+        params![
+            input.provider_id,
+            input.product_name,
+            input.monthly_amount,
+            input.currency,
+            input.billing_anchor_day,
+            input.start_date,
+            input.end_date,
+            if input.autorenew { 1 } else { 0 },
+            now(),
+            id
+        ],
+    )
+    .map_err(to_string)?;
+    conn.query_row(
+        "SELECT id, provider_id, product_name, monthly_amount, currency, billing_anchor_day, enabled,
+         start_date, end_date, autorenew
+         FROM subscriptions WHERE id = ?1",
+        params![id],
+        row_to_subscription,
     )
     .map_err(to_string)
 }
@@ -773,6 +940,156 @@ fn delete_subscription(state: State<AppState>, id: String) -> Result<(), String>
     conn.execute("DELETE FROM subscriptions WHERE id = ?1", params![id])
         .map_err(to_string)?;
     Ok(())
+}
+
+fn ensure_subscription_renewals(conn: &Connection) -> rusqlite::Result<()> {
+    let today = Local::now().date_naive();
+    let mut stmt = conn.prepare(
+        "SELECT id, provider_id, product_name, monthly_amount, currency, billing_anchor_day,
+         start_date, end_date
+         FROM subscriptions
+         WHERE enabled = 1 AND autorenew = 1 AND end_date < ?1
+         ORDER BY provider_id, product_name, start_date",
+    )?;
+    let rows: Vec<(String, String, String, f64, String, i64, String, String)> = stmt
+        .query_map(params![today.format("%Y-%m-%d").to_string()], |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+                r.get(6)?,
+                r.get(7)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(stmt);
+
+    for (id, provider_id, product_name, monthly_amount, currency, anchor_day, start_str, end_str) in rows {
+        let anchor = anchor_day.clamp(1, 31) as u32;
+        let mut current_end = parse_date_from_rfc3339(&end_str)
+            .or_else(|| NaiveDate::parse_from_str(&end_str, "%Y-%m-%d").ok())
+            .unwrap_or(today);
+        let original_start = parse_date_from_rfc3339(&start_str)
+            .or_else(|| NaiveDate::parse_from_str(&start_str, "%Y-%m-%d").ok())
+            .unwrap_or(today);
+
+        // Defensive: stop after many cycles to avoid runaway inserts.
+        let mut safety = 0;
+        while current_end < today && safety < 120 {
+            safety += 1;
+            let next_start = current_end + chrono::Duration::days(1);
+            let next_end = billing_cycle_end(next_start, anchor);
+
+            // Do not renew if another subscription for the same account already covers this period.
+            if subscription_overlaps(
+                conn,
+                &provider_id,
+                &product_name,
+                next_start,
+                next_end,
+                Some(&id),
+            )
+            .unwrap_or(false)
+            {
+                break;
+            }
+
+            let new_id = Uuid::new_v4().to_string();
+            conn.execute(
+                "INSERT INTO subscriptions
+                 (id, provider_id, product_name, monthly_amount, currency, billing_anchor_day, billing_anchor_time,
+                  start_date, end_date, autorenew, enabled, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, '00:00:00', ?7, ?8, 1, 1, ?9, ?9)",
+                params![
+                    new_id,
+                    provider_id,
+                    product_name,
+                    monthly_amount,
+                    currency,
+                    anchor_day,
+                    next_start.format("%Y-%m-%d").to_string(),
+                    next_end.format("%Y-%m-%d").to_string(),
+                    now()
+                ],
+            )?;
+            current_end = next_end;
+        }
+
+        // If the original row ended before today but we could not create a future instance
+        // (e.g. safety limit), leave autorenew on the original row. Otherwise keep it as-is.
+        let _ = (id, original_start);
+    }
+    Ok(())
+}
+
+fn subscription_cost_for_period(
+    conn: &Connection,
+    from: NaiveDate,
+    to: NaiveDate,
+    provider_ids: Option<&HashSet<String>>,
+) -> Result<SubscriptionCostResult, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT provider_id, monthly_amount, start_date, end_date
+             FROM subscriptions
+             WHERE enabled = 1 AND start_date <= ?1 AND end_date >= ?2",
+        )
+        .map_err(to_string)?;
+    let from_str = from.format("%Y-%m-%d").to_string();
+    let to_str = to.format("%Y-%m-%d").to_string();
+    let rows = stmt
+        .query_map(params![to_str, from_str], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, f64>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+            ))
+        })
+        .map_err(to_string)?;
+
+    let mut result = SubscriptionCostResult::default();
+    for row in rows {
+        let (provider_id, monthly_amount, start_str, end_str) = row.map_err(to_string)?;
+        if let Some(ids) = provider_ids {
+            if !ids.contains(&provider_id) {
+                continue;
+            }
+        }
+        let start = NaiveDate::parse_from_str(&start_str, "%Y-%m-%d").map_err(to_string)?;
+        let end = NaiveDate::parse_from_str(&end_str, "%Y-%m-%d").map_err(to_string)?;
+        let overlap_start = from.max(start);
+        let overlap_end = to.min(end);
+        if overlap_start > overlap_end {
+            continue;
+        }
+        let cycle_days = days_in_inclusive_range(start, end) as f64;
+        if cycle_days <= 0.0 {
+            continue;
+        }
+        let daily_rate = monthly_amount / cycle_days;
+        let overlap_days = days_in_inclusive_range(overlap_start, overlap_end);
+        let cost = overlap_days as f64 * daily_rate;
+        *result.by_provider.entry(provider_id.clone()).or_insert(0.0) += cost;
+        result.total += cost;
+
+        let mut d = overlap_start;
+        while d <= overlap_end {
+            let key = d.format("%Y-%m-%d").to_string();
+            *result.daily_total.entry(key.clone()).or_insert(0.0) += daily_rate;
+            *result
+                .daily_by_provider
+                .entry(key.clone())
+                .or_default()
+                .entry(provider_id.clone())
+                .or_insert(0.0) += daily_rate;
+            d += chrono::Duration::days(1);
+        }
+    }
+    Ok(result)
 }
 
 #[tauri::command]
@@ -1446,6 +1763,7 @@ async fn sync_now(state: State<'_, AppState>, app: tauri::AppHandle) -> Result<S
 
     let sync_task = tauri::async_runtime::spawn_blocking(move || {
         let conn = db.blocking_lock();
+        let _ = ensure_subscription_renewals(&conn).map_err(|e| e.to_string());
         let result = perform_sync(&conn, false, |uploaded, total| {
             let _ = progress_tx_clone.send((uploaded, total));
         });
@@ -1505,6 +1823,7 @@ async fn full_resync(state: State<'_, AppState>, app: tauri::AppHandle) -> Resul
 
     let sync_task = tauri::async_runtime::spawn_blocking(move || {
         let conn = db.blocking_lock();
+        let _ = ensure_subscription_renewals(&conn).map_err(|e| e.to_string());
         let result = perform_sync(&conn, true, |uploaded, total| {
             let _ = progress_tx_clone.send((uploaded, total));
         });
@@ -1905,15 +2224,16 @@ fn sync_subscriptions(
     let mut stmt = conn
         .prepare(
             "SELECT id, provider_id, product_name, monthly_amount, currency,
-             billing_anchor_day, enabled, notes
+             billing_anchor_day, enabled, start_date, end_date, autorenew, notes
              FROM subscriptions
-             ORDER BY provider_id, product_name",
+             ORDER BY provider_id, product_name, start_date",
         )
         .map_err(to_string)?;
 
     let subscriptions: Vec<Value> = stmt
         .query_map([], |r| {
             let enabled: i64 = r.get(6)?;
+            let autorenew: i64 = r.get(9)?;
             Ok(serde_json::json!({
                 "source_subscription_id": r.get::<_, String>(0)?,
                 "provider_id": r.get::<_, String>(1)?,
@@ -1922,7 +2242,10 @@ fn sync_subscriptions(
                 "currency": r.get::<_, String>(4)?,
                 "billing_anchor_day": r.get::<_, i64>(5)?,
                 "enabled": enabled == 1,
-                "notes": r.get::<_, Option<String>>(7)?,
+                "started_on": r.get::<_, String>(7)?,
+                "ended_on": r.get::<_, String>(8)?,
+                "autorenew": autorenew == 1,
+                "notes": r.get::<_, Option<String>>(10)?,
             }))
         })
         .map_err(to_string)?
@@ -2120,6 +2443,32 @@ fn add_column_if_missing(
     }
 }
 
+fn backfill_subscription_dates(conn: &Connection) -> rusqlite::Result<()> {
+    let mut stmt = conn.prepare(
+        "SELECT id, created_at, billing_anchor_day FROM subscriptions WHERE start_date IS NULL OR start_date = ''",
+    )?;
+    let rows: Vec<(String, String, i64)> = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(stmt);
+    for (id, created_at, anchor_day) in rows {
+        let created = parse_date_from_rfc3339(&created_at).unwrap_or_else(|| Local::now().date_naive());
+        let anchor = anchor_day.clamp(1, 31) as u32;
+        let (start, end) = billing_cycle_for_date(created, anchor);
+        conn.execute(
+            "UPDATE subscriptions SET start_date = ?1, end_date = ?2, autorenew = 1, updated_at = ?3 WHERE id = ?4",
+            params![start.format("%Y-%m-%d").to_string(), end.format("%Y-%m-%d").to_string(), now(), id],
+        )?;
+    }
+    Ok(())
+}
+
+fn parse_date_from_rfc3339(value: &str) -> Option<NaiveDate> {
+    chrono::DateTime::parse_from_rfc3339(value)
+        .ok()
+        .map(|dt| dt.date_naive())
+}
+
 fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch(
         "
@@ -2249,10 +2598,14 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
           currency TEXT NOT NULL DEFAULT 'USD',
           billing_anchor_day INTEGER NOT NULL,
           billing_anchor_time TEXT NOT NULL DEFAULT '00:00:00',
+          start_date TEXT NOT NULL,
+          end_date TEXT NOT NULL,
+          autorenew INTEGER NOT NULL DEFAULT 0,
           enabled INTEGER NOT NULL DEFAULT 1,
           notes TEXT,
           created_at TEXT NOT NULL,
-          updated_at TEXT NOT NULL
+          updated_at TEXT NOT NULL,
+          UNIQUE(provider_id, product_name, start_date)
         );
         CREATE TABLE IF NOT EXISTS sync_config (
           id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -2286,6 +2639,10 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     add_column_if_missing(conn, "usage_events", "source_project_path", "TEXT")?;
     add_column_if_missing(conn, "usage_events", "merged_from_project_id", "TEXT")?;
     add_column_if_missing(conn, "conversations", "merged_from_project_id", "TEXT")?;
+    add_column_if_missing(conn, "subscriptions", "start_date", "TEXT")?;
+    add_column_if_missing(conn, "subscriptions", "end_date", "TEXT")?;
+    add_column_if_missing(conn, "subscriptions", "autorenew", "INTEGER NOT NULL DEFAULT 0")?;
+    backfill_subscription_dates(conn)?;
     create_project_management_table(conn)?;
     Ok(())
 }
@@ -3554,7 +3911,7 @@ fn query_provider_summaries(conn: &Connection) -> Result<Vec<ProviderSummary>, S
               COALESCE(SUM(u.input_tokens),0), COALESCE(SUM(u.output_tokens),0), COALESCE(SUM(u.cached_input_tokens),0),
               COALESCE(SUM(u.cache_write_tokens),0), COALESCE(SUM(u.cache_read_tokens),0), COALESCE(SUM(u.reasoning_tokens),0),
               COALESCE(SUM(u.tool_tokens),0), COALESCE(SUM(u.unknown_tokens),0), COALESCE(SUM(u.official_api_cost_usd),0),
-              (SELECT COALESCE(SUM(monthly_amount),0) FROM subscriptions s WHERE s.provider_id = p.id AND s.enabled = 1),
+              0.0,
               (SELECT COUNT(*) FROM log_sources ls WHERE ls.provider_id = p.id),
               MAX(u.timestamp)
              FROM providers p
@@ -3847,6 +4204,80 @@ mod tests {
             Some("2026-04-27T19:11:44.005+00:00".to_string())
         );
     }
+
+    #[test]
+    fn billing_cycle_end_for_anchor_first_day() {
+        let start = NaiveDate::from_ymd_opt(2026, 5, 1).unwrap();
+        let end = billing_cycle_end(start, 1);
+        assert_eq!(end, NaiveDate::from_ymd_opt(2026, 5, 31).unwrap());
+    }
+
+    #[test]
+    fn billing_cycle_end_for_anchor_fifteenth() {
+        let start = NaiveDate::from_ymd_opt(2026, 5, 15).unwrap();
+        let end = billing_cycle_end(start, 15);
+        assert_eq!(end, NaiveDate::from_ymd_opt(2026, 6, 14).unwrap());
+    }
+
+    #[test]
+    fn billing_cycle_end_for_anchor_thirty_first() {
+        let start = NaiveDate::from_ymd_opt(2026, 3, 31).unwrap();
+        let end = billing_cycle_end(start, 31);
+        assert_eq!(end, NaiveDate::from_ymd_opt(2026, 4, 29).unwrap());
+    }
+
+    #[test]
+    fn subscription_renewal_creates_next_instance() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+        seed_defaults(&conn).unwrap();
+
+        let id = Uuid::new_v4().to_string();
+        let now = "2026-01-01T00:00:00+00:00";
+        conn.execute(
+            "INSERT INTO subscriptions
+             (id, provider_id, product_name, monthly_amount, currency, billing_anchor_day,
+              start_date, end_date, autorenew, enabled, created_at, updated_at)
+             VALUES (?1, 'openai', 'Plus', 20.0, 'USD', 1, '2026-01-01', '2026-01-31', 1, 1, ?2, ?2)",
+            params![id, now],
+        )
+        .unwrap();
+
+        ensure_subscription_renewals(&conn).unwrap();
+
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM subscriptions WHERE provider_id = 'openai' AND product_name = 'Plus'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(count >= 2, "expected at least original + renewed instance, got {}", count);
+    }
+
+    #[test]
+    fn subscription_cost_prorates_partial_cycle() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+        seed_defaults(&conn).unwrap();
+
+        let id = Uuid::new_v4().to_string();
+        let now = "2026-02-01T00:00:00+00:00";
+        conn.execute(
+            "INSERT INTO subscriptions
+             (id, provider_id, product_name, monthly_amount, currency, billing_anchor_day,
+              start_date, end_date, autorenew, enabled, created_at, updated_at)
+             VALUES (?1, 'anthropic', 'Pro', 28.0, 'USD', 1, '2026-02-01', '2026-02-28', 0, 1, ?2, ?2)",
+            params![id, now],
+        )
+        .unwrap();
+
+        let from = NaiveDate::from_ymd_opt(2026, 2, 10).unwrap();
+        let to = NaiveDate::from_ymd_opt(2026, 2, 14).unwrap();
+        let result = subscription_cost_for_period(&conn, from, to, None).unwrap();
+
+        assert!((result.total - 5.0).abs() < 0.001, "expected 5.0, got {}", result.total);
+    }
 }
 
 fn infer_project_from_path(path: &Path) -> Option<String> {
@@ -4101,15 +4532,7 @@ fn provider_display_name(provider_id: &str) -> &str {
 #[allow(dead_code)]
 fn current_cycle(anchor_day: u32) -> (String, String) {
     let today = Local::now().date_naive();
-    let start = cycle_date(today.year(), today.month(), anchor_day);
-    let start = if today < start {
-        let (year, month) = previous_month(today.year(), today.month());
-        cycle_date(year, month, anchor_day)
-    } else {
-        start
-    };
-    let (next_year, next_month) = next_month(start.year(), start.month());
-    let end = cycle_date(next_year, next_month, anchor_day);
+    let (start, end) = billing_cycle_for_date(today, anchor_day);
     (
         Local
             .from_local_datetime(&start.and_hms_opt(0, 0, 0).unwrap())
@@ -4120,6 +4543,30 @@ fn current_cycle(anchor_day: u32) -> (String, String) {
             .unwrap()
             .to_rfc3339(),
     )
+}
+
+fn billing_cycle_for_date(date: NaiveDate, anchor_day: u32) -> (NaiveDate, NaiveDate) {
+    let mut start = cycle_date(date.year(), date.month(), anchor_day);
+    if date < start {
+        let (year, month) = previous_month(date.year(), date.month());
+        start = cycle_date(year, month, anchor_day);
+    }
+    let end = billing_cycle_end(start, anchor_day);
+    (start, end)
+}
+
+fn billing_cycle_end(start: NaiveDate, anchor_day: u32) -> NaiveDate {
+    let (ny, nm) = next_month(start.year(), start.month());
+    let next_start = cycle_date(ny, nm, anchor_day);
+    next_start - chrono::Duration::days(1)
+}
+
+fn days_in_inclusive_range(from: NaiveDate, to: NaiveDate) -> i64 {
+    if from > to {
+        0
+    } else {
+        (to - from).num_days() + 1
+    }
 }
 
 fn cycle_date(year: i32, month: u32, anchor_day: u32) -> NaiveDate {

@@ -79,6 +79,8 @@ class SyncController extends Controller
             'subscriptions.*.monthly_amount' => ['required', 'numeric', 'min:0'],
             'subscriptions.*.currency' => ['required', 'string', 'max:8'],
             'subscriptions.*.billing_anchor_day' => ['nullable', 'integer', 'min:1', 'max:31'],
+            'subscriptions.*.started_on' => ['nullable', 'date_format:Y-m-d'],
+            'subscriptions.*.ended_on' => ['nullable', 'date_format:Y-m-d'],
             'subscriptions.*.enabled' => ['boolean'],
             'subscriptions.*.notes' => ['nullable', 'string'],
         ]);
@@ -98,26 +100,13 @@ class SyncController extends Controller
                 'monthly_price' => $subscription['monthly_amount'],
                 'currency' => strtoupper($subscription['currency']),
                 'billing_anchor_day' => $subscription['billing_anchor_day'] ?? null,
+                'started_on' => $subscription['started_on'] ?? null,
+                'ended_on' => $subscription['ended_on'] ?? null,
                 'active' => $subscription['enabled'] ?? true,
                 'notes' => $subscription['notes'] ?? null,
             ];
 
-            $existing = Subscription::where($match)->first()
-                ?? Subscription::where([
-                    'user_id' => $request->user()->id,
-                    'provider_id' => $subscription['provider_id'],
-                    'plan_name' => $subscription['product_name'],
-                ])->first();
-
-            if ($existing) {
-                $existing->update(array_merge($payload, [
-                    'source_subscription_id' => $subscription['source_subscription_id'],
-                ]));
-            } else {
-                $request->user()->subscriptions()->create(array_merge($payload, [
-                    'source_subscription_id' => $subscription['source_subscription_id'],
-                ]));
-            }
+            Subscription::updateOrCreate($match, $payload);
 
             $synced++;
         }
