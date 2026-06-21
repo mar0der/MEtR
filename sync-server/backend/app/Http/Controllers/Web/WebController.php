@@ -376,10 +376,9 @@ class WebController extends Controller
                     ->orderBy('bucket')
                     ->get()
                     ->map(function ($row) use ($metric, $subscriptionCost) {
-                        $chartRow = $this->reportChartRow($row, $metric);
-                        $chartRow['subscription_cost'] = $subscriptionCost['daily_total'][$chartRow['bucket']] ?? 0.0;
+                        $bucket = $row->bucket;
 
-                        return $chartRow;
+                        return $this->reportChartRow($row, $metric, $subscriptionCost['daily_total'][$bucket] ?? 0.0);
                     });
             }
         );
@@ -1178,7 +1177,32 @@ class WebController extends Controller
         ];
     }
 
-    private function reportChartRow(object $row, string $metric): array
+    private function reportCostPerMillion(float $cost, int $tokens): ?float
+    {
+        return $tokens > 0 ? ($cost / $tokens) * 1_000_000.0 : null;
+    }
+
+    /**
+     * Effective (real) cost per 1M tokens.
+     *
+     * Starts from the API-list-price cost per 1M tokens and scales it by the
+     * ratio of subscription money actually paid versus the theoretical API cost.
+     * If the theoretical cost is zero or no tokens were consumed, no ratio can
+     * be computed.
+     */
+    private function reportEffectiveCostPerMillion(float $listCost, float $paid, int $tokens): ?float
+    {
+        if ($tokens <= 0 || $listCost <= 0.0) {
+            return null;
+        }
+
+        $listCostPerMillion = ($listCost / $tokens) * 1_000_000.0;
+        $paidRatio = $paid / $listCost;
+
+        return $listCostPerMillion * $paidRatio;
+    }
+
+    private function reportChartRow(object $row, string $metric, float $subscriptionCost = 0.0): array
     {
         $totals = $this->reportTotals($row);
         $tokenBase = max(1, $totals['total_tokens']);
@@ -1207,9 +1231,12 @@ class WebController extends Controller
             'label' => Carbon::parse($row->bucket)->format('M j'),
             'events' => $totals['events'],
             'cost' => $cost,
+            'subscription_cost' => $subscriptionCost,
             'total_tokens' => $totals['total_tokens'],
             'value' => $isCost ? $cost : $totals['total_tokens'],
             'segments' => $segments,
+            'cost_per_million' => $this->reportCostPerMillion($cost, $totals['total_tokens']),
+            'effective_cost_per_million' => $this->reportEffectiveCostPerMillion($cost, $subscriptionCost, $totals['total_tokens']),
         ];
     }
 
@@ -1272,6 +1299,8 @@ class WebController extends Controller
                 'input' => $totals['input'],
                 'output' => $totals['output'],
                 'total_tokens' => $totals['total_tokens'],
+                'cost_per_million' => $this->reportCostPerMillion($totals['cost'], $totals['total_tokens']),
+                'effective_cost_per_million' => $this->reportEffectiveCostPerMillion($totals['cost'], $providerId !== null ? ($subscriptionByProvider[$providerId] ?? 0.0) : 0.0, $totals['total_tokens']),
             ];
         })->all();
     }

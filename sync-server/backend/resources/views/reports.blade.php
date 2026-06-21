@@ -8,6 +8,7 @@
     $presetLink = fn (string $preset) => url('/reports').'?'.http_build_query(array_merge($baseQuery, ['preset' => $preset]));
     $metricLink = fn (string $nextMetric) => url('/reports').'?'.http_build_query(array_merge(request()->query(), ['metric' => $nextMetric]));
     $formatValue = fn (float|int $value) => $metric === 'cost' ? '$'.number_format((float) $value, 2) : number_format((int) $value);
+    $formatCostPerMillion = fn (?float $value) => $value === null ? '-' : '$'.number_format($value, 2);
 @endphp
 
 <div class="page-heading">
@@ -227,6 +228,8 @@
                     <th style="text-align:right;">Input</th>
                     <th style="text-align:right;">Output</th>
                     <th style="text-align:right;">Total Tokens</th>
+                    <th style="text-align:right;" title="API-equivalent cost per 1M tokens for this mix">Cost / 1M</th>
+                    <th style="text-align:right;" title="Real cost per 1M tokens after subscription/quota discount">Eff. Cost / 1M</th>
                 </tr>
             </thead>
             <tbody>
@@ -243,9 +246,11 @@
                         <td style="text-align:right;">{{ number_format($segments['input']['tokens'] ?? 0) }}</td>
                         <td style="text-align:right;">{{ number_format($segments['output']['tokens'] ?? 0) }}</td>
                         <td style="text-align:right;">{{ number_format($row['total_tokens']) }}</td>
+                        <td style="text-align:right;">{{ $formatCostPerMillion($row['cost_per_million'] ?? null) }}</td>
+                        <td style="text-align:right;">{{ $formatCostPerMillion($row['effective_cost_per_million'] ?? null) }}</td>
                     </tr>
                 @empty
-                    <tr><td colspan="8" class="muted">No report rows found.</td></tr>
+                    <tr><td colspan="10" class="muted">No report rows found.</td></tr>
                 @endforelse
             </tbody>
         </table>

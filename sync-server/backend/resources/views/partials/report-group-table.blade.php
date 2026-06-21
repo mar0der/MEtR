@@ -1,6 +1,7 @@
 @php
     $rows = $rows ?? [];
     $title = $title ?? 'Grouping';
+    $formatCostPerMillion = fn (?float $value) => $value === null ? '-' : '$'.number_format($value, 2);
 @endphp
 <div class="card">
     <div class="table-meta">
@@ -19,6 +20,8 @@
                     <th style="text-align:right;">Input</th>
                     <th style="text-align:right;">Output</th>
                     <th style="text-align:right;">Total Tokens</th>
+                    <th style="text-align:right;" title="API-equivalent cost per 1M tokens for this mix">Cost / 1M</th>
+                    <th style="text-align:right;" title="Real cost per 1M tokens after subscription/quota discount">Eff. Cost / 1M</th>
                 </tr>
             </thead>
             <tbody>
@@ -32,9 +35,11 @@
                         <td style="text-align:right;">{{ number_format($row['input']) }}</td>
                         <td style="text-align:right;">{{ number_format($row['output']) }}</td>
                         <td style="text-align:right;">{{ number_format($row['total_tokens']) }}</td>
+                        <td style="text-align:right;">{{ $formatCostPerMillion($row['cost_per_million'] ?? null) }}</td>
+                        <td style="text-align:right;">{{ $formatCostPerMillion($row['effective_cost_per_million'] ?? null) }}</td>
                     </tr>
                 @empty
-                    <tr><td colspan="8" class="muted">No data for this grouping.</td></tr>
+                    <tr><td colspan="10" class="muted">No data for this grouping.</td></tr>
                 @endforelse
             </tbody>
         </table>
