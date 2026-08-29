@@ -2869,6 +2869,9 @@ fn count_candidate_files(path: &Path) -> usize {
 }
 
 fn is_candidate_file(path: &Path) -> bool {
+    if is_skipped_file(path) {
+        return false;
+    }
     matches!(
         path.extension()
             .and_then(|e| e.to_str())
@@ -2877,6 +2880,13 @@ fn is_candidate_file(path: &Path) -> bool {
             .as_str(),
         "json" | "jsonl" | "log" | "txt" | "md"
     )
+}
+
+fn is_skipped_file(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+        return false;
+    };
+    matches!(name.to_ascii_lowercase().as_str(), "stats-cache.json")
 }
 
 fn is_skipped_dir(path: &Path) -> bool {
@@ -4185,6 +4195,16 @@ fn parse_unix_timestamp(value: Option<f64>) -> Option<String> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn stats_cache_json_is_not_a_candidate_file() {
+        assert!(!is_candidate_file(Path::new(
+            "/Users/petar/.claude/stats-cache.json"
+        )));
+        assert!(is_candidate_file(Path::new(
+            "/Users/petar/.claude/projects/foo/bar.jsonl"
+        )));
+    }
 
     #[test]
     fn timestamp_field_accepts_unix_seconds_with_fraction() {

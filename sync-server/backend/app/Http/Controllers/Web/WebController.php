@@ -354,10 +354,10 @@ class WebController extends Controller
         );
         $summary['subscription_cost'] = $subscriptionCost['total'];
 
-        $dailyRows = Cache::remember(
+        $dailyRows = collect(Cache::remember(
             $this->cacheKey('reports:daily', $request, ['metric' => $metric]),
             300,
-            function () use ($query, $metric, $subscriptionCost) {
+            function () use ($query, $metric) {
                 return (clone $query)
                     ->select([
                         DB::raw('DATE(usage_events.timestamp) as bucket'),
@@ -375,13 +375,20 @@ class WebController extends Controller
                     ->groupBy(DB::raw('DATE(usage_events.timestamp)'))
                     ->orderBy('bucket')
                     ->get()
-                    ->map(function ($row) use ($metric, $subscriptionCost) {
-                        $bucket = $row->bucket;
-
-                        return $this->reportChartRow($row, $metric, $subscriptionCost['daily_total'][$bucket] ?? 0.0);
-                    });
+                    ->map(fn ($row) => $this->reportChartRow($row, $metric, 0.0));
             }
-        );
+        ))->map(function (array $row) use ($subscriptionCost) {
+            $bucket = Carbon::parse($row['bucket'])->toDateString();
+            $paid = $subscriptionCost['daily_total'][$bucket] ?? 0.0;
+            $row['subscription_cost'] = $paid;
+            $row['effective_cost_per_million'] = $this->reportEffectiveCostPerMillion(
+                (float) $row['cost'],
+                $paid,
+                (int) $row['total_tokens']
+            );
+
+            return $row;
+        });
 
         $maxValue = max(1, (float) $dailyRows->max('value'));
 
@@ -612,6 +619,7 @@ class WebController extends Controller
             $term = request('q');
             $query->where(function ($q) use ($term) {
                 $q->where('plan_name', 'like', "%{$term}%")
+                    ->orWhere('provider_id', 'like', "%{$term}%")
                     ->orWhere('currency', 'like', "%{$term}%")
                     ->orWhere('notes', 'like', "%{$term}%");
             });
@@ -632,7 +640,8 @@ class WebController extends Controller
             ->orderBy('plan_name')
             ->get()
             ->map(function ($group) {
-                $latest = Subscription::where('user_id', Auth::id())
+                $latest = Subscription::with('provider')
+                    ->where('user_id', Auth::id())
                     ->where('provider_id', $group->provider_id)
                     ->where('plan_name', $group->plan_name)
                     ->whereDate('started_on', $group->latest_started_on)
@@ -679,11 +688,12 @@ class WebController extends Controller
             return is_string($valA) ? strcasecmp($valA, (string) $valB) : $valA <=> $valB;
         }, SORT_REGULAR, $dir === 'desc')->values();
 
+        $activeGroups = $subscriptionGroups->where('active', true);
         $groupSums = [
             'instance_count' => $subscriptionGroups->sum('instance_count'),
             'total_paid' => $subscriptionGroups->sum('total_paid'),
-            'current_price' => $subscriptionGroups->sum('current_price'),
-            'renews_at_price' => $subscriptionGroups->sum('renews_at_price'),
+            'current_price' => $activeGroups->sum('current_price'),
+            'renews_at_price' => $activeGroups->sum('renews_at_price'),
         ];
 
         return view('subscriptions', [

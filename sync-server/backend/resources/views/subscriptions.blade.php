@@ -45,8 +45,8 @@
             <table>
                 <thead>
                     <tr>
-                        <th><a href="{{ $sortLink('account') }}" style="color:inherit;text-decoration:none;">Account{!! $sortIcon('account') !!}</a></th>
                         <th><a href="{{ $sortLink('provider') }}" style="color:inherit;text-decoration:none;">Provider{!! $sortIcon('provider') !!}</a></th>
+                        <th><a href="{{ $sortLink('account') }}" style="color:inherit;text-decoration:none;">Account{!! $sortIcon('account') !!}</a></th>
                         <th style="text-align:right;"><a href="{{ $sortLink('instances') }}" style="color:inherit;text-decoration:none;">Instances{!! $sortIcon('instances') !!}</a></th>
                         <th style="text-align:right;"><a href="{{ $sortLink('total_paid') }}" style="color:inherit;text-decoration:none;">Total Paid{!! $sortIcon('total_paid') !!}</a></th>
                         <th style="text-align:right;"><a href="{{ $sortLink('current_price') }}" style="color:inherit;text-decoration:none;">Current Price{!! $sortIcon('current_price') !!}</a></th>
@@ -59,8 +59,8 @@
                 <tbody>
                     @forelse($subscriptionGroups as $group)
                         <tr>
-                            <td><strong>{{ $group['plan_name'] }}</strong></td>
                             <td>{{ $group['provider']?->display_name ?? $group['provider_id'] }}</td>
+                            <td><strong>{{ $group['plan_name'] }}</strong></td>
                             <td style="text-align:right;">{{ number_format($group['instance_count']) }}</td>
                             <td style="text-align:right;">${{ number_format($group['total_paid'], 2) }}</td>
                             <td style="text-align:right;">${{ number_format($group['current_price'], 2) }}</td>

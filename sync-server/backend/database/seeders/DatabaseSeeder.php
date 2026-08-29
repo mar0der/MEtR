@@ -11,6 +11,7 @@ class DatabaseSeeder extends Seeder
         $this->call([
             ProviderSeeder::class,
             ModelPriceSeeder::class,
+            CursorModelPriceSeeder::class,
         ]);
     }
 }

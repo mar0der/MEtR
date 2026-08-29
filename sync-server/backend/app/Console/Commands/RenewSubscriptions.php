@@ -5,7 +5,6 @@ namespace App\Console\Commands;
 use App\Models\Subscription;
 use Carbon\Carbon;
 use Illuminate\Console\Command;
-use Illuminate\Support\Str;
 
 class RenewSubscriptions extends Command
 {
@@ -16,37 +15,51 @@ class RenewSubscriptions extends Command
     public function handle(): int
     {
         $today = now()->startOfDay();
-        $query = Subscription::where('autorenew', true)
+
+        $latestByGroup = Subscription::query()
+            ->where('autorenew', true)
             ->where('active', true)
-            ->whereDate('ended_on', '<', $today)
-            ->orderBy('user_id')
-            ->orderBy('provider_id')
-            ->orderBy('plan_name')
-            ->orderBy('started_on');
+            ->whereNotNull('ended_on')
+            ->orderBy('started_on')
+            ->get()
+            ->groupBy(fn (Subscription $subscription) => implode("\0", [
+                (string) $subscription->user_id,
+                $subscription->provider_id,
+                $subscription->plan_name,
+                (string) ($subscription->provider_account_id ?? ''),
+            ]))
+            ->map(function ($group) {
+                return $group
+                    ->sortByDesc(fn (Subscription $subscription) => $subscription->ended_on->timestamp)
+                    ->first();
+            });
 
         $renewed = 0;
         $safety = 0;
 
-        foreach ($query->cursor() as $subscription) {
-            $safety++;
-            if ($safety > 10_000) {
-                $this->warn('Safety limit reached; stopping.');
-                break;
+        foreach ($latestByGroup as $subscription) {
+            $currentEnd = $subscription->ended_on->copy()->startOfDay();
+            if (! $currentEnd->lessThan($today)) {
+                continue;
             }
 
             $anchor = (int) $subscription->billing_anchor_day ?: 1;
-            $currentEnd = $subscription->ended_on->startOfDay();
-            $providerId = $subscription->provider_id;
-            $planName = $subscription->plan_name;
-            $userId = $subscription->user_id;
+            $template = $subscription;
 
             while ($currentEnd->lessThan($today)) {
+                $safety++;
+                if ($safety > 10_000) {
+                    $this->warn('Safety limit reached; stopping.');
+
+                    return self::SUCCESS;
+                }
+
                 $nextStart = $currentEnd->copy()->addDay();
                 $nextEnd = $this->cycleEnd($nextStart, $anchor);
 
-                $overlap = Subscription::where('user_id', $userId)
-                    ->where('provider_id', $providerId)
-                    ->where('plan_name', $planName)
+                $overlap = Subscription::where('user_id', $template->user_id)
+                    ->where('provider_id', $template->provider_id)
+                    ->where('plan_name', $template->plan_name)
                     ->where('active', true)
                     ->where(function ($q) use ($nextStart, $nextEnd) {
                         $q->whereDate('started_on', '<=', $nextEnd)
@@ -55,26 +68,26 @@ class RenewSubscriptions extends Command
                     ->exists();
 
                 if ($overlap) {
-                    $this->warn("Overlap detected for user {$userId} / {$providerId} / {$planName}; stopping renewal.");
-                    break 2;
+                    $this->warn("Overlap detected for user {$template->user_id} / {$template->provider_id} / {$template->plan_name}; skipping group.");
+                    break;
                 }
 
-                $renewalPrice = $subscription->renewal_price ?? $subscription->monthly_price;
+                $renewalPrice = $template->renewal_price ?? $template->monthly_price;
 
                 Subscription::create([
-                    'user_id' => $userId,
-                    'provider_id' => $providerId,
-                    'provider_account_id' => $subscription->provider_account_id,
-                    'plan_name' => $planName,
+                    'user_id' => $template->user_id,
+                    'provider_id' => $template->provider_id,
+                    'provider_account_id' => $template->provider_account_id,
+                    'plan_name' => $template->plan_name,
                     'monthly_price' => $renewalPrice,
                     'renewal_price' => $renewalPrice,
-                    'currency' => $subscription->currency,
+                    'currency' => $template->currency,
                     'billing_anchor_day' => $anchor,
                     'started_on' => $nextStart,
                     'ended_on' => $nextEnd,
                     'active' => true,
                     'autorenew' => true,
-                    'notes' => $subscription->notes,
+                    'notes' => $template->notes,
                 ]);
 
                 $renewed++;
