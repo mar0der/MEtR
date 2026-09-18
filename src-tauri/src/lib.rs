@@ -2004,7 +2004,7 @@ where
                  u.official_api_cost_usd, u.pricing_match_confidence, u.warnings_json,
                  p.path, p.display_name,
                  c.external_conversation_id, c.display_name,
-                 u.created_at, u.updated_at
+                 u.created_at, u.updated_at, u.message_id, u.request_id
                  FROM usage_events u
                  LEFT JOIN projects p ON p.id = u.project_id
                  LEFT JOIN conversations c ON c.id = u.conversation_id
@@ -2058,6 +2058,8 @@ where
                     "warnings": warnings,
                     "client_created_at": r.get::<_, String>(23)?,
                     "client_updated_at": r.get::<_, String>(24)?,
+                    "message_id": r.get::<_, Option<String>>(25)?,
+                    "request_id": r.get::<_, Option<String>>(26)?,
                 }))
             })
             .map_err(to_string)?
@@ -2989,6 +2991,15 @@ fn is_skipped_dir(path: &Path) -> bool {
     )
 }
 
+fn is_claude_worktree_path(path: &Path) -> bool {
+    path.components().any(|component| {
+        component
+            .as_os_str()
+            .to_string_lossy()
+            .contains("--claude-worktrees-")
+    })
+}
+
 fn infer_source(path: &Path) -> (String, String, String) {
     let text = path.to_string_lossy().to_ascii_lowercase();
     if text.contains(".claude") || is_configured_claude_path(path) {
@@ -3081,7 +3092,11 @@ fn scan_source(conn: &Connection, source: &Source, full_scan: bool) -> Result<us
         .max_depth(8)
         .follow_links(false)
         .into_iter()
-        .filter_entry(|e| !e.file_type().is_dir() || !is_skipped_dir(e.path()))
+        .filter_entry(|e| {
+            !e.file_type().is_dir()
+                || (!is_skipped_dir(e.path())
+                    && !(source.parser_id == "claude" && is_claude_worktree_path(e.path())))
+        })
         .filter_map(Result::ok)
     {
         if !entry.file_type().is_file() || !is_candidate_file(entry.path()) {
@@ -3834,6 +3849,22 @@ fn find_legacy_event_id(
     file_path: &Path,
     event: &ParsedEvent,
 ) -> Result<Option<String>, String> {
+    if source.parser_id == "claude" {
+        if let Some(request_id) = event.request_id.as_deref() {
+            return conn
+                .query_row(
+                    "SELECT id FROM usage_events
+                     WHERE provider_id = ?1 AND request_id = ?2
+                     ORDER BY CASE WHEN source_file_path LIKE '%--claude-worktrees-%' THEN 1 ELSE 0 END,
+                              source_file_path, source_offset
+                     LIMIT 1",
+                    params![source.provider_id, request_id],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(to_string);
+        }
+    }
     if event.message_id.is_none() {
         return Ok(None);
     }
@@ -4402,6 +4433,16 @@ mod tests {
         )));
         assert!(is_candidate_file(Path::new(
             "/Users/petar/.claude/projects/foo/bar.jsonl"
+        )));
+    }
+
+    #[test]
+    fn claude_worktree_paths_are_skipped() {
+        assert!(is_claude_worktree_path(Path::new(
+            "/Users/petar/.claude/projects/-Users-petar-Developer-App--claude-worktrees-audit/session.jsonl"
+        )));
+        assert!(!is_claude_worktree_path(Path::new(
+            "/Users/petar/.claude/projects/-Users-petar-Developer-App/session.jsonl"
         )));
     }
 

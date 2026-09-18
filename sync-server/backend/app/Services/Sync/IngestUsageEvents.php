@@ -121,6 +121,7 @@ class IngestUsageEvents
             model: $model,
             projectId: $project?->id,
             timestamp: $timestamp,
+            accountHintHash: $event['account_hint_hash'] ?? null,
         );
 
         $price = null;
@@ -153,6 +154,9 @@ class IngestUsageEvents
             'project_id' => $project?->id,
             'conversation_id' => $conversation?->id,
             'source_event_hash' => $event['source_event_hash'],
+            'request_id' => $event['request_id'] ?? null,
+            'message_id' => $event['message_id'] ?? null,
+            'account_hint_hash' => $event['account_hint_hash'] ?? null,
             'source_file_hash' => $event['source_file_hash'] ?? null,
             'source_offset' => $event['source_offset'] ?? null,
             'timestamp' => $timestamp,

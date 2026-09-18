@@ -32,6 +32,9 @@ class SyncTest extends TestCase
                 [
                     'source_event_id' => 'evt-1',
                     'source_event_hash' => 'hash-1',
+                    'request_id' => 'request-1',
+                    'message_id' => 'message-1',
+                    'account_hint_hash' => 'account-hash-1',
                     'provider_id' => 'openai',
                     'timestamp' => '2026-05-09T09:20:00Z',
                     'model' => 'gpt-5.1',
@@ -67,6 +70,13 @@ class SyncTest extends TestCase
             ->assertOk()
             ->assertJsonPath('updated', 1)
             ->assertJsonPath('duplicates', 0);
+
+        $this->assertDatabaseHas('usage_events', [
+            'source_event_id' => 'evt-1',
+            'request_id' => 'request-1',
+            'message_id' => 'message-1',
+            'account_hint_hash' => 'account-hash-1',
+        ]);
     }
 
     public function test_zero_token_events_are_skipped(): void
