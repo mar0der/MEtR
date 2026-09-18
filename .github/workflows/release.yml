@@ -257,40 +257,40 @@ jobs:
           mkdir -p ~/.ssh
           echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
-          ssh-keyscan -H ${{ secrets.DEPLOY_HOST }} >> ~/.ssh/known_hosts 2>/dev/null
+          ssh-keyscan -T 10 -H "${{ secrets.DEPLOY_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null || true
 
       - name: Upload artifacts to server
         if: startsWith(github.ref, 'refs/tags/')
         run: |
           # macOS installer → public releases
-          scp -i ~/.ssh/deploy_key ./macos/*.dmg ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:/opt/metr-sync/site/storage/releases/
+          scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i ~/.ssh/deploy_key ./macos/*.dmg ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:/opt/metr-sync/site/storage/releases/
 
           # macOS updater → Laravel storage
-          scp -i ~/.ssh/deploy_key "./macos/MEtR_${VERSION}_aarch64.app.tar.gz" ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:/opt/metr-sync/site/backend/storage/app/updates/
-          scp -i ~/.ssh/deploy_key "./macos/MEtR_${VERSION}_aarch64.app.tar.gz.sig" ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:/opt/metr-sync/site/backend/storage/app/updates/
+          scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i ~/.ssh/deploy_key "./macos/MEtR_${VERSION}_aarch64.app.tar.gz" ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:/opt/metr-sync/site/backend/storage/app/updates/
+          scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i ~/.ssh/deploy_key "./macos/MEtR_${VERSION}_aarch64.app.tar.gz.sig" ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:/opt/metr-sync/site/backend/storage/app/updates/
 
           # Windows installer → public releases
-          scp -i ~/.ssh/deploy_key ./windows/*.msi ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:/opt/metr-sync/site/storage/releases/
+          scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i ~/.ssh/deploy_key ./windows/*.msi ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:/opt/metr-sync/site/storage/releases/
 
           # Windows updater → Laravel storage
-          scp -i ~/.ssh/deploy_key "./windows/MEtR_${VERSION}_x64_en-US.msi" ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:/opt/metr-sync/site/backend/storage/app/updates/
-          scp -i ~/.ssh/deploy_key "./windows/MEtR_${VERSION}_x64_en-US.msi.sig" ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:/opt/metr-sync/site/backend/storage/app/updates/
+          scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i ~/.ssh/deploy_key "./windows/MEtR_${VERSION}_x64_en-US.msi" ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:/opt/metr-sync/site/backend/storage/app/updates/
+          scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i ~/.ssh/deploy_key "./windows/MEtR_${VERSION}_x64_en-US.msi.sig" ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:/opt/metr-sync/site/backend/storage/app/updates/
 
           # Linux installer → public releases
-          scp -i ~/.ssh/deploy_key ./linux/*.deb ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:/opt/metr-sync/site/storage/releases/
+          scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i ~/.ssh/deploy_key ./linux/*.deb ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:/opt/metr-sync/site/storage/releases/
 
           # Linux updater → Laravel storage
-          scp -i ~/.ssh/deploy_key ./linux/*.AppImage ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:/opt/metr-sync/site/backend/storage/app/updates/ 2>/dev/null || true
-          scp -i ~/.ssh/deploy_key ./linux/*.AppImage.sig ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:/opt/metr-sync/site/backend/storage/app/updates/ 2>/dev/null || true
+          scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i ~/.ssh/deploy_key ./linux/*.AppImage ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:/opt/metr-sync/site/backend/storage/app/updates/ 2>/dev/null || true
+          scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i ~/.ssh/deploy_key ./linux/*.AppImage.sig ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:/opt/metr-sync/site/backend/storage/app/updates/ 2>/dev/null || true
 
           # Copy installers to updates dir for Laravel publish
-          ssh -i ~/.ssh/deploy_key ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} "cp /opt/metr-sync/site/storage/releases/MEtR_${VERSION}_aarch64.dmg /opt/metr-sync/site/backend/storage/app/updates/ && cp /opt/metr-sync/site/storage/releases/MEtR_${VERSION}_x64_en-US.msi /opt/metr-sync/site/backend/storage/app/updates/ && cp /opt/metr-sync/site/storage/releases/MEtR_${VERSION}_amd64.deb /opt/metr-sync/site/backend/storage/app/updates/ 2>/dev/null || true"
+          ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i ~/.ssh/deploy_key ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} "cp /opt/metr-sync/site/storage/releases/MEtR_${VERSION}_aarch64.dmg /opt/metr-sync/site/backend/storage/app/updates/ && cp /opt/metr-sync/site/storage/releases/MEtR_${VERSION}_x64_en-US.msi /opt/metr-sync/site/backend/storage/app/updates/ && cp /opt/metr-sync/site/storage/releases/MEtR_${VERSION}_amd64.deb /opt/metr-sync/site/backend/storage/app/updates/ 2>/dev/null || true"
 
       - name: Publish release to update server
         if: startsWith(github.ref, 'refs/tags/')
         run: |
           NOTES="Auto-release from GitHub Actions"
-          ssh -i ~/.ssh/deploy_key ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} "docker exec -u www-data metr-sync-php php artisan metr:release:publish --release-version=${VERSION} --notes='${NOTES}' --darwin-tgz=/var/www/html/storage/app/updates/MEtR_${VERSION}_aarch64.app.tar.gz --darwin-sig=/var/www/html/storage/app/updates/MEtR_${VERSION}_aarch64.app.tar.gz.sig --darwin-dmg=/var/www/html/storage/app/updates/MEtR_${VERSION}_aarch64.dmg --windows-msi=/var/www/html/storage/app/updates/MEtR_${VERSION}_x64_en-US.msi --windows-sig=/var/www/html/storage/app/updates/MEtR_${VERSION}_x64_en-US.msi.sig --linux-deb=/var/www/html/storage/app/updates/MEtR_${VERSION}_amd64.deb --linux-appimage=/var/www/html/storage/app/updates/MEtR_${VERSION}_amd64.AppImage --linux-sig=/var/www/html/storage/app/updates/MEtR_${VERSION}_amd64.AppImage.sig"
+          ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i ~/.ssh/deploy_key ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} "docker exec -u www-data metr-sync-php php artisan metr:release:publish --release-version=${VERSION} --notes='${NOTES}' --darwin-tgz=/var/www/html/storage/app/updates/MEtR_${VERSION}_aarch64.app.tar.gz --darwin-sig=/var/www/html/storage/app/updates/MEtR_${VERSION}_aarch64.app.tar.gz.sig --darwin-dmg=/var/www/html/storage/app/updates/MEtR_${VERSION}_aarch64.dmg --windows-msi=/var/www/html/storage/app/updates/MEtR_${VERSION}_x64_en-US.msi --windows-sig=/var/www/html/storage/app/updates/MEtR_${VERSION}_x64_en-US.msi.sig --linux-deb=/var/www/html/storage/app/updates/MEtR_${VERSION}_amd64.deb --linux-appimage=/var/www/html/storage/app/updates/MEtR_${VERSION}_amd64.AppImage --linux-sig=/var/www/html/storage/app/updates/MEtR_${VERSION}_amd64.AppImage.sig"
 
       - name: Post-publish smoke test
         if: startsWith(github.ref, 'refs/tags/')
