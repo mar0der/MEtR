@@ -79,6 +79,63 @@ class SyncTest extends TestCase
         ]);
     }
 
+    public function test_live_and_archived_legacy_copies_share_one_raw_hash_event(): void
+    {
+        $user = User::factory()->create();
+        $token = $user->createToken('test')->plainTextToken;
+        $device = Device::factory()->create(['user_id' => $user->id, 'device_uuid' => 'd1']);
+
+        $baseEvent = [
+            'device_uuid' => 'd1',
+            'events' => [[
+                'source_event_hash' => 'codex-archive-live-hash',
+                'provider_id' => 'openai',
+                'timestamp' => '2026-05-09T09:20:00Z',
+                'model' => 'gpt-5.1',
+                'project' => null,
+                'conversation' => null,
+                'tokens' => [
+                    'input' => 1000,
+                    'output' => 200,
+                    'cached_input' => 0,
+                    'cache_write' => 0,
+                    'cache_read' => 0,
+                    'reasoning' => 0,
+                    'tool' => 0,
+                    'unknown' => 0,
+                ],
+                'warnings' => [],
+            ]],
+        ];
+
+        $archived = $baseEvent + [
+            'client_batch_id' => 'archive-batch',
+        ];
+        $archived['events'][0]['source_event_id'] = 'archived-copy-id';
+
+        $live = $baseEvent + [
+            'client_batch_id' => 'live-batch',
+        ];
+        $live['events'][0]['source_event_id'] = 'live-copy-id';
+
+        $this->withHeader('Authorization', "Bearer {$token}")
+            ->postJson('/api/v1/sync/events', $archived)
+            ->assertOk()
+            ->assertJsonPath('inserted', 1);
+
+        $this->withHeader('Authorization', "Bearer {$token}")
+            ->postJson('/api/v1/sync/events', $live)
+            ->assertOk()
+            ->assertJsonPath('updated', 1)
+            ->assertJsonPath('inserted', 0);
+
+        $this->assertDatabaseCount('usage_events', 1);
+        $this->assertDatabaseHas('usage_events', [
+            'source_event_id' => 'archived-copy-id',
+            'source_event_hash' => 'codex-archive-live-hash',
+        ]);
+    }
+
     public function test_zero_token_events_are_skipped(): void
     {
         $user = User::factory()->create();

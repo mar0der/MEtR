@@ -97,6 +97,32 @@ class IngestUsageEvents
         $providerId = $event['provider_id'];
         $model = $event['model'] ?? null;
 
+        // A path-derived source_event_id changes when the same log is copied
+        // between live and archived session directories. Prefer stable event
+        // identities, then use the raw hash to reconcile legacy payloads.
+        $identityQuery = UsageEvent::where('device_id', $device->id)
+            ->where('provider_id', $providerId)
+            ->orderBy('created_at')
+            ->orderBy('id');
+
+        if (! $existing && ! empty($event['request_id'])) {
+            $existing = (clone $identityQuery)
+                ->where('request_id', $event['request_id'])
+                ->first();
+        }
+
+        if (! $existing && ! empty($event['message_id'])) {
+            $existing = (clone $identityQuery)
+                ->where('message_id', $event['message_id'])
+                ->first();
+        }
+
+        if (! $existing) {
+            $existing = (clone $identityQuery)
+                ->where('source_event_hash', $event['source_event_hash'])
+                ->first();
+        }
+
         $project = null;
         if (! empty($event['project']['root_path'])) {
             $project = $this->resolveProject->handle($device, $event['project']['root_path'], $providerId);
