@@ -9,6 +9,7 @@ use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 use tauri::{Emitter, Manager, State};
 use tokio::sync::Mutex;
 use uuid::Uuid;
@@ -25,6 +26,15 @@ const OFFICIAL_SERVER_HOST: &str = "metr.petarpetkov.com";
 
 struct AppState {
     db: Arc<Mutex<Connection>>,
+}
+
+fn configure_connection(conn: &Connection) -> rusqlite::Result<()> {
+    conn.busy_timeout(Duration::from_secs(30))?;
+    conn.execute_batch(
+        "PRAGMA journal_mode = WAL;
+         PRAGMA synchronous = NORMAL;",
+    )?;
+    Ok(())
 }
 
 #[derive(Debug, Serialize)]
@@ -244,19 +254,20 @@ pub fn run() {
                 .unwrap_or_else(|_| std::env::current_dir().unwrap().join(".metr-data"));
             fs::create_dir_all(&db_path)?;
             let conn = Connection::open(db_path.join("metr.db"))?;
+            configure_connection(&conn)?;
             migrate(&conn)?;
             seed_defaults(&conn)?;
             ensure_subscription_renewals(&conn).map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+            let db = Arc::new(Mutex::new(conn));
             app.manage(AppState {
-                db: Arc::new(Mutex::new(conn)),
+                db: db.clone(),
             });
-            // Run expensive maintenance in background so UI loads instantly
-            let maint_db_path = db_path.join("metr.db");
+            // Run expensive maintenance in background, sharing the app mutex so it
+            // cannot race a scan through a second SQLite connection.
             tauri::async_runtime::spawn_blocking(move || {
-                if let Ok(conn) = Connection::open(&maint_db_path) {
-                    let _ = cleanup_known_bad_imports(&conn);
-                    let _ = recalculate_event_costs(&conn);
-                }
+                let conn = db.blocking_lock();
+                let _ = cleanup_known_bad_imports(&conn);
+                let _ = recalculate_event_costs(&conn);
             });
             Ok(())
         })
@@ -1938,7 +1949,13 @@ where
             "app_version": env!("CARGO_PKG_VERSION"),
         }))
         .send()
-        .map_err(|e| format!("Device registration failed: {}", e))?;
+        .map_err(|e| {
+            let mut detail = format!("Device registration failed: {}", e);
+            if let Some(source) = e.source() {
+                detail.push_str(&format!(" | caused by: {}", source));
+            }
+            detail
+        })?;
 
     if !reg_resp.status().is_success() {
         let body = reg_resp.text().unwrap_or_default();
