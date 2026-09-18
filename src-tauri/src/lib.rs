@@ -18,7 +18,7 @@ const MAX_SCAN_FILES_PER_SOURCE: usize = 50_000;
 const MAX_SOURCE_TOTAL_BYTES: u64 = 5 * 1024 * 1024 * 1024; // 5 GB
 const MAX_LINE_LENGTH: usize = 1_048_576; // 1 MB
 const MAX_JSON_DEPTH: usize = 64;
-const PARSER_VERSION: &str = "0.1.9";
+const PARSER_VERSION: &str = "0.1.10";
 const KEYRING_SERVICE: &str = "com.petarpetkov.metr.sync";
 const KEYRING_USERNAME: &str = "auth_token";
 const OFFICIAL_SERVER_HOST: &str = "metr.petarpetkov.com";
@@ -2777,6 +2777,34 @@ struct CandidateSource {
     path: PathBuf,
 }
 
+fn claude_source_paths(home: &Path, configured_dir: Option<&str>) -> Vec<PathBuf> {
+    let mut paths = vec![home.join(".claude")];
+    let Some(raw) = configured_dir.map(str::trim).filter(|value| !value.is_empty()) else {
+        return paths;
+    };
+
+    let configured = expand_tilde(raw);
+    let configured = if configured.is_absolute() {
+        configured
+    } else {
+        home.join(configured)
+    };
+    if !paths.iter().any(|path| path == &configured) {
+        paths.push(configured);
+    }
+    paths
+}
+
+fn is_configured_claude_path(path: &Path) -> bool {
+    let Some(home) = dirs::home_dir() else {
+        return false;
+    };
+    let configured_dir = std::env::var("CLAUDE_CONFIG_DIR").ok();
+    claude_source_paths(&home, configured_dir.as_deref())
+        .iter()
+        .any(|root| path == root || path.starts_with(root))
+}
+
 fn candidate_sources() -> Vec<CandidateSource> {
     let mut candidates = Vec::new();
     if let Some(home) = dirs::home_dir() {
@@ -2786,12 +2814,6 @@ fn candidate_sources() -> Vec<CandidateSource> {
                 parser_id: "codex",
                 display_name: "Codex",
                 path: home.join(".codex"),
-            },
-            CandidateSource {
-                provider_id: "anthropic",
-                parser_id: "claude",
-                display_name: "Claude Code",
-                path: home.join(".claude"),
             },
             CandidateSource {
                 provider_id: "google",
@@ -2806,6 +2828,15 @@ fn candidate_sources() -> Vec<CandidateSource> {
                 path: home.join(".continue"),
             },
         ]);
+        let configured_claude_dir = std::env::var("CLAUDE_CONFIG_DIR").ok();
+        for path in claude_source_paths(&home, configured_claude_dir.as_deref()) {
+            candidates.push(CandidateSource {
+                provider_id: "anthropic",
+                parser_id: "claude",
+                display_name: "Claude Code",
+                path,
+            });
+        }
     }
     if let Some(data) = dirs::data_dir() {
         candidates.push(CandidateSource {
@@ -2916,7 +2947,7 @@ fn is_skipped_dir(path: &Path) -> bool {
 
 fn infer_source(path: &Path) -> (String, String, String) {
     let text = path.to_string_lossy().to_ascii_lowercase();
-    if text.contains(".claude") {
+    if text.contains(".claude") || is_configured_claude_path(path) {
         ("anthropic".into(), "claude".into(), "Claude Code".into())
     } else if text.contains(".codex") {
         ("openai".into(), "codex".into(), "Codex".into())
@@ -3183,7 +3214,7 @@ fn parse_content(source: &Source, path: &Path, content: &str) -> Vec<ParsedEvent
             offset += line.len() as i64 + 1;
             continue;
         }
-        let trimmed = line.trim();
+        let trimmed = normalize_json_line(line);
         parse_line_into_events(
             source,
             path,
@@ -3218,7 +3249,7 @@ fn parse_file_streaming(source: &Source, path: &Path) -> Result<Vec<ParsedEvent>
             offset += line.len() as i64 + 1;
             continue;
         }
-        let trimmed = line.trim();
+        let trimmed = normalize_json_line(&line);
         parse_line_into_events(
             source,
             path,
@@ -3266,6 +3297,10 @@ fn parse_line_into_events(
             events.push(event);
         }
     }
+}
+
+fn normalize_json_line(line: &str) -> &str {
+    line.trim().trim_start_matches('\u{feff}').trim_start()
 }
 
 #[derive(Default)]
@@ -3493,7 +3528,8 @@ fn parse_value(
             "cacheWriteTokens",
             "input_cache_creation",
         ],
-    );
+    )
+    .max(nested_cache_creation_tokens(usage));
     let cache_read = int_field(
         usage,
         &[
@@ -3502,7 +3538,8 @@ fn parse_value(
             "cacheReadTokens",
             "input_cache_read",
         ],
-    );
+    )
+    .max(nested_cache_read_tokens(usage));
     let reasoning = int_field(usage, &["reasoning_tokens", "reasoningTokens"]);
     let tool = int_field(usage, &["tool_tokens", "toolTokens"]);
     let total = int_field(usage, &["total_tokens", "totalTokens"]);
@@ -3564,7 +3601,7 @@ fn parse_value(
         )
         .or_else(|| str_field(value.get("payload").unwrap_or(&Value::Null), &["id", "session_id", "sessionId"]))
         .or_else(|| context.and_then(|c| c.session_id.clone())),
-        message_id: str_field(value, &["message_id", "messageId", "id"]),
+        message_id: message_id_field(value),
         request_id: str_field(value, &["request_id", "requestId"]),
         model,
         event_type,
@@ -3644,6 +3681,58 @@ fn insert_event(
             event.raw_record_hash
         ))
     };
+    if let Some(legacy_id) = find_legacy_event_id(conn, source, file_path, &event)? {
+        let now = now();
+        conn.execute(
+            "UPDATE usage_events SET
+             product_id = ?1, source_id = ?2, parser_id = ?3, parser_version = ?4,
+             timestamp = ?5, project_id = ?6, conversation_id = ?7, message_id = ?8,
+             request_id = ?9, model = ?10, event_type = ?11, input_tokens = ?12,
+             output_tokens = ?13, cached_input_tokens = ?14, cache_write_tokens = ?15,
+             cache_read_tokens = ?16, reasoning_tokens = ?17, tool_tokens = ?18,
+             unknown_tokens = ?19, official_api_cost_usd = ?20, pricing_catalog_id = ?21,
+             pricing_match_confidence = ?22, source_file_modified_at = ?23,
+             source_offset = ?24, source_hash = ?25, raw_record_hash = ?26,
+             source_project_path = ?27, confidence = ?28, warnings_json = ?29,
+             updated_at = ?30
+             WHERE id = ?31",
+            params![
+                event.product_id,
+                source.id,
+                source.parser_id,
+                PARSER_VERSION,
+                event.timestamp,
+                project_id,
+                conversation_id,
+                event.message_id,
+                event.request_id,
+                event.model,
+                event.event_type,
+                event.input_tokens,
+                event.output_tokens,
+                event.cached_input_tokens,
+                event.cache_write_tokens,
+                event.cache_read_tokens,
+                event.reasoning_tokens,
+                event.tool_tokens,
+                event.unknown_tokens,
+                cost,
+                pricing_id,
+                pricing_match,
+                modified,
+                event.source_offset,
+                source_hash,
+                event.raw_record_hash,
+                event.project_path.as_deref(),
+                event.confidence,
+                serde_json::to_string(&event.warnings).unwrap_or_else(|_| "[]".into()),
+                now,
+                legacy_id,
+            ],
+        )
+        .map_err(to_string)?;
+        return Ok(false);
+    }
     let now = now();
     let changed = conn
         .execute(
@@ -3693,6 +3782,44 @@ fn insert_event(
         )
         .map_err(to_string)?;
     Ok(changed > 0)
+}
+
+fn find_legacy_event_id(
+    conn: &Connection,
+    source: &Source,
+    file_path: &Path,
+    event: &ParsedEvent,
+) -> Result<Option<String>, String> {
+    if event.message_id.is_none() {
+        return Ok(None);
+    }
+    let path = file_path.to_string_lossy().to_string();
+    let id = if event.request_id.is_some() {
+        conn.query_row(
+            "SELECT id FROM usage_events
+             WHERE provider_id = ?1 AND source_id = ?2 AND source_file_path = ?3
+               AND request_id = ?4 AND message_id IS NULL
+             ORDER BY source_offset LIMIT 1",
+            params![source.provider_id, source.id, path, event.request_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(to_string)?
+    } else if event.source_offset.is_some() {
+        conn.query_row(
+            "SELECT id FROM usage_events
+             WHERE provider_id = ?1 AND source_id = ?2 AND source_file_path = ?3
+               AND source_offset = ?4 AND message_id IS NULL
+             LIMIT 1",
+            params![source.provider_id, source.id, path, event.source_offset],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(to_string)?
+    } else {
+        None
+    };
+    Ok(id)
 }
 
 fn upsert_project(
@@ -4134,6 +4261,34 @@ fn int_field(value: &Value, names: &[&str]) -> i64 {
     0
 }
 
+fn nested_cache_creation_tokens(usage: &Value) -> i64 {
+    let Some(cache_creation) = usage.get("cache_creation") else {
+        return 0;
+    };
+    let split_total = int_field(cache_creation, &["ephemeral_5m_input_tokens"])
+        .saturating_add(int_field(cache_creation, &["ephemeral_1h_input_tokens"]));
+    if split_total > 0 {
+        split_total
+    } else {
+        int_field(cache_creation, &["input_tokens", "total_tokens", "tokens"])
+    }
+}
+
+fn nested_cache_read_tokens(usage: &Value) -> i64 {
+    usage
+        .get("cache_read")
+        .map(|cache_read| int_field(cache_read, &["input_tokens", "tokens", "total_tokens"]))
+        .unwrap_or(0)
+}
+
+fn message_id_field(value: &Value) -> Option<String> {
+    str_field(value, &["message_id", "messageId", "id"]).or_else(|| {
+        value
+            .get("message")
+            .and_then(|message| str_field(message, &["message_id", "messageId", "id"]))
+    })
+}
+
 fn str_field(value: &Value, names: &[&str]) -> Option<String> {
     for name in names {
         if let Some(text) = value.get(*name).and_then(|v| v.as_str()) {
@@ -4204,6 +4359,95 @@ mod tests {
         assert!(is_candidate_file(Path::new(
             "/Users/petar/.claude/projects/foo/bar.jsonl"
         )));
+    }
+
+    fn claude_test_source() -> Source {
+        Source {
+            id: "claude-test".to_string(),
+            provider_id: "anthropic".to_string(),
+            parser_id: "claude".to_string(),
+            display_name: "Claude Code".to_string(),
+            path: "/Users/petar/.claude".to_string(),
+            enabled: true,
+            detection_confidence: "high".to_string(),
+            last_scan_status: None,
+            last_scan_message: None,
+        }
+    }
+
+    #[test]
+    fn claude_message_usage_supports_nested_ids_and_cache_fields() {
+        let source = claude_test_source();
+        let value = json!({
+            "type": "assistant",
+            "timestamp": "2026-09-18T08:00:00Z",
+            "cwd": r"C:\Users\Petar\Developer\MEtR",
+            "sessionId": "session-1",
+            "requestId": "request-1",
+            "message": {
+                "id": "message-1",
+                "model": "claude-opus-5",
+                "usage": {
+                    "input_tokens": 10,
+                    "output_tokens": 20,
+                    "cache_creation": {
+                        "ephemeral_5m_input_tokens": 3,
+                        "ephemeral_1h_input_tokens": 4
+                    },
+                    "cache_read": {"input_tokens": 5}
+                }
+            }
+        });
+
+        let event = parse_value(
+            &source,
+            Path::new(r"C:\Users\Petar\.claude\projects\metr\session.jsonl"),
+            &value,
+            Some(0),
+            &value.to_string(),
+            None,
+        )
+        .expect("Claude usage record should parse");
+
+        assert_eq!(event.message_id.as_deref(), Some("message-1"));
+        assert_eq!(event.request_id.as_deref(), Some("request-1"));
+        assert_eq!(event.model.as_deref(), Some("claude-opus-5"));
+        assert_eq!(event.project_path.as_deref(), Some(r"C:\Users\Petar\Developer\MEtR"));
+        assert_eq!(event.cache_write_tokens, 7);
+        assert_eq!(event.cache_read_tokens, 5);
+    }
+
+    #[test]
+    fn claude_jsonl_accepts_bom_and_crlf() {
+        let source = claude_test_source();
+        let value = json!({
+            "type": "assistant",
+            "message": {
+                "id": "message-1",
+                "usage": {"input_tokens": 1, "output_tokens": 2}
+            }
+        });
+        let content = format!("\u{feff}\r\n{}\r\n", value);
+
+        let events = parse_content(
+            &source,
+            Path::new(r"C:\Users\Petar\.claude\projects\metr\session.jsonl"),
+            &content,
+        );
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].message_id.as_deref(), Some("message-1"));
+    }
+
+    #[test]
+    fn claude_config_dir_is_added_without_replacing_standard_path() {
+        let home = Path::new("/Users/petar");
+        let paths = claude_source_paths(home, Some("custom-claude"));
+
+        assert_eq!(
+            paths,
+            vec![home.join(".claude"), home.join("custom-claude")]
+        );
     }
 
     #[test]
