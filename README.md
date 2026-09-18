@@ -17,6 +17,18 @@ The app includes an auto-updater. New versions are published to the update serve
 
 ---
 
+## Versioning
+
+MEtR versions use the format `YY.WW.PATCH`:
+
+- `YY` is the two-digit ISO calendar year.
+- `WW` is the ISO week number for the release date (`01`-`53`).
+- `PATCH` increments for additional releases in the same week.
+
+For example, `26.38.1` means the first release in ISO week 38 of 2026. Release tags use the same value with a `v` prefix, such as `v26.38.1`. To check the current ISO year and week on macOS or Linux, run `date +%G-W%V`.
+
+---
+
 ## What MEtR Does
 
 ### Track Real Usage from Local Logs
