@@ -1915,7 +1915,7 @@ where
 
     let base_url = server_url.trim_end_matches('/');
     let client = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(60))
+        .timeout(Duration::from_secs(180))
         .build()
         .map_err(|e| format!("Failed to build HTTP client: {}", e))?;
     let auth_header = format!("Bearer {}", token);
@@ -2069,23 +2069,50 @@ where
         }
 
         let client_batch_id = format!("{}-{}", device_uuid, Uuid::new_v4());
-        let resp = client
-            .post(format!("{}/api/v1/sync/events", base_url))
-            .header("Authorization", &auth_header)
-            .header("Accept", "application/json")
-            .json(&serde_json::json!({
-                "device_uuid": device_uuid,
-                "client_batch_id": client_batch_id,
-                "events": events,
-            }))
-            .send()
-            .map_err(|e| {
-                let mut detail = format!("Sync request failed ({} events, ~{} bytes): {}", events.len(), serde_json::to_string(&events).unwrap_or_default().len(), e);
-                if let Some(source) = e.source() {
-                    detail.push_str(&format!(" | caused by: {}", source));
+        let payload = serde_json::json!({
+            "device_uuid": device_uuid,
+            "client_batch_id": client_batch_id,
+            "events": events,
+        });
+        let payload_bytes = serde_json::to_string(&payload).unwrap_or_default().len();
+        let mut response = None;
+        let mut last_transport_error = None;
+
+        for attempt in 0..3 {
+            match client
+                .post(format!("{}/api/v1/sync/events", base_url))
+                .header("Authorization", &auth_header)
+                .header("Accept", "application/json")
+                .json(&payload)
+                .send()
+            {
+                Ok(resp) => {
+                    response = Some(resp);
+                    break;
                 }
-                detail
-            })?;
+                Err(e) => {
+                    let mut detail = format!(
+                        "Sync request failed ({} events, ~{} bytes, attempt {}): {}",
+                        events.len(),
+                        payload_bytes,
+                        attempt + 1,
+                        e
+                    );
+                    if let Some(source) = e.source() {
+                        detail.push_str(&format!(" | caused by: {}", source));
+                    }
+                    last_transport_error = Some(detail);
+                    if attempt < 2 {
+                        std::thread::sleep(Duration::from_secs(2u64.pow(attempt as u32)));
+                    }
+                }
+            }
+        }
+
+        let resp = response.ok_or_else(|| {
+            last_transport_error
+                .unwrap_or_else(|| "Sync request failed without a transport error".to_string())
+        })?;
 
         if resp.status().is_success() {
             let now = now();
