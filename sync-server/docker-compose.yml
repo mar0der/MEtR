@@ -2,6 +2,7 @@ services:
   nginx:
     image: nginx:1.25-alpine
     container_name: "${COMPOSE_PROJECT_NAME:-metr-sync}-nginx"
+    restart: unless-stopped
     ports:
       - "${NGINX_PORT:-8090}:80"
     volumes:
@@ -15,6 +16,7 @@ services:
   php:
     build: ./backend
     container_name: "${COMPOSE_PROJECT_NAME:-metr-sync}-php"
+    restart: unless-stopped
     environment:
       - APP_ENV=${APP_ENV}
       - APP_DEBUG=${APP_DEBUG}
@@ -29,22 +31,15 @@ services:
     volumes:
       - ./backend:/var/www/html
     depends_on:
-      db:
-        condition: service_healthy
-      redis:
-        condition: service_started
+      - db
+      - redis
     networks:
       - metr-sync
-    healthcheck:
-      test: ["CMD", "php", "artisan", "about"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 10s
 
   scheduler:
     build: ./backend
     container_name: "${COMPOSE_PROJECT_NAME:-metr-sync}-scheduler"
+    restart: unless-stopped
     command: php -d memory_limit=512M artisan schedule:work
     environment:
       - APP_ENV=${APP_ENV}
@@ -68,6 +63,7 @@ services:
   db:
     image: mysql:8.0
     container_name: "${COMPOSE_PROJECT_NAME:-metr-sync}-db"
+    restart: unless-stopped
     ports:
       - "${DB_EXPOSE_PORT:-3308}:3306"
     environment:
@@ -77,19 +73,13 @@ services:
       - MYSQL_PASSWORD=${MYSQL_PASSWORD}
     volumes:
       - db-data:/var/lib/mysql
-      - ./mysql/mysql.cnf:/etc/mysql/conf.d/mysql.cnf:ro
     networks:
       - metr-sync
-    healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-u", "root", "-p${MYSQL_ROOT_PASSWORD}"]
-      interval: 10s
-      timeout: 5s
-      retries: 3
-      start_period: 30s
 
   redis:
     image: redis:7-alpine
     container_name: "${COMPOSE_PROJECT_NAME:-metr-sync}-redis"
+    restart: unless-stopped
     command: redis-server --maxmemory 128mb --maxmemory-policy allkeys-lru
     ports:
       - "${REDIS_EXPOSE_PORT:-6381}:6379"
