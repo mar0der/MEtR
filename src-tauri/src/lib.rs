@@ -258,6 +258,7 @@ pub fn run() {
             migrate(&conn)?;
             seed_defaults(&conn)?;
             ensure_subscription_renewals(&conn).map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+            ensure_claude_shared_source(&conn).map_err(|e| Box::new(std::io::Error::other(e)) as Box<dyn std::error::Error>)?;
             let db = Arc::new(Mutex::new(conn));
             app.manage(AppState {
                 db: db.clone(),
@@ -637,6 +638,7 @@ async fn rescan_all(state: State<'_, AppState>) -> Result<Value, String> {
     let db = state.db.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let conn = db.blocking_lock();
+        ensure_claude_shared_source(&conn)?;
         let sources = query_sources(&conn)?;
         let mut imported = 0usize;
         for source in sources.into_iter().filter(|s| s.enabled) {
@@ -653,6 +655,7 @@ async fn rescan_all_full(state: State<'_, AppState>) -> Result<Value, String> {
     let db = state.db.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let conn = db.blocking_lock();
+        ensure_claude_shared_source(&conn)?;
         let sources = query_sources(&conn)?;
         let mut imported = 0usize;
         for source in sources.into_iter().filter(|s| s.enabled) {
@@ -2883,6 +2886,14 @@ fn candidate_sources() -> Vec<CandidateSource> {
                 path,
             });
         }
+        if let Some(shared) = claude_shared_conversations_dir() {
+            candidates.push(CandidateSource {
+                provider_id: "anthropic",
+                parser_id: "claude",
+                display_name: "Claude Code",
+                path: shared,
+            });
+        }
     }
     if let Some(data) = dirs::data_dir() {
         candidates.push(CandidateSource {
@@ -3002,9 +3013,67 @@ fn claude_projects_link(root: &Path) -> Option<PathBuf> {
     (target.is_dir() && target.starts_with(fs::canonicalize(root).ok()?)).then_some(link)
 }
 
+fn claude_shared_conversations_dir() -> Option<PathBuf> {
+    dirs::data_local_dir().map(|dir| dir.join("ClaudeCode").join("SharedConversations"))
+}
+
+/// Claude Code on Windows writes live transcripts under
+/// `%LOCALAPPDATA%\ClaudeCode\SharedConversations`, not `~/.claude`.
+fn is_claude_shared_conversations(path: &Path) -> bool {
+    let text = path.to_string_lossy().replace('\\', "/").to_ascii_lowercase();
+    text.contains("/claudecode/sharedconversations")
+}
+
+fn ensure_claude_shared_source(conn: &Connection) -> Result<(), String> {
+    let Some(path) = claude_shared_conversations_dir() else {
+        return Ok(());
+    };
+    ensure_claude_source_at(conn, &path)?;
+    Ok(())
+}
+
+fn ensure_claude_source_at(conn: &Connection, path: &Path) -> Result<bool, String> {
+    if !path.is_dir() {
+        return Ok(false);
+    }
+    let path_str = path.to_string_lossy().to_string();
+    let existing: Option<String> = conn
+        .query_row(
+            "SELECT id FROM log_sources WHERE path = ?1 AND provider_id = 'anthropic'",
+            params![path_str],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(to_string)?;
+    if existing.is_some() {
+        return Ok(false);
+    }
+    ensure_provider(conn, "anthropic", provider_display_name("anthropic")).map_err(to_string)?;
+    let id = Uuid::new_v4().to_string();
+    let now_ts = now();
+    conn.execute(
+        "INSERT INTO log_sources
+        (id, provider_id, parser_id, display_name, path, enabled, recursive, include_patterns, exclude_patterns,
+         detection_confidence, last_scan_status, last_scan_message, created_at, updated_at)
+         VALUES (?1, 'anthropic', 'claude', 'Claude Code', ?2, 1, 1, ?3, ?4, 'auto', NULL, NULL, ?5, ?5)",
+        params![
+            id,
+            path_str,
+            "*.json,*.jsonl,*.log,*.txt,*.md",
+            "node_modules,.git,target,dist,build,.next,vendor",
+            now_ts
+        ],
+    )
+    .map_err(to_string)?;
+    Ok(true)
+}
+
 fn infer_source(path: &Path) -> (String, String, String) {
     let text = path.to_string_lossy().to_ascii_lowercase();
-    if text.contains(".claude") || is_configured_claude_path(path) {
+    if text.contains(".claude")
+        || is_claude_shared_conversations(path)
+        || is_configured_claude_path(path)
+    {
         ("anthropic".into(), "claude".into(), "Claude Code".into())
     } else if text.contains(".codex") {
         ("openai".into(), "codex".into(), "Codex".into())
@@ -4657,6 +4726,45 @@ mod tests {
 
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].message_id.as_deref(), Some("message-1"));
+    }
+
+    #[test]
+    fn windows_shared_conversations_register_and_scan() {
+        let conn = scan_test_conn();
+        let root = scan_test_root("claude-shared");
+        let shared = root.join("ClaudeCode").join("SharedConversations");
+        let session = shared
+            .join("projects")
+            .join("D--Work--worktrees-opus")
+            .join("5c1937d5-4ff6-4fa3-ab59-8d3fc0953043.jsonl");
+        write_jsonl(&session, &["req-shared-opus"]);
+
+        assert!(ensure_claude_source_at(&conn, &shared).unwrap());
+        assert!(!ensure_claude_source_at(&conn, &shared).unwrap());
+
+        let source = query_sources(&conn)
+            .unwrap()
+            .into_iter()
+            .find(|source| source.path == shared.to_string_lossy())
+            .expect("shared conversations source");
+        assert_eq!(source.parser_id, "claude");
+        assert!(source.enabled);
+        scan_source(&conn, &source, true).unwrap();
+
+        let ids: Vec<String> = event_paths(&conn).into_iter().map(|(id, _)| id).collect();
+        assert_eq!(ids, ["req-shared-opus"]);
+        assert!(is_claude_shared_conversations(Path::new(
+            r"C:\Users\ppetkov\AppData\Local\ClaudeCode\SharedConversations"
+        )));
+        assert!(!is_claude_shared_conversations(Path::new(
+            r"C:\Users\ppetkov\AppData\Local\ClaudeCode\ConversationBackups"
+        )));
+        let (provider, parser, _) = infer_source(Path::new(
+            r"C:\Users\ppetkov\AppData\Local\ClaudeCode\SharedConversations",
+        ));
+        assert_eq!(provider, "anthropic");
+        assert_eq!(parser, "claude");
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
