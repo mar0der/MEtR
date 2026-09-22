@@ -2991,13 +2991,15 @@ fn is_skipped_dir(path: &Path) -> bool {
     )
 }
 
-fn is_claude_worktree_path(path: &Path) -> bool {
-    path.components().any(|component| {
-        component
-            .as_os_str()
-            .to_string_lossy()
-            .contains("--claude-worktrees-")
-    })
+/// `<root>/projects` may be a symlink to relocated storage. Follow it one
+/// level, and only when its target stays under the Claude source root.
+fn claude_projects_link(root: &Path) -> Option<PathBuf> {
+    let link = root.join("projects");
+    if !fs::symlink_metadata(&link).ok()?.file_type().is_symlink() {
+        return None;
+    }
+    let target = fs::canonicalize(&link).ok()?;
+    (target.is_dir() && target.starts_with(fs::canonicalize(root).ok()?)).then_some(link)
 }
 
 fn infer_source(path: &Path) -> (String, String, String) {
@@ -3088,23 +3090,24 @@ fn scan_source(conn: &Connection, source: &Source, full_scan: bool) -> Result<us
     let mut skipped_unchanged = 0usize;
     let mut skipped_after_limit = false;
     let mut total_bytes_scanned: u64 = 0;
-    for entry in WalkDir::new(&root)
-        .max_depth(8)
-        .follow_links(false)
-        .into_iter()
-        .filter_entry(|e| {
-            !e.file_type().is_dir()
-                || (!is_skipped_dir(e.path())
-                    && !(source.parser_id == "claude" && is_claude_worktree_path(e.path())))
-        })
-        .filter_map(Result::ok)
-    {
+    let mut walk_roots = vec![root.clone()];
+    if source.parser_id == "claude" {
+        walk_roots.extend(claude_projects_link(&root));
+    }
+    'walk: for entry in walk_roots.iter().flat_map(|walk_root| {
+        WalkDir::new(walk_root)
+            .max_depth(8)
+            .follow_links(false)
+            .into_iter()
+            .filter_entry(|e| !e.file_type().is_dir() || !is_skipped_dir(e.path()))
+            .filter_map(Result::ok)
+    }) {
         if !entry.file_type().is_file() || !is_candidate_file(entry.path()) {
             continue;
         }
         if scanned_files >= MAX_SCAN_FILES_PER_SOURCE {
             skipped_after_limit = true;
-            break;
+            break 'walk;
         }
         let metadata = match entry.metadata() {
             Ok(metadata) => metadata,
@@ -3112,7 +3115,7 @@ fn scan_source(conn: &Connection, source: &Source, full_scan: bool) -> Result<us
         };
         if total_bytes_scanned + metadata.len() > MAX_SOURCE_TOTAL_BYTES {
             skipped_after_limit = true;
-            break;
+            break 'walk;
         }
         total_bytes_scanned += metadata.len();
         let modified = metadata
@@ -3753,8 +3756,13 @@ fn insert_event(
              pricing_match_confidence = ?22, source_file_modified_at = ?23,
              source_offset = ?24, source_hash = ?25, raw_record_hash = ?26,
              source_project_path = ?27, confidence = ?28, warnings_json = ?29,
-             updated_at = ?30
-             WHERE id = ?31",
+             updated_at = ?30,
+             source_file_path = CASE WHEN source_file_path LIKE '%--claude-worktrees-%'
+                                     THEN ?32 ELSE source_file_path END
+             WHERE id = ?31
+               -- A Claude worktree copy never overrides the main project file's row.
+               AND NOT (?32 LIKE '%--claude-worktrees-%'
+                        AND source_file_path NOT LIKE '%--claude-worktrees-%')",
             params![
                 event.product_id,
                 source.id,
@@ -3787,6 +3795,7 @@ fn insert_event(
                 serde_json::to_string(&event.warnings).unwrap_or_else(|_| "[]".into()),
                 now,
                 legacy_id,
+                file_path.to_string_lossy(),
             ],
         )
         .map_err(to_string)?;
@@ -4436,14 +4445,140 @@ mod tests {
         )));
     }
 
+    fn claude_usage_line(request_id: &str) -> String {
+        json!({
+            "type": "assistant",
+            "timestamp": "2026-09-22T08:00:00Z",
+            "sessionId": "session-1",
+            "requestId": request_id,
+            "message": {
+                "id": format!("message-{request_id}"),
+                "model": "claude-opus-5",
+                "usage": {"input_tokens": 10, "output_tokens": 20}
+            }
+        })
+        .to_string()
+    }
+
+    fn scan_test_conn() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+        seed_defaults(&conn).unwrap();
+        conn
+    }
+
+    fn scan_test_root(name: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("metr-{name}-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    fn write_jsonl(path: &Path, request_ids: &[&str]) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let lines: Vec<String> = request_ids.iter().map(|id| claude_usage_line(id)).collect();
+        std::fs::write(path, lines.join("\n") + "\n").unwrap();
+    }
+
+    fn event_paths(conn: &Connection) -> Vec<(String, String)> {
+        let mut stmt = conn
+            .prepare("SELECT request_id, source_file_path FROM usage_events ORDER BY request_id")
+            .unwrap();
+        stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+    }
+
     #[test]
-    fn claude_worktree_paths_are_skipped() {
-        assert!(is_claude_worktree_path(Path::new(
-            "/Users/petar/.claude/projects/-Users-petar-Developer-App--claude-worktrees-audit/session.jsonl"
-        )));
-        assert!(!is_claude_worktree_path(Path::new(
-            "/Users/petar/.claude/projects/-Users-petar-Developer-App/session.jsonl"
-        )));
+    fn claude_worktree_sessions_are_scanned_without_duplicating_request_ids() {
+        let conn = scan_test_conn();
+        let root = scan_test_root("claude-worktree");
+        let projects = root.join("projects");
+        let main_dir = projects.join("-Users-petar-Developer-App");
+        let worktree_dir = projects.join("-Users-petar-Developer-App--claude-worktrees-audit");
+        write_jsonl(&worktree_dir.join("session.jsonl"), &["req-shared", "req-worktree"]);
+        write_jsonl(&main_dir.join("session.jsonl"), &["req-shared"]);
+        write_jsonl(
+            &worktree_dir.join("session").join("subagents").join("agent-a1.jsonl"),
+            &["req-shared", "req-agent"],
+        );
+        let mut source = claude_test_source();
+        source.path = root.to_string_lossy().to_string();
+
+        scan_source(&conn, &source, true).unwrap();
+
+        let events = event_paths(&conn);
+        let ids: Vec<&str> = events.iter().map(|(id, _)| id.as_str()).collect();
+        assert_eq!(ids, ["req-agent", "req-shared", "req-worktree"]);
+        assert_eq!(
+            PathBuf::from(&events[1].1),
+            main_dir.join("session.jsonl"),
+            "shared request should keep the non-worktree copy"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn claude_windows_worktree_copy_defers_to_main_project_file() {
+        let conn = scan_test_conn();
+        let source = claude_test_source();
+        let worktree_file = Path::new(
+            r"C:\Users\Petar\.claude\projects\C--Users-Petar-Developer-MEtR--claude-worktrees-audit\session.jsonl",
+        );
+        let main_file =
+            Path::new(r"C:\Users\Petar\.claude\projects\C--Users-Petar-Developer-MEtR\session.jsonl");
+        let value: Value = serde_json::from_str(&claude_usage_line("req-win")).unwrap();
+        for file in [worktree_file, main_file, worktree_file] {
+            let event = parse_value(&source, file, &value, Some(0), &value.to_string(), None).unwrap();
+            insert_event(&conn, &source, file, "2026-09-22T08:00:00Z", "hash", event, None).unwrap();
+        }
+
+        let events = event_paths(&conn);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].1, main_file.to_string_lossy());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn claude_projects_symlink_is_followed_only_inside_source_root() {
+        let conn = scan_test_conn();
+        let root = scan_test_root("claude-link");
+        let outside = scan_test_root("claude-link-outside");
+        let store = root.join("store");
+        write_jsonl(&store.join("-Users-petar-App").join("session.jsonl"), &["req-inside"]);
+        write_jsonl(&outside.join("-Users-petar-App").join("session.jsonl"), &["req-outside"]);
+        std::os::unix::fs::symlink(&store, root.join("projects")).unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("elsewhere")).unwrap();
+        let mut source = claude_test_source();
+        source.path = root.to_string_lossy().to_string();
+
+        scan_source(&conn, &source, true).unwrap();
+
+        let linked_file = root
+            .join("projects")
+            .join("-Users-petar-App")
+            .join("session.jsonl")
+            .to_string_lossy()
+            .to_string();
+        let linked_indexed: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM indexed_files WHERE path = ?1",
+                params![linked_file],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(linked_indexed, 1);
+        let ids: Vec<String> = event_paths(&conn).into_iter().map(|(id, _)| id).collect();
+        assert_eq!(ids, ["req-inside"]);
+
+        std::fs::remove_file(root.join("projects")).unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("projects")).unwrap();
+        scan_source(&conn, &source, true).unwrap();
+        let ids: Vec<String> = event_paths(&conn).into_iter().map(|(id, _)| id).collect();
+        assert_eq!(ids, ["req-inside"], "projects link outside the root must not be followed");
+
+        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(outside).unwrap();
     }
 
     fn claude_test_source() -> Source {
