@@ -253,6 +253,9 @@ jobs:
         with:
           authkey: ${{ secrets.TAILSCALE_AUTH_KEY }}
           args: --accept-dns=true
+          # Do not continue until the deploy host answers. tailscale up can
+          # exit 0 before this runner has a route, and scp then fails instantly.
+          targets: ${{ secrets.DEPLOY_HOST || '100.119.58.18' }}
 
       - name: Setup SSH
         if: startsWith(github.ref, 'refs/tags/')
@@ -260,34 +263,45 @@ jobs:
           mkdir -p ~/.ssh
           echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
-          ssh-keyscan -T 10 -H "$DEPLOY_HOST" >> ~/.ssh/known_hosts 2>/dev/null || true
+          for i in 1 2 3 4 5 6; do
+            if ssh-keyscan -T 5 -H "$DEPLOY_HOST" >> ~/.ssh/known_hosts; then
+              exit 0
+            fi
+            echo "ssh-keyscan attempt ${i} failed for ${DEPLOY_HOST}"
+            sudo tailscale ping -c 3 "$DEPLOY_HOST" || true
+            sleep 5
+          done
+          echo "Could not reach ${DEPLOY_HOST} on port 22"
+          exit 1
 
       - name: Upload artifacts to server
         if: startsWith(github.ref, 'refs/tags/')
         run: |
+          SCP=(scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=15 -i ~/.ssh/deploy_key)
+          UPD="$DEPLOY_USER@$DEPLOY_HOST:/opt/metr-sync/site/backend/storage/app/updates/"
+          REL="$DEPLOY_USER@$DEPLOY_HOST:/opt/metr-sync/site/storage/releases/"
           # macOS installer → public releases
-          scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i ~/.ssh/deploy_key ./macos/*.dmg "$DEPLOY_USER@$DEPLOY_HOST:/opt/metr-sync/site/storage/releases/"
-
+          "${SCP[@]}" ./macos/*.dmg "$REL"
           # macOS updater → Laravel storage
-          scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i ~/.ssh/deploy_key "./macos/MEtR_${VERSION}_aarch64.app.tar.gz" "$DEPLOY_USER@$DEPLOY_HOST:/opt/metr-sync/site/backend/storage/app/updates/"
-          scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i ~/.ssh/deploy_key "./macos/MEtR_${VERSION}_aarch64.app.tar.gz.sig" "$DEPLOY_USER@$DEPLOY_HOST:/opt/metr-sync/site/backend/storage/app/updates/"
+          "${SCP[@]}" "./macos/MEtR_${VERSION}_aarch64.app.tar.gz" "$UPD"
+          "${SCP[@]}" "./macos/MEtR_${VERSION}_aarch64.app.tar.gz.sig" "$UPD"
 
           # Windows installer → public releases
-          scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i ~/.ssh/deploy_key ./windows/*.msi "$DEPLOY_USER@$DEPLOY_HOST:/opt/metr-sync/site/storage/releases/"
+          "${SCP[@]}" ./windows/*.msi "$REL"
 
           # Windows updater → Laravel storage
-          scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i ~/.ssh/deploy_key "./windows/MEtR_${VERSION}_x64_en-US.msi" "$DEPLOY_USER@$DEPLOY_HOST:/opt/metr-sync/site/backend/storage/app/updates/"
-          scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i ~/.ssh/deploy_key "./windows/MEtR_${VERSION}_x64_en-US.msi.sig" "$DEPLOY_USER@$DEPLOY_HOST:/opt/metr-sync/site/backend/storage/app/updates/"
+          "${SCP[@]}" "./windows/MEtR_${VERSION}_x64_en-US.msi" "$UPD"
+          "${SCP[@]}" "./windows/MEtR_${VERSION}_x64_en-US.msi.sig" "$UPD"
 
           # Linux installer → public releases
-          scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i ~/.ssh/deploy_key ./linux/*.deb "$DEPLOY_USER@$DEPLOY_HOST:/opt/metr-sync/site/storage/releases/"
+          "${SCP[@]}" ./linux/*.deb "$REL"
 
           # Linux updater → Laravel storage
-          scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i ~/.ssh/deploy_key ./linux/*.AppImage "$DEPLOY_USER@$DEPLOY_HOST:/opt/metr-sync/site/backend/storage/app/updates/" 2>/dev/null || true
-          scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i ~/.ssh/deploy_key ./linux/*.AppImage.sig "$DEPLOY_USER@$DEPLOY_HOST:/opt/metr-sync/site/backend/storage/app/updates/" 2>/dev/null || true
+          "${SCP[@]}" ./linux/*.AppImage "$UPD"
+          "${SCP[@]}" ./linux/*.AppImage.sig "$UPD"
 
           # Copy installers to updates dir for Laravel publish
-          ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i ~/.ssh/deploy_key "$DEPLOY_USER@$DEPLOY_HOST" "cp /opt/metr-sync/site/storage/releases/MEtR_${VERSION}_aarch64.dmg /opt/metr-sync/site/backend/storage/app/updates/ && cp /opt/metr-sync/site/storage/releases/MEtR_${VERSION}_x64_en-US.msi /opt/metr-sync/site/backend/storage/app/updates/ && cp /opt/metr-sync/site/storage/releases/MEtR_${VERSION}_amd64.deb /opt/metr-sync/site/backend/storage/app/updates/ 2>/dev/null || true"
+          ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=15 -i ~/.ssh/deploy_key "$DEPLOY_USER@$DEPLOY_HOST" "cp /opt/metr-sync/site/storage/releases/MEtR_${VERSION}_aarch64.dmg /opt/metr-sync/site/backend/storage/app/updates/ && cp /opt/metr-sync/site/storage/releases/MEtR_${VERSION}_x64_en-US.msi /opt/metr-sync/site/backend/storage/app/updates/ && cp /opt/metr-sync/site/storage/releases/MEtR_${VERSION}_amd64.deb /opt/metr-sync/site/backend/storage/app/updates/"
 
       - name: Publish release to update server
         if: startsWith(github.ref, 'refs/tags/')
