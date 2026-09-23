@@ -59,4 +59,52 @@ class SubscriptionsPageTest extends TestCase
 
         Carbon::setTestNow();
     }
+
+    public function test_renews_at_is_zero_when_auto_renew_is_off(): void
+    {
+        Carbon::setTestNow('2026-09-24 12:00:00');
+
+        $user = User::factory()->create();
+        Provider::factory()->create(['id' => 'anthropic', 'display_name' => 'Claude']);
+        Provider::factory()->create(['id' => 'openai', 'display_name' => 'OpenAI']);
+
+        Subscription::create([
+            'user_id' => $user->id,
+            'provider_id' => 'anthropic',
+            'plan_name' => 'Petar',
+            'monthly_price' => 200,
+            'renewal_price' => 200,
+            'currency' => 'USD',
+            'billing_anchor_day' => 15,
+            'started_on' => '2026-09-15',
+            'ended_on' => '2026-10-14',
+            'active' => true,
+            'autorenew' => true,
+        ]);
+        Subscription::create([
+            'user_id' => $user->id,
+            'provider_id' => 'openai',
+            'plan_name' => 'Radka',
+            'monthly_price' => 21,
+            'renewal_price' => 21,
+            'currency' => 'USD',
+            'billing_anchor_day' => 30,
+            'started_on' => '2026-08-30',
+            'ended_on' => '2026-09-29',
+            'active' => true,
+            'autorenew' => false,
+        ]);
+
+        $response = $this->actingAs($user)->get('/subscriptions?tab=accounts');
+        $response->assertOk();
+        $response->assertSeeInOrder(['Radka', '$21.00', '$0.00'], false);
+
+        preg_match('/<tfoot>.*?<\/tfoot>/s', $response->getContent(), $footer);
+        $this->assertNotEmpty($footer);
+        $this->assertStringContainsString('$221.00', $footer[0]);
+        $this->assertStringContainsString('$200.00', $footer[0]);
+        $this->assertSame(1, substr_count($footer[0], '$200.00'));
+
+        Carbon::setTestNow();
+    }
 }

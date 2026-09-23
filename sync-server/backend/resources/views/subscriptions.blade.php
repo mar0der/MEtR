@@ -241,7 +241,7 @@
                         <td>{{ $s->provider?->display_name ?? $s->provider_id }}</td>
                         <td>{{ $s->providerAccount?->label ?? '—' }}</td>
                         <td>{{ $s->currency }} {{ number_format((float) $s->monthly_price, 2) }}</td>
-                        <td>{{ $s->renewal_price ? $s->currency.' '.number_format((float) $s->renewal_price, 2) : '—' }}</td>
+                        <td>{{ $s->autorenew ? $s->currency.' '.number_format((float) ($s->renewal_price ?? $s->monthly_price), 2) : $s->currency.' 0.00' }}</td>
                         <td>{{ $s->billing_anchor_day ?? '—' }}</td>
                         <td>{{ $s->started_on?->format('Y-m-d') ?? '—' }}</td>
                         <td>{{ $s->ended_on?->format('Y-m-d') ?? '—' }}</td>

@@ -659,7 +659,9 @@ class WebController extends Controller
                     'total_paid' => (float) $group->total_paid,
                     'instance_count' => (int) $group->instance_count,
                     'current_price' => $latest ? (float) $latest->monthly_price : 0.0,
-                    'renews_at_price' => $latest?->renewal_price ? (float) $latest->renewal_price : ($latest ? (float) $latest->monthly_price : 0.0),
+                    'renews_at_price' => ($latest && $latest->autorenew)
+                        ? (float) ($latest->renewal_price ?? $latest->monthly_price)
+                        : 0.0,
                     'current_end' => $latest?->ended_on,
                     'autorenew' => $latest?->autorenew ?? false,
                     'active' => $latest !== null
