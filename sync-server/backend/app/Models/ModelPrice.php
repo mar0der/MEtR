@@ -55,4 +55,9 @@ class ModelPrice extends Model
     {
         return $this->hasMany(UsageEvent::class);
     }
+
+    public function isManual(): bool
+    {
+        return (bool) $this->user_override || $this->catalog_version === 'user';
+    }
 }

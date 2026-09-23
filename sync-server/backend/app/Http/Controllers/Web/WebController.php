@@ -14,6 +14,7 @@ use App\Models\Subscription;
 use App\Models\UpdateRelease;
 use App\Models\UsageEvent;
 use App\Models\User;
+use App\Services\Pricing\RepriceModelUsage;
 use App\Services\Subscription\CalculateSubscriptionCost;
 use Carbon\Carbon;
 use Illuminate\Database\Eloquent\Builder;
@@ -28,6 +29,10 @@ use Illuminate\Support\Str;
 
 class WebController extends Controller
 {
+    public function __construct(
+        private RepriceModelUsage $repriceModelUsage,
+    ) {}
+
     public function download()
     {
         $latest = UpdateRelease::orderByDesc('released_at')->first();
@@ -917,6 +922,63 @@ class WebController extends Controller
         ]);
 
     }
+
+    public function updatePrice(Request $request, string $id)
+    {
+        if ($this->isDemoUser()) {
+            return redirect('/pricing')->withErrors(['demo' => 'Demo account data cannot be modified.']);
+        }
+
+        $price = ModelPrice::findOrFail($id);
+        if (! $price->isManual()) {
+            return redirect('/pricing')->withErrors(['price' => 'Catalog prices are updated by the price feed.']);
+        }
+
+        $data = $request->validate([
+            'input_per_1m' => ['required', 'numeric'],
+            'output_per_1m' => ['required', 'numeric'],
+            'cached_input_per_1m' => ['nullable', 'numeric'],
+            'cache_write_per_1m' => ['nullable', 'numeric'],
+            'cache_read_per_1m' => ['nullable', 'numeric'],
+            'reasoning_per_1m' => ['nullable', 'numeric'],
+            'tool_per_1m' => ['nullable', 'numeric'],
+        ]);
+
+        foreach (['cached_input_per_1m', 'cache_write_per_1m', 'cache_read_per_1m', 'reasoning_per_1m', 'tool_per_1m'] as $field) {
+            if (($data[$field] ?? '') === '') {
+                $data[$field] = null;
+            }
+        }
+
+        $price->update($data);
+        $this->repriceModelUsage->handle($price->provider_id, $price->model);
+        Cache::forget('pricing:catalog');
+
+        return redirect('/pricing?q='.urlencode($price->model))
+            ->with('status', "Updated {$price->model} and recalculated its usage.");
+    }
+
+    public function deletePrice(string $id)
+    {
+        if ($this->isDemoUser()) {
+            return redirect('/pricing')->withErrors(['demo' => 'Demo account data cannot be modified.']);
+        }
+
+        $price = ModelPrice::findOrFail($id);
+        if (! $price->isManual()) {
+            return redirect('/pricing')->withErrors(['price' => 'Catalog prices are updated by the price feed.']);
+        }
+
+        $providerId = $price->provider_id;
+        $model = $price->model;
+        $price->delete();
+        $this->repriceModelUsage->handle($providerId, $model);
+        Cache::forget('pricing:catalog');
+
+        return redirect('/pricing?q='.urlencode($model))
+            ->with('status', "Deleted the manual price for {$model} and recalculated its usage.");
+    }
+
     public function settings()
     {
         $user = Auth::user();

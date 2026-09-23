@@ -80,6 +80,8 @@ Route::middleware(['auth', 'throttle:120,1'])->group(function () {
     Route::delete('/subscriptions/{subscription}', [WebController::class, 'destroySubscription']);
     Route::get('/projects', [WebController::class, 'projects']);
     Route::get('/pricing', [WebController::class, 'pricing']);
+    Route::put('/pricing/{id}', [WebController::class, 'updatePrice']);
+    Route::post('/pricing/{id}/delete', [WebController::class, 'deletePrice']);
     Route::get('/settings', [WebController::class, 'settings']);
     Route::post('/settings/clear-data', [WebController::class, 'clearData']);
 });

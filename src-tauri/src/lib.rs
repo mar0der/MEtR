@@ -1263,7 +1263,7 @@ async fn push_pricing(state: State<'_, AppState>) -> Result<Value, String> {
             .prepare(
                 "SELECT provider_id, model, aliases_json, input_per_1m, output_per_1m,
                  cached_input_per_1m, cache_write_per_1m, cache_read_per_1m,
-                 reasoning_per_1m, tool_per_1m, source_url, catalog_version
+                 reasoning_per_1m, tool_per_1m, source_url, catalog_version, effective_from
                  FROM pricing_catalogs",
             )
             .map_err(to_string)?;
@@ -1284,6 +1284,7 @@ async fn push_pricing(state: State<'_, AppState>) -> Result<Value, String> {
                     "tool_per_1m": r.get::<_, Option<f64>>(9)?,
                     "source_url": r.get::<_, Option<String>>(10)?,
                     "catalog_version": r.get::<_, Option<String>>(11)?,
+                    "effective_from": r.get::<_, Option<String>>(12)?,
                 }))
             })
             .map_err(to_string)?

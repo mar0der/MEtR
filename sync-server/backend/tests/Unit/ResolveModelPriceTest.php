@@ -45,4 +45,57 @@ class ResolveModelPriceTest extends TestCase
         $this->assertNotNull($resultNew);
         $this->assertEquals(20.00, (float) $resultNew->input_per_1m);
     }
+
+    public function test_catalog_price_wins_over_a_newer_manual_price(): void
+    {
+        Provider::factory()->create(['id' => 'anthropic']);
+
+        $catalog = ModelPrice::create([
+            'provider_id' => 'anthropic',
+            'model' => 'claude-opus-5-5',
+            'input_per_1m' => 4.00,
+            'output_per_1m' => 20.00,
+            'cache_write_per_1m' => 5.00,
+            'cache_read_per_1m' => 0.20,
+            'effective_from' => Carbon::parse('2025-01-01'),
+            'catalog_version' => 'catalog-hash',
+            'user_override' => false,
+        ]);
+
+        ModelPrice::create([
+            'provider_id' => 'anthropic',
+            'model' => 'claude-opus-5-5',
+            'input_per_1m' => 4.00,
+            'output_per_1m' => 20.00,
+            'effective_from' => Carbon::parse('2026-09-23 08:50:15'),
+            'catalog_version' => 'user',
+            'user_override' => false,
+        ]);
+
+        $price = (new ResolveModelPrice)->handle('anthropic', 'claude-opus-5-5', Carbon::parse('2026-09-23 12:00:00'));
+
+        $this->assertNotNull($price);
+        $this->assertSame($catalog->id, $price->id);
+        $this->assertEquals(0.20, (float) $price->cache_read_per_1m);
+    }
+
+    public function test_manual_price_is_used_when_no_catalog_row_exists(): void
+    {
+        Provider::factory()->create(['id' => 'openai']);
+
+        $manual = ModelPrice::create([
+            'provider_id' => 'openai',
+            'model' => 'gpt-6-luna',
+            'input_per_1m' => 0.10,
+            'output_per_1m' => 0.50,
+            'effective_from' => Carbon::parse('2026-09-22'),
+            'catalog_version' => 'user',
+            'user_override' => true,
+        ]);
+
+        $price = (new ResolveModelPrice)->handle('openai', 'gpt-6-luna', Carbon::parse('2026-09-23'));
+
+        $this->assertNotNull($price);
+        $this->assertSame($manual->id, $price->id);
+    }
 }

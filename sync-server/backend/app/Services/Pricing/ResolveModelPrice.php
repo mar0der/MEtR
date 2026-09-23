@@ -21,19 +21,34 @@ class ResolveModelPrice
             ->orderBy('effective_from', 'desc')
             ->get();
 
+        $matches = [];
         foreach ($candidates as $price) {
             if (strtolower($price->model) === strtolower($model)) {
-                return $price;
+                $matches[] = $price;
+
+                continue;
             }
 
             $aliases = json_decode($price->aliases_json ?? '[]', true);
             foreach ($aliases as $alias) {
                 if (strtolower($alias) === strtolower($model)) {
-                    return $price;
+                    $matches[] = $price;
+                    break;
                 }
             }
         }
 
-        return null;
+        if ($matches === []) {
+            return null;
+        }
+
+        // A hand-entered price is only used when the catalog has no row for this model.
+        // A newer two-rate manual row must not hide the catalog row that includes cache.
+        $official = array_values(array_filter(
+            $matches,
+            fn (ModelPrice $price) => ! $price->isManual(),
+        ));
+
+        return ($official !== [] ? $official : $matches)[0];
     }
 }

@@ -176,11 +176,19 @@ class SyncController extends Controller
             'prices.*.tool_per_1m' => ['nullable', 'numeric'],
             'prices.*.source_url' => ['nullable', 'string'],
             'prices.*.catalog_version' => ['nullable', 'string'],
+            'prices.*.effective_from' => ['nullable', 'date'],
         ]);
 
         $synced = 0;
         foreach ($data['prices'] as $price) {
-            $effectiveFrom = $price['effective_from'] ?? now()->toDateTimeString();
+            $isManual = ($price['catalog_version'] ?? null) === 'user';
+            if ($isManual && $this->catalogPriceExists($price['provider_id'], $price['model'])) {
+                continue;
+            }
+
+            $effectiveFrom = $isManual
+                ? ($price['effective_from'] ?? '2026-01-01 00:00:00')
+                : ($price['effective_from'] ?? now()->toDateTimeString());
 
             $match = [
                 'provider_id' => $price['provider_id'],
@@ -201,7 +209,7 @@ class SyncController extends Controller
                 'tool_per_1m' => $price['tool_per_1m'] ?? null,
                 'source_url' => $price['source_url'] ?? null,
                 'catalog_version' => $price['catalog_version'] ?? 'client-sync',
-                'user_override' => false,
+                'user_override' => $isManual,
             ];
 
             ModelPrice::updateOrCreate($match, $payload);
@@ -212,6 +220,19 @@ class SyncController extends Controller
             'ok' => true,
             'synced' => $synced,
         ]);
+    }
+
+    private function catalogPriceExists(string $providerId, string $model): bool
+    {
+        return ModelPrice::query()
+            ->where('provider_id', $providerId)
+            ->where('model', $model)
+            ->where('user_override', false)
+            ->where(function ($query) {
+                $query->whereNull('catalog_version')
+                    ->orWhere('catalog_version', '!=', 'user');
+            })
+            ->exists();
     }
 
     private function isDemoUser(Request $request): bool

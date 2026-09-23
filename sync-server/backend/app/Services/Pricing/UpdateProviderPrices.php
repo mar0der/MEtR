@@ -33,6 +33,11 @@ class UpdateProviderPrices
             $current = ModelPrice::where('provider_id', $providerId)
                 ->where('model', $model)
                 ->whereNull('effective_to')
+                ->where('user_override', false)
+                ->where(function ($query) {
+                    $query->whereNull('catalog_version')
+                        ->orWhere('catalog_version', '!=', 'user');
+                })
                 ->orderBy('effective_from', 'desc')
                 ->first();
 
