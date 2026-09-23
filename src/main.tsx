@@ -127,6 +127,29 @@ type Subscription = {
   autorenew: boolean;
 };
 
+type PriceDraft = {
+  input: string;
+  output: string;
+  cached: string;
+  cacheWrite: string;
+  cacheRead: string;
+};
+
+const emptyPriceDraft = (): PriceDraft => ({
+  input: "",
+  output: "",
+  cached: "",
+  cacheWrite: "",
+  cacheRead: "",
+});
+
+function optionalRate(value: string): number | null {
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  const parsed = Number(trimmed);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
 type PricingEntry = {
   id: string;
   provider_id: string;
@@ -247,7 +270,7 @@ function App() {
   const [projectRoot, setProjectRoot] = useState<string | null>(null);
   const [projects, setProjects] = useState<Project[]>([]);
   const [appVersion, setAppVersion] = useState<string>("");
-  const [newPriceForm, setNewPriceForm] = useState<Record<string, { input: string; output: string }>>({});
+  const [newPriceForm, setNewPriceForm] = useState<Record<string, PriceDraft>>({});
   const [paginatedSessions, setPaginatedSessions] = useState<PaginatedSessions>({ sessions: [], total_count: 0 });
   const [sessionPage, setSessionPage] = useState(1);
   const SESSIONS_PER_PAGE = 50;
@@ -773,6 +796,9 @@ function App() {
           model: model,
           input_per_1m: Number(form.input),
           output_per_1m: Number(form.output),
+          cached_input_per_1m: optionalRate(form.cached),
+          cache_write_per_1m: optionalRate(form.cacheWrite),
+          cache_read_per_1m: optionalRate(form.cacheRead),
         }
       });
       setStatus(`Price added for ${model}`);
@@ -1317,8 +1343,8 @@ function SettingsView(props: {
   setManualPath: (value: string) => void;
   subForm: SubscriptionForm;
   setSubForm: (value: SubscriptionForm) => void;
-  newPriceForm: Record<string, { input: string; output: string }>;
-  setNewPriceForm: (value: Record<string, { input: string; output: string }>) => void;
+  newPriceForm: Record<string, PriceDraft>;
+  setNewPriceForm: (value: Record<string, PriceDraft>) => void;
   runDetection: () => void;
   addDetected: (source: DetectedSource) => void;
   addManual: () => void;
@@ -1681,13 +1707,16 @@ function SettingsView(props: {
                   <th>Model Calls</th>
                   <th>Input / 1M</th>
                   <th>Output / 1M</th>
+                  <th>Cached / 1M</th>
+                  <th>Cache Write / 1M</th>
+                  <th>Cache Read / 1M</th>
                   <th></th>
                 </tr>
               </thead>
               <tbody>
                 {props.missingModels.map((m) => {
                   const key = `${m.provider_id}::${m.model}`;
-                  const form = props.newPriceForm[key] ?? { input: "", output: "" };
+                  const form = props.newPriceForm[key] ?? emptyPriceDraft();
                   return (
                     <tr key={key}>
                       <td>{m.provider_id}</td>
@@ -1719,6 +1748,51 @@ function SettingsView(props: {
                             props.setNewPriceForm({
                               ...props.newPriceForm,
                               [key]: { ...form, output: e.target.value },
+                            })
+                          }
+                        />
+                      </td>
+                      <td>
+                        <input
+                          type="number"
+                          step="0.01"
+                          style={{ width: 80 }}
+                          value={form.cached}
+                          placeholder="optional"
+                          onChange={(e) =>
+                            props.setNewPriceForm({
+                              ...props.newPriceForm,
+                              [key]: { ...form, cached: e.target.value },
+                            })
+                          }
+                        />
+                      </td>
+                      <td>
+                        <input
+                          type="number"
+                          step="0.01"
+                          style={{ width: 80 }}
+                          value={form.cacheWrite}
+                          placeholder="optional"
+                          onChange={(e) =>
+                            props.setNewPriceForm({
+                              ...props.newPriceForm,
+                              [key]: { ...form, cacheWrite: e.target.value },
+                            })
+                          }
+                        />
+                      </td>
+                      <td>
+                        <input
+                          type="number"
+                          step="0.01"
+                          style={{ width: 80 }}
+                          value={form.cacheRead}
+                          placeholder="optional"
+                          onChange={(e) =>
+                            props.setNewPriceForm({
+                              ...props.newPriceForm,
+                              [key]: { ...form, cacheRead: e.target.value },
                             })
                           }
                         />
