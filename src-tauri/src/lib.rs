@@ -2895,8 +2895,9 @@ fn recalculate_event_costs(conn: &Connection) -> rusqlite::Result<()> {
         }
     }
     drop(stmt);
+    let tx = conn.unchecked_transaction()?;
     for (id, cost, pricing_id) in updates {
-        conn.execute(
+        tx.execute(
             "UPDATE usage_events
              SET official_api_cost_usd = ?1,
                  pricing_catalog_id = ?2,
@@ -2906,7 +2907,7 @@ fn recalculate_event_costs(conn: &Connection) -> rusqlite::Result<()> {
             params![cost, pricing_id, now(), id],
         )?;
     }
-    Ok(())
+    tx.commit()
 }
 
 fn ensure_provider(conn: &Connection, id: &str, name: &str) -> rusqlite::Result<()> {
@@ -3308,13 +3309,15 @@ fn scan_source(conn: &Connection, source: &Source, full_scan: bool) -> Result<us
             Ok(events) => events,
             Err(_) => continue,
         };
+        // One transaction per file: far fewer WAL commits, and a failure rolls back only this file.
+        let tx = conn.unchecked_transaction().map_err(to_string)?;
         for event in events {
-            if insert_event(conn, source, entry.path(), &modified, &source_hash, event, custom_root.as_deref())? {
+            if insert_event(&tx, source, entry.path(), &modified, &source_hash, event, custom_root.as_deref())? {
                 imported += 1;
             }
         }
         upsert_indexed_file(
-            conn,
+            &tx,
             source,
             entry.path(),
             metadata.len(),
@@ -3322,6 +3325,7 @@ fn scan_source(conn: &Connection, source: &Source, full_scan: bool) -> Result<us
             "ok",
             Some("Indexed successfully."),
         )?;
+        tx.commit().map_err(to_string)?;
     }
     conn.execute(
         "UPDATE log_sources SET last_scan_finished_at = ?1, last_scan_status = 'ok', last_scan_message = ?2 WHERE id = ?3",
