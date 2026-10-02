@@ -24,8 +24,21 @@ const KEYRING_SERVICE: &str = "com.petarpetkov.metr.sync";
 const KEYRING_USERNAME: &str = "auth_token";
 const OFFICIAL_SERVER_HOST: &str = "metr.petarpetkov.com";
 
+#[derive(Clone)]
 struct AppState {
     db: Arc<Mutex<Connection>>,
+}
+
+/// Runs a command's DB work on the blocking pool: sync commands run on the main
+/// thread, so waiting there for the DB lock during a scan freezes the window.
+async fn run_blocking<T: Send + 'static>(
+    state: State<'_, AppState>,
+    f: impl FnOnce(&AppState) -> Result<T, String> + Send + 'static,
+) -> Result<T, String> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || f(&state))
+        .await
+        .map_err(to_string)?
 }
 
 fn configure_connection(conn: &Connection) -> rusqlite::Result<()> {
@@ -324,115 +337,135 @@ fn get_app_status(app: tauri::AppHandle) -> Result<Value, String> {
 }
 
 #[tauri::command]
-fn detect_sources() -> Result<Vec<DetectedSource>, String> {
-    let mut results = Vec::new();
-    for candidate in candidate_sources() {
-        if candidate.path.exists() {
-            let count = count_candidate_files(&candidate.path);
-            results.push(DetectedSource {
-                provider_id: candidate.provider_id.to_string(),
-                parser_id: candidate.parser_id.to_string(),
-                display_name: candidate.display_name.to_string(),
-                path: candidate.path.to_string_lossy().to_string(),
-                confidence: if count > 0 { "medium" } else { "low" }.to_string(),
-                found_file_count: count,
-                notes: if count > 0 {
-                    "Folder exists and contains candidate files.".to_string()
-                } else {
-                    "Folder exists but no candidate files were found yet.".to_string()
-                },
-            });
+async fn detect_sources() -> Result<Vec<DetectedSource>, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let mut results = Vec::new();
+        for candidate in candidate_sources() {
+            if candidate.path.exists() {
+                let count = count_candidate_files(&candidate.path);
+                results.push(DetectedSource {
+                    provider_id: candidate.provider_id.to_string(),
+                    parser_id: candidate.parser_id.to_string(),
+                    display_name: candidate.display_name.to_string(),
+                    path: candidate.path.to_string_lossy().to_string(),
+                    confidence: if count > 0 { "medium" } else { "low" }.to_string(),
+                    found_file_count: count,
+                    notes: if count > 0 {
+                        "Folder exists and contains candidate files.".to_string()
+                    } else {
+                        "Folder exists but no candidate files were found yet.".to_string()
+                    },
+                });
+            }
         }
-    }
-    Ok(results)
+        Ok(results)
+    })
+    .await
+    .map_err(to_string)?
 }
 
 #[tauri::command]
-fn list_sources(state: State<AppState>) -> Result<Vec<Source>, String> {
-    let conn = state.db.blocking_lock();
-    query_sources(&conn)
+async fn list_sources(state: State<'_, AppState>) -> Result<Vec<Source>, String> {
+    run_blocking(state, move |state| {
+        let conn = state.db.blocking_lock();
+        query_sources(&conn)
+    })
+    .await
 }
 
 #[tauri::command]
-fn add_source(state: State<AppState>, input: AddSourceInput) -> Result<Source, String> {
-    let path = validate_source_path(&input.path)?;
-    let input = AddSourceInput {
-        path: path.to_string_lossy().to_string(),
-        ..input
-    };
-    let (provider_id, parser_id, name) = match (&input.provider_id, &input.parser_id) {
-        (Some(provider), Some(parser)) => (
-            provider.clone(),
-            parser.clone(),
-            input
-                .display_name
-                .unwrap_or_else(|| provider_display_name(provider).to_string()),
-        ),
-        _ => infer_source(&path),
-    };
-    let now = now();
-    let conn = state.db.blocking_lock();
-    ensure_provider(&conn, &provider_id, provider_display_name(&provider_id)).map_err(to_string)?;
-    let existing: Option<String> = conn
-        .query_row(
-            "SELECT id FROM log_sources WHERE path = ?1 AND provider_id = ?2",
-            params![input.path, provider_id],
-            |r| r.get(0),
+async fn add_source(state: State<'_, AppState>, input: AddSourceInput) -> Result<Source, String> {
+    run_blocking(state, move |state| {
+        let path = validate_source_path(&input.path)?;
+        let input = AddSourceInput {
+            path: path.to_string_lossy().to_string(),
+            ..input
+        };
+        let (provider_id, parser_id, name) = match (&input.provider_id, &input.parser_id) {
+            (Some(provider), Some(parser)) => (
+                provider.clone(),
+                parser.clone(),
+                input
+                    .display_name
+                    .unwrap_or_else(|| provider_display_name(provider).to_string()),
+            ),
+            _ => infer_source(&path),
+        };
+        let now = now();
+        let conn = state.db.blocking_lock();
+        ensure_provider(&conn, &provider_id, provider_display_name(&provider_id)).map_err(to_string)?;
+        let existing: Option<String> = conn
+            .query_row(
+                "SELECT id FROM log_sources WHERE path = ?1 AND provider_id = ?2",
+                params![input.path, provider_id],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(to_string)?;
+        let id = existing.unwrap_or_else(|| Uuid::new_v4().to_string());
+        conn.execute(
+            "INSERT OR REPLACE INTO log_sources
+            (id, provider_id, parser_id, display_name, path, enabled, recursive, include_patterns, exclude_patterns,
+             detection_confidence, last_scan_status, last_scan_message, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, 1, 1, ?6, ?7, 'manual', NULL, NULL,
+             COALESCE((SELECT created_at FROM log_sources WHERE id = ?1), ?8), ?8)",
+            params![
+                id,
+                provider_id,
+                parser_id,
+                name,
+                input.path,
+                "*.json,*.jsonl,*.log,*.txt,*.md",
+                "node_modules,.git,target,dist,build,.next,vendor",
+                now
+            ],
         )
-        .optional()
         .map_err(to_string)?;
-    let id = existing.unwrap_or_else(|| Uuid::new_v4().to_string());
-    conn.execute(
-        "INSERT OR REPLACE INTO log_sources
-        (id, provider_id, parser_id, display_name, path, enabled, recursive, include_patterns, exclude_patterns,
-         detection_confidence, last_scan_status, last_scan_message, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, 1, 1, ?6, ?7, 'manual', NULL, NULL,
-         COALESCE((SELECT created_at FROM log_sources WHERE id = ?1), ?8), ?8)",
-        params![
-            id,
-            provider_id,
-            parser_id,
-            name,
-            input.path,
-            "*.json,*.jsonl,*.log,*.txt,*.md",
-            "node_modules,.git,target,dist,build,.next,vendor",
-            now
-        ],
-    )
-    .map_err(to_string)?;
-    query_source(&conn, &id)
+        query_source(&conn, &id)
+    })
+    .await
 }
 
 #[tauri::command]
-fn remove_source(state: State<AppState>, source_id: String) -> Result<(), String> {
-    let conn = state.db.blocking_lock();
-    conn.execute("DELETE FROM log_sources WHERE id = ?1", params![source_id])
+async fn remove_source(state: State<'_, AppState>, source_id: String) -> Result<(), String> {
+    run_blocking(state, move |state| {
+        let conn = state.db.blocking_lock();
+        conn.execute("DELETE FROM log_sources WHERE id = ?1", params![source_id])
+            .map_err(to_string)?;
+        Ok(())
+    })
+    .await
+}
+
+#[tauri::command]
+async fn clear_parsed_data(state: State<'_, AppState>) -> Result<(), String> {
+    run_blocking(state, move |state| {
+        let conn = state.db.blocking_lock();
+        conn.execute_batch(
+            "
+            DELETE FROM usage_events;
+            DELETE FROM conversations;
+            DELETE FROM projects;
+            DELETE FROM indexed_files;
+            UPDATE log_sources
+            SET last_scan_started_at = NULL,
+                last_scan_finished_at = NULL,
+                last_scan_status = NULL,
+                last_scan_message = 'Parsed data cleared. Run Rescan to rebuild.';
+            ",
+        )
         .map_err(to_string)?;
-    Ok(())
+        Ok(())
+    })
+    .await
 }
 
 #[tauri::command]
-fn clear_parsed_data(state: State<AppState>) -> Result<(), String> {
-    let conn = state.db.blocking_lock();
-    conn.execute_batch(
-        "
-        DELETE FROM usage_events;
-        DELETE FROM conversations;
-        DELETE FROM projects;
-        DELETE FROM indexed_files;
-        UPDATE log_sources
-        SET last_scan_started_at = NULL,
-            last_scan_finished_at = NULL,
-            last_scan_status = NULL,
-            last_scan_message = 'Parsed data cleared. Run Rescan to rebuild.';
-        ",
-    )
-    .map_err(to_string)?;
-    Ok(())
+async fn list_projects(state: State<'_, AppState>) -> Result<Value, String> {
+    run_blocking(state, project_list).await
 }
 
-#[tauri::command]
-fn list_projects(state: State<AppState>) -> Result<Value, String> {
+fn project_list(state: &AppState) -> Result<Value, String> {
     let conn = state.db.blocking_lock();
     let mut stmt = conn
         .prepare(
@@ -467,69 +500,75 @@ fn list_projects(state: State<AppState>) -> Result<Value, String> {
 }
 
 #[tauri::command]
-fn rename_project(state: State<AppState>, project_id: String, custom_name: Option<String>) -> Result<Value, String> {
-    {
-        let conn = state.db.blocking_lock();
-        let provider_id: String = conn
-            .query_row("SELECT provider_id FROM projects WHERE id = ?1", params![project_id], |r| r.get(0))
-            .map_err(|_| "Project not found")?;
-        let now = now();
-        if let Some(name) = custom_name.as_deref().filter(|s| !s.trim().is_empty()) {
-            conn.execute(
-                "INSERT INTO project_management (id, provider_id, custom_name, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?4)
-                 ON CONFLICT(id) DO UPDATE SET custom_name = excluded.custom_name, updated_at = excluded.updated_at",
-                params![project_id, provider_id, name.trim(), now],
-            )
-            .map_err(to_string)?;
-        } else {
-            conn.execute(
-                "UPDATE project_management SET custom_name = NULL, updated_at = ?1 WHERE id = ?2",
-                params![now, project_id],
-            )
-            .map_err(to_string)?;
+async fn rename_project(state: State<'_, AppState>, project_id: String, custom_name: Option<String>) -> Result<Value, String> {
+    run_blocking(state, move |state| {
+        {
+            let conn = state.db.blocking_lock();
+            let provider_id: String = conn
+                .query_row("SELECT provider_id FROM projects WHERE id = ?1", params![project_id], |r| r.get(0))
+                .map_err(|_| "Project not found")?;
+            let now = now();
+            if let Some(name) = custom_name.as_deref().filter(|s| !s.trim().is_empty()) {
+                conn.execute(
+                    "INSERT INTO project_management (id, provider_id, custom_name, created_at, updated_at)
+                     VALUES (?1, ?2, ?3, ?4, ?4)
+                     ON CONFLICT(id) DO UPDATE SET custom_name = excluded.custom_name, updated_at = excluded.updated_at",
+                    params![project_id, provider_id, name.trim(), now],
+                )
+                .map_err(to_string)?;
+            } else {
+                conn.execute(
+                    "UPDATE project_management SET custom_name = NULL, updated_at = ?1 WHERE id = ?2",
+                    params![now, project_id],
+                )
+                .map_err(to_string)?;
+            }
+            // Apply the new name to the projects table so existing queries see it immediately.
+            apply_project_management(&conn).map_err(to_string)?;
         }
-        // Apply the new name to the projects table so existing queries see it immediately.
-        apply_project_management(&conn).map_err(to_string)?;
-    }
-    list_projects(state)
+        project_list(state)
+    })
+    .await
 }
 
 #[tauri::command]
-fn merge_projects(state: State<AppState>, target_project_id: String, source_project_ids: Vec<String>) -> Result<Value, String> {
-    {
-        let mut conn = state.db.blocking_lock();
-        let tx = conn.transaction().map_err(to_string)?;
-        validate_merge_target(&tx, &target_project_id)?;
-        let target_provider: String = tx
-            .query_row("SELECT provider_id FROM projects WHERE id = ?1", params![&target_project_id], |r| r.get(0))
-            .map_err(|_| "Target project not found".to_string())?;
-        let now = now();
-        for source_id in &source_project_ids {
-            if source_id == &target_project_id {
-                return Err("Cannot merge a project into itself.".to_string());
+async fn merge_projects(state: State<'_, AppState>, target_project_id: String, source_project_ids: Vec<String>) -> Result<Value, String> {
+    run_blocking(state, move |state| {
+        {
+            let mut conn = state.db.blocking_lock();
+            let tx = conn.transaction().map_err(to_string)?;
+            validate_merge_target(&tx, &target_project_id)?;
+            let target_provider: String = tx
+                .query_row("SELECT provider_id FROM projects WHERE id = ?1", params![&target_project_id], |r| r.get(0))
+                .map_err(|_| "Target project not found".to_string())?;
+            let now = now();
+            for source_id in &source_project_ids {
+                if source_id == &target_project_id {
+                    return Err("Cannot merge a project into itself.".to_string());
+                }
+                let source_provider: String = tx
+                    .query_row("SELECT provider_id FROM projects WHERE id = ?1", params![source_id], |r| r.get(0))
+                    .map_err(|_| format!("Source project {} not found", source_id))?;
+                if source_provider != target_provider {
+                    return Err(format!(
+                        "Project {} belongs to a different provider than the target project.",
+                        source_id
+                    ));
+                }
+                tx.execute(
+                    "INSERT INTO project_management (id, provider_id, merged_into_project_id, created_at, updated_at)
+                     VALUES (?1, ?2, ?3, ?4, ?4)
+                     ON CONFLICT(id) DO UPDATE SET merged_into_project_id = excluded.merged_into_project_id, updated_at = excluded.updated_at",
+                    params![source_id, source_provider, target_project_id, now],
+                )
+                .map_err(to_string)?;
             }
-            let source_provider: String = tx
-                .query_row("SELECT provider_id FROM projects WHERE id = ?1", params![source_id], |r| r.get(0))
-                .map_err(|_| format!("Source project {} not found", source_id))?;
-            if source_provider != target_provider {
-                return Err(format!(
-                    "Project {} belongs to a different provider than the target project.",
-                    source_id
-                ));
-            }
-            tx.execute(
-                "INSERT INTO project_management (id, provider_id, merged_into_project_id, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?4)
-                 ON CONFLICT(id) DO UPDATE SET merged_into_project_id = excluded.merged_into_project_id, updated_at = excluded.updated_at",
-                params![source_id, source_provider, target_project_id, now],
-            )
-            .map_err(to_string)?;
+            apply_project_management(&tx).map_err(to_string)?;
+            tx.commit().map_err(to_string)?;
         }
-        apply_project_management(&tx).map_err(to_string)?;
-        tx.commit().map_err(to_string)?;
-    }
-    list_projects(state)
+        project_list(state)
+    })
+    .await
 }
 
 fn validate_merge_target(conn: &Connection, target_id: &str) -> Result<(), String> {
@@ -548,53 +587,59 @@ fn validate_merge_target(conn: &Connection, target_id: &str) -> Result<(), Strin
 }
 
 #[tauri::command]
-fn unmerge_project(state: State<AppState>, project_id: String) -> Result<Value, String> {
-    {
-        let mut conn = state.db.blocking_lock();
-        let tx = conn.transaction().map_err(to_string)?;
-        let target_id: Option<String> = tx
-            .query_row(
-                "SELECT merged_into_project_id FROM project_management WHERE id = ?1",
-                params![&project_id],
-                |r| r.get(0),
+async fn unmerge_project(state: State<'_, AppState>, project_id: String) -> Result<Value, String> {
+    run_blocking(state, move |state| {
+        {
+            let mut conn = state.db.blocking_lock();
+            let tx = conn.transaction().map_err(to_string)?;
+            let target_id: Option<String> = tx
+                .query_row(
+                    "SELECT merged_into_project_id FROM project_management WHERE id = ?1",
+                    params![&project_id],
+                    |r| r.get(0),
+                )
+                .optional()
+                .map_err(to_string)?;
+            tx.execute(
+                "UPDATE project_management SET merged_into_project_id = NULL, updated_at = ?1 WHERE id = ?2",
+                params![now(), project_id],
             )
-            .optional()
             .map_err(to_string)?;
-        tx.execute(
-            "UPDATE project_management SET merged_into_project_id = NULL, updated_at = ?1 WHERE id = ?2",
-            params![now(), project_id],
-        )
-        .map_err(to_string)?;
-        // Restore events and conversations that were moved from this source project back to it.
-        tx.execute(
-            "UPDATE usage_events SET project_id = ?1, merged_from_project_id = NULL WHERE merged_from_project_id = ?1",
-            params![&project_id],
-        )
-        .map_err(to_string)?;
-        tx.execute(
-            "UPDATE conversations SET project_id = ?1, merged_from_project_id = NULL WHERE merged_from_project_id = ?1",
-            params![&project_id],
-        )
-        .map_err(to_string)?;
-        // Ensure the source project row is restored if it was previously deleted.
-        if let Some(target_id) = target_id {
-            let _ = tx.execute(
-                "INSERT OR IGNORE INTO projects (id, provider_id, display_name, path, normalized_path_hash, first_seen_at, last_seen_at, created_at, updated_at)
-                 SELECT ?1, provider_id, display_name, path, normalized_path_hash, first_seen_at, last_seen_at, created_at, updated_at
-                 FROM projects WHERE id = ?2",
-                params![&project_id, target_id],
-            );
+            // Restore events and conversations that were moved from this source project back to it.
+            tx.execute(
+                "UPDATE usage_events SET project_id = ?1, merged_from_project_id = NULL WHERE merged_from_project_id = ?1",
+                params![&project_id],
+            )
+            .map_err(to_string)?;
+            tx.execute(
+                "UPDATE conversations SET project_id = ?1, merged_from_project_id = NULL WHERE merged_from_project_id = ?1",
+                params![&project_id],
+            )
+            .map_err(to_string)?;
+            // Ensure the source project row is restored if it was previously deleted.
+            if let Some(target_id) = target_id {
+                let _ = tx.execute(
+                    "INSERT OR IGNORE INTO projects (id, provider_id, display_name, path, normalized_path_hash, first_seen_at, last_seen_at, created_at, updated_at)
+                     SELECT ?1, provider_id, display_name, path, normalized_path_hash, first_seen_at, last_seen_at, created_at, updated_at
+                     FROM projects WHERE id = ?2",
+                    params![&project_id, target_id],
+                );
+            }
+            apply_project_management(&tx).map_err(to_string)?;
+            tx.commit().map_err(to_string)?;
         }
-        apply_project_management(&tx).map_err(to_string)?;
-        tx.commit().map_err(to_string)?;
-    }
-    list_projects(state)
+        project_list(state)
+    })
+    .await
 }
 
 #[tauri::command]
-fn open_project_path(state: State<AppState>, path: String) -> Result<(), String> {
-    let canonical = validate_project_path(&path, &state)?;
-    opener::open(&canonical).map_err(|e| format!("Failed to open folder: {}", e))
+async fn open_project_path(state: State<'_, AppState>, path: String) -> Result<(), String> {
+    run_blocking(state, move |state| {
+        let canonical = validate_project_path(&path, state)?;
+        opener::open(&canonical).map_err(|e| format!("Failed to open folder: {}", e))
+    })
+    .await
 }
 
 fn validate_project_path(path: &str, state: &AppState) -> Result<PathBuf, String> {
@@ -668,51 +713,57 @@ async fn rescan_all_full(state: State<'_, AppState>) -> Result<Value, String> {
 }
 
 #[tauri::command]
-fn rescan_source(state: State<AppState>, source_id: String) -> Result<Value, String> {
-    let conn = state.db.blocking_lock();
-    let source = query_source(&conn, &source_id)?;
-    let imported = scan_source(&conn, &source, false)?;
-    Ok(serde_json::json!({ "imported": imported }))
+async fn rescan_source(state: State<'_, AppState>, source_id: String) -> Result<Value, String> {
+    run_blocking(state, move |state| {
+        let conn = state.db.blocking_lock();
+        let source = query_source(&conn, &source_id)?;
+        let imported = scan_source(&conn, &source, false)?;
+        Ok(serde_json::json!({ "imported": imported }))
+    })
+    .await
 }
 
 #[tauri::command]
-fn get_dashboard_summary(state: State<AppState>) -> Result<DashboardSummary, String> {
-    let conn = state.db.blocking_lock();
-    let mut providers = query_provider_summaries(&conn)?;
-    let top_projects = query_top_projects(&conn)?;
-    let (recent_sessions, _) = query_recent_sessions(&conn, None, 0, 30)?;
+async fn get_dashboard_summary(state: State<'_, AppState>) -> Result<DashboardSummary, String> {
+    run_blocking(state, move |state| {
+        let conn = state.db.blocking_lock();
+        let mut providers = query_provider_summaries(&conn)?;
+        let top_projects = query_top_projects(&conn)?;
+        let (recent_sessions, _) = query_recent_sessions(&conn, None, 0, 30)?;
 
-    let today = Local::now().date_naive();
-    let month_start = NaiveDate::from_ymd_opt(today.year(), today.month(), 1)
-        .unwrap_or(today);
-    let sub_costs = subscription_cost_for_period(&conn, month_start, today, None)?;
+        let today = Local::now().date_naive();
+        let month_start = NaiveDate::from_ymd_opt(today.year(), today.month(), 1)
+            .unwrap_or(today);
+        let sub_costs = subscription_cost_for_period(&conn, month_start, today, None)?;
 
-    let mut subscriptions_total = 0.0;
-    let mut api_equivalent_total = 0.0;
-    for provider in &mut providers {
-        let sub = sub_costs.by_provider.get(&provider.provider_id).copied().unwrap_or(0.0);
-        provider.subscription_amount = sub;
-        provider.net_savings_vs_api = provider.api_equivalent_cost - sub;
-        subscriptions_total += sub;
-        api_equivalent_total += provider.api_equivalent_cost;
-    }
+        let mut subscriptions_total = 0.0;
+        let mut api_equivalent_total = 0.0;
+        for provider in &mut providers {
+            let sub = sub_costs.by_provider.get(&provider.provider_id).copied().unwrap_or(0.0);
+            provider.subscription_amount = sub;
+            provider.net_savings_vs_api = provider.api_equivalent_cost - sub;
+            subscriptions_total += sub;
+            api_equivalent_total += provider.api_equivalent_cost;
+        }
 
-    let totals = sum_usage(&providers);
-    let break_even_progress = if subscriptions_total > 0.0 {
-        Some(api_equivalent_total / subscriptions_total)
-    } else {
-        None
-    };
-    Ok(DashboardSummary {
-        providers,
-        totals,
-        subscriptions_total,
-        api_equivalent_total,
-        net_savings_vs_api: api_equivalent_total - subscriptions_total,
-        break_even_progress,
-        top_projects,
-        recent_sessions,
+        let totals = sum_usage(&providers);
+        let break_even_progress = if subscriptions_total > 0.0 {
+            Some(api_equivalent_total / subscriptions_total)
+        } else {
+            None
+        };
+        Ok(DashboardSummary {
+            providers,
+            totals,
+            subscriptions_total,
+            api_equivalent_total,
+            net_savings_vs_api: api_equivalent_total - subscriptions_total,
+            break_even_progress,
+            top_projects,
+            recent_sessions,
+        })
     })
+    .await
 }
 
 #[derive(Debug, Serialize)]
@@ -722,44 +773,50 @@ struct RecentSessionsResult {
 }
 
 #[tauri::command]
-fn get_recent_sessions(
-    state: State<AppState>,
+async fn get_recent_sessions(
+    state: State<'_, AppState>,
     provider_id: Option<String>,
     offset: usize,
     limit: usize,
 ) -> Result<RecentSessionsResult, String> {
-    let conn = state.db.blocking_lock();
-    let (sessions, total_count) = query_recent_sessions(&conn, provider_id.as_deref(), offset, limit)?;
-    Ok(RecentSessionsResult { sessions, total_count })
+    run_blocking(state, move |state| {
+        let conn = state.db.blocking_lock();
+        let (sessions, total_count) = query_recent_sessions(&conn, provider_id.as_deref(), offset, limit)?;
+        Ok(RecentSessionsResult { sessions, total_count })
+    })
+    .await
 }
 
 #[tauri::command]
-fn list_subscriptions(state: State<AppState>) -> Result<Vec<Subscription>, String> {
-    let conn = state.db.blocking_lock();
-    let mut stmt = conn
-        .prepare(
-            "SELECT id, provider_id, product_name, monthly_amount, currency, billing_anchor_day, enabled,
-             start_date, end_date, autorenew
-             FROM subscriptions ORDER BY provider_id, product_name, start_date",
-        )
-        .map_err(to_string)?;
-    let rows = stmt
-        .query_map([], |r| {
-            Ok(Subscription {
-                id: r.get(0)?,
-                provider_id: r.get(1)?,
-                product_name: r.get(2)?,
-                monthly_amount: r.get(3)?,
-                currency: r.get(4)?,
-                billing_anchor_day: r.get(5)?,
-                enabled: r.get::<_, i64>(6)? == 1,
-                start_date: r.get(7)?,
-                end_date: r.get(8)?,
-                autorenew: r.get::<_, i64>(9)? == 1,
+async fn list_subscriptions(state: State<'_, AppState>) -> Result<Vec<Subscription>, String> {
+    run_blocking(state, move |state| {
+        let conn = state.db.blocking_lock();
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, provider_id, product_name, monthly_amount, currency, billing_anchor_day, enabled,
+                 start_date, end_date, autorenew
+                 FROM subscriptions ORDER BY provider_id, product_name, start_date",
+            )
+            .map_err(to_string)?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok(Subscription {
+                    id: r.get(0)?,
+                    provider_id: r.get(1)?,
+                    product_name: r.get(2)?,
+                    monthly_amount: r.get(3)?,
+                    currency: r.get(4)?,
+                    billing_anchor_day: r.get(5)?,
+                    enabled: r.get::<_, i64>(6)? == 1,
+                    start_date: r.get(7)?,
+                    end_date: r.get(8)?,
+                    autorenew: r.get::<_, i64>(9)? == 1,
+                })
             })
-        })
-        .map_err(to_string)?;
-    rows.collect::<Result<Vec<_>, _>>().map_err(to_string)
+            .map_err(to_string)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(to_string)
+    })
+    .await
 }
 
 fn parse_subscription_date(value: &str) -> Result<NaiveDate, String> {
@@ -835,125 +892,134 @@ fn row_to_subscription(r: &rusqlite::Row) -> Result<Subscription, rusqlite::Erro
 }
 
 #[tauri::command]
-fn create_subscription(
-    state: State<AppState>,
+async fn create_subscription(
+    state: State<'_, AppState>,
     input: SubscriptionInput,
 ) -> Result<Subscription, String> {
-    let (start, end) = validate_subscription_input(&input)?;
-    let conn = state.db.blocking_lock();
-    ensure_provider(
-        &conn,
-        &input.provider_id,
-        provider_display_name(&input.provider_id),
-    )
-    .map_err(to_string)?;
-    if subscription_overlaps(
-        &conn,
-        &input.provider_id,
-        &input.product_name,
-        start,
-        end,
-        None,
-    )? {
-        return Err(
-            "A subscription for this provider and account already overlaps the selected dates."
-                .to_string(),
-        );
-    }
-    let id = Uuid::new_v4().to_string();
-    let now = now();
-    conn.execute(
-        "INSERT INTO subscriptions
-        (id, provider_id, product_name, monthly_amount, currency, billing_anchor_day, billing_anchor_time,
-         start_date, end_date, autorenew, enabled, created_at, updated_at)
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6, '00:00:00', ?7, ?8, ?9, 1, ?10, ?10)",
-        params![
-            id,
-            input.provider_id,
-            input.product_name,
-            input.monthly_amount,
-            input.currency,
-            input.billing_anchor_day,
-            input.start_date,
-            input.end_date,
-            if input.autorenew { 1 } else { 0 },
-            now
-        ],
-    )
-    .map_err(to_string)?;
-    conn.query_row(
-        "SELECT id, provider_id, product_name, monthly_amount, currency, billing_anchor_day, enabled,
-         start_date, end_date, autorenew
-         FROM subscriptions WHERE id = ?1",
-        params![id],
-        row_to_subscription,
-    )
-    .map_err(to_string)
+    run_blocking(state, move |state| {
+        let (start, end) = validate_subscription_input(&input)?;
+        let conn = state.db.blocking_lock();
+        ensure_provider(
+            &conn,
+            &input.provider_id,
+            provider_display_name(&input.provider_id),
+        )
+        .map_err(to_string)?;
+        if subscription_overlaps(
+            &conn,
+            &input.provider_id,
+            &input.product_name,
+            start,
+            end,
+            None,
+        )? {
+            return Err(
+                "A subscription for this provider and account already overlaps the selected dates."
+                    .to_string(),
+            );
+        }
+        let id = Uuid::new_v4().to_string();
+        let now = now();
+        conn.execute(
+            "INSERT INTO subscriptions
+            (id, provider_id, product_name, monthly_amount, currency, billing_anchor_day, billing_anchor_time,
+             start_date, end_date, autorenew, enabled, created_at, updated_at)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, '00:00:00', ?7, ?8, ?9, 1, ?10, ?10)",
+            params![
+                id,
+                input.provider_id,
+                input.product_name,
+                input.monthly_amount,
+                input.currency,
+                input.billing_anchor_day,
+                input.start_date,
+                input.end_date,
+                if input.autorenew { 1 } else { 0 },
+                now
+            ],
+        )
+        .map_err(to_string)?;
+        conn.query_row(
+            "SELECT id, provider_id, product_name, monthly_amount, currency, billing_anchor_day, enabled,
+             start_date, end_date, autorenew
+             FROM subscriptions WHERE id = ?1",
+            params![id],
+            row_to_subscription,
+        )
+        .map_err(to_string)
+    })
+    .await
 }
 
 #[tauri::command]
-fn update_subscription(
-    state: State<AppState>,
+async fn update_subscription(
+    state: State<'_, AppState>,
     id: String,
     input: SubscriptionInput,
 ) -> Result<Subscription, String> {
-    let (start, end) = validate_subscription_input(&input)?;
-    let conn = state.db.blocking_lock();
-    ensure_provider(
-        &conn,
-        &input.provider_id,
-        provider_display_name(&input.provider_id),
-    )
-    .map_err(to_string)?;
-    if subscription_overlaps(
-        &conn,
-        &input.provider_id,
-        &input.product_name,
-        start,
-        end,
-        Some(&id),
-    )? {
-        return Err(
-            "A subscription for this provider and account already overlaps the selected dates."
-                .to_string(),
-        );
-    }
-    conn.execute(
-        "UPDATE subscriptions SET
-         provider_id = ?1, product_name = ?2, monthly_amount = ?3, currency = ?4,
-         billing_anchor_day = ?5, start_date = ?6, end_date = ?7, autorenew = ?8,
-         updated_at = ?9
-         WHERE id = ?10",
-        params![
-            input.provider_id,
-            input.product_name,
-            input.monthly_amount,
-            input.currency,
-            input.billing_anchor_day,
-            input.start_date,
-            input.end_date,
-            if input.autorenew { 1 } else { 0 },
-            now(),
-            id
-        ],
-    )
-    .map_err(to_string)?;
-    conn.query_row(
-        "SELECT id, provider_id, product_name, monthly_amount, currency, billing_anchor_day, enabled,
-         start_date, end_date, autorenew
-         FROM subscriptions WHERE id = ?1",
-        params![id],
-        row_to_subscription,
-    )
-    .map_err(to_string)
+    run_blocking(state, move |state| {
+        let (start, end) = validate_subscription_input(&input)?;
+        let conn = state.db.blocking_lock();
+        ensure_provider(
+            &conn,
+            &input.provider_id,
+            provider_display_name(&input.provider_id),
+        )
+        .map_err(to_string)?;
+        if subscription_overlaps(
+            &conn,
+            &input.provider_id,
+            &input.product_name,
+            start,
+            end,
+            Some(&id),
+        )? {
+            return Err(
+                "A subscription for this provider and account already overlaps the selected dates."
+                    .to_string(),
+            );
+        }
+        conn.execute(
+            "UPDATE subscriptions SET
+             provider_id = ?1, product_name = ?2, monthly_amount = ?3, currency = ?4,
+             billing_anchor_day = ?5, start_date = ?6, end_date = ?7, autorenew = ?8,
+             updated_at = ?9
+             WHERE id = ?10",
+            params![
+                input.provider_id,
+                input.product_name,
+                input.monthly_amount,
+                input.currency,
+                input.billing_anchor_day,
+                input.start_date,
+                input.end_date,
+                if input.autorenew { 1 } else { 0 },
+                now(),
+                id
+            ],
+        )
+        .map_err(to_string)?;
+        conn.query_row(
+            "SELECT id, provider_id, product_name, monthly_amount, currency, billing_anchor_day, enabled,
+             start_date, end_date, autorenew
+             FROM subscriptions WHERE id = ?1",
+            params![id],
+            row_to_subscription,
+        )
+        .map_err(to_string)
+    })
+    .await
 }
 
 #[tauri::command]
-fn delete_subscription(state: State<AppState>, id: String) -> Result<(), String> {
-    let conn = state.db.blocking_lock();
-    conn.execute("DELETE FROM subscriptions WHERE id = ?1", params![id])
-        .map_err(to_string)?;
-    Ok(())
+async fn delete_subscription(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    run_blocking(state, move |state| {
+        let conn = state.db.blocking_lock();
+        conn.execute("DELETE FROM subscriptions WHERE id = ?1", params![id])
+            .map_err(to_string)?;
+        Ok(())
+    })
+    .await
 }
 
 fn ensure_subscription_renewals(conn: &Connection) -> rusqlite::Result<()> {
@@ -1107,37 +1173,40 @@ fn subscription_cost_for_period(
 }
 
 #[tauri::command]
-fn list_pricing_catalog(state: State<AppState>) -> Result<Vec<Value>, String> {
-    let conn = state.db.blocking_lock();
-    let mut stmt = conn
-        .prepare(
-            "SELECT id, provider_id, model, aliases_json, input_per_1m, output_per_1m,
-             cached_input_per_1m, cache_write_per_1m, cache_read_per_1m, source_url
-             FROM pricing_catalogs
-             WHERE input_per_1m IS NOT NULL OR output_per_1m IS NOT NULL
-                OR cached_input_per_1m IS NOT NULL OR cache_write_per_1m IS NOT NULL
-                OR cache_read_per_1m IS NOT NULL OR reasoning_per_1m IS NOT NULL
-                OR tool_per_1m IS NOT NULL OR user_override = 1
-             ORDER BY provider_id, model",
-        )
-        .map_err(to_string)?;
-    let rows = stmt
-        .query_map([], |r| {
-            Ok(serde_json::json!({
-                "id": r.get::<_, String>(0)?,
-                "provider_id": r.get::<_, String>(1)?,
-                "model": r.get::<_, String>(2)?,
-                "aliases": serde_json::from_str::<Value>(&r.get::<_, String>(3)?).unwrap_or(Value::Array(vec![])),
-                "input_per_1m": r.get::<_, Option<f64>>(4)?,
-                "output_per_1m": r.get::<_, Option<f64>>(5)?,
-                "cached_input_per_1m": r.get::<_, Option<f64>>(6)?,
-                "cache_write_per_1m": r.get::<_, Option<f64>>(7)?,
-                "cache_read_per_1m": r.get::<_, Option<f64>>(8)?,
-                "source_url": r.get::<_, Option<String>>(9)?
-            }))
-        })
-        .map_err(to_string)?;
-    rows.collect::<Result<Vec<_>, _>>().map_err(to_string)
+async fn list_pricing_catalog(state: State<'_, AppState>) -> Result<Vec<Value>, String> {
+    run_blocking(state, move |state| {
+        let conn = state.db.blocking_lock();
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, provider_id, model, aliases_json, input_per_1m, output_per_1m,
+                 cached_input_per_1m, cache_write_per_1m, cache_read_per_1m, source_url
+                 FROM pricing_catalogs
+                 WHERE input_per_1m IS NOT NULL OR output_per_1m IS NOT NULL
+                    OR cached_input_per_1m IS NOT NULL OR cache_write_per_1m IS NOT NULL
+                    OR cache_read_per_1m IS NOT NULL OR reasoning_per_1m IS NOT NULL
+                    OR tool_per_1m IS NOT NULL OR user_override = 1
+                 ORDER BY provider_id, model",
+            )
+            .map_err(to_string)?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok(serde_json::json!({
+                    "id": r.get::<_, String>(0)?,
+                    "provider_id": r.get::<_, String>(1)?,
+                    "model": r.get::<_, String>(2)?,
+                    "aliases": serde_json::from_str::<Value>(&r.get::<_, String>(3)?).unwrap_or(Value::Array(vec![])),
+                    "input_per_1m": r.get::<_, Option<f64>>(4)?,
+                    "output_per_1m": r.get::<_, Option<f64>>(5)?,
+                    "cached_input_per_1m": r.get::<_, Option<f64>>(6)?,
+                    "cache_write_per_1m": r.get::<_, Option<f64>>(7)?,
+                    "cache_read_per_1m": r.get::<_, Option<f64>>(8)?,
+                    "source_url": r.get::<_, Option<String>>(9)?
+                }))
+            })
+            .map_err(to_string)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(to_string)
+    })
+    .await
 }
 
 #[derive(Debug, Deserialize)]
@@ -1202,36 +1271,39 @@ async fn add_pricing(state: State<'_, AppState>, input: AddPricingInput) -> Resu
 }
 
 #[tauri::command]
-fn list_missing_models(state: State<AppState>) -> Result<Vec<Value>, String> {
-    let conn = state.db.blocking_lock();
-    let mut stmt = conn
-        .prepare(
-            "SELECT u.provider_id, u.model, COUNT(*) as event_count
-             FROM usage_events u
-             WHERE u.model IS NOT NULL AND u.model != ''
-               AND NOT EXISTS (
-                 SELECT 1 FROM pricing_catalogs p
-                 WHERE p.provider_id = u.provider_id
-                   AND (lower(p.model) = lower(u.model)
-                        OR EXISTS (
-                          SELECT 1 FROM json_each(p.aliases_json)
-                          WHERE lower(json_each.value) = lower(u.model)
-                        ))
-               )
-             GROUP BY u.provider_id, u.model
-             ORDER BY event_count DESC",
-        )
-        .map_err(to_string)?;
-    let rows = stmt
-        .query_map([], |r| {
-            Ok(serde_json::json!({
-                "provider_id": r.get::<_, String>(0)?,
-                "model": r.get::<_, String>(1)?,
-                "event_count": r.get::<_, i64>(2)?,
-            }))
-        })
-        .map_err(to_string)?;
-    rows.collect::<Result<Vec<_>, _>>().map_err(to_string)
+async fn list_missing_models(state: State<'_, AppState>) -> Result<Vec<Value>, String> {
+    run_blocking(state, move |state| {
+        let conn = state.db.blocking_lock();
+        let mut stmt = conn
+            .prepare(
+                "SELECT u.provider_id, u.model, COUNT(*) as event_count
+                 FROM usage_events u
+                 WHERE u.model IS NOT NULL AND u.model != ''
+                   AND NOT EXISTS (
+                     SELECT 1 FROM pricing_catalogs p
+                     WHERE p.provider_id = u.provider_id
+                       AND (lower(p.model) = lower(u.model)
+                            OR EXISTS (
+                              SELECT 1 FROM json_each(p.aliases_json)
+                              WHERE lower(json_each.value) = lower(u.model)
+                            ))
+                   )
+                 GROUP BY u.provider_id, u.model
+                 ORDER BY event_count DESC",
+            )
+            .map_err(to_string)?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok(serde_json::json!({
+                    "provider_id": r.get::<_, String>(0)?,
+                    "model": r.get::<_, String>(1)?,
+                    "event_count": r.get::<_, i64>(2)?,
+                }))
+            })
+            .map_err(to_string)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(to_string)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -1536,48 +1608,57 @@ fn get_sync_config(conn: &Connection) -> Result<SyncStatus, String> {
 }
 
 #[tauri::command]
-fn configure_sync_server(state: State<AppState>, server_url: String) -> Result<SyncStatus, String> {
-    let (validated, warning) = validate_server_url(&server_url)?;
-    let conn = state.db.blocking_lock();
-    ensure_sync_config(&conn)?;
-    let now = now();
-    conn.execute(
-        "UPDATE sync_config SET server_url = ?1, updated_at = ?2 WHERE id = 1",
-        params![validated, now],
-    )
-    .map_err(to_string)?;
-    if let Some(warning) = warning {
-        eprintln!("[configure_sync_server] {}", warning);
-    }
-    get_sync_config(&conn)
-}
-
-#[tauri::command]
-fn get_project_root(state: State<AppState>) -> Result<Option<String>, String> {
-    let conn = state.db.blocking_lock();
-    ensure_sync_config(&conn)?;
-    let root: Option<String> = conn
-        .query_row(
-            "SELECT project_root FROM sync_config WHERE id = 1",
-            [],
-            |r| r.get(0),
+async fn configure_sync_server(state: State<'_, AppState>, server_url: String) -> Result<SyncStatus, String> {
+    run_blocking(state, move |state| {
+        let (validated, warning) = validate_server_url(&server_url)?;
+        let conn = state.db.blocking_lock();
+        ensure_sync_config(&conn)?;
+        let now = now();
+        conn.execute(
+            "UPDATE sync_config SET server_url = ?1, updated_at = ?2 WHERE id = 1",
+            params![validated, now],
         )
         .map_err(to_string)?;
-    Ok(root)
+        if let Some(warning) = warning {
+            eprintln!("[configure_sync_server] {}", warning);
+        }
+        get_sync_config(&conn)
+    })
+    .await
 }
 
 #[tauri::command]
-fn set_project_root(state: State<AppState>, project_root: Option<String>) -> Result<SyncStatus, String> {
-    let conn = state.db.blocking_lock();
-    ensure_sync_config(&conn)?;
-    let now = now();
-    let value = project_root.as_deref().unwrap_or("");
-    conn.execute(
-        "UPDATE sync_config SET project_root = ?1, updated_at = ?2 WHERE id = 1",
-        params![value, now],
-    )
-    .map_err(to_string)?;
-    get_sync_config(&conn)
+async fn get_project_root(state: State<'_, AppState>) -> Result<Option<String>, String> {
+    run_blocking(state, move |state| {
+        let conn = state.db.blocking_lock();
+        ensure_sync_config(&conn)?;
+        let root: Option<String> = conn
+            .query_row(
+                "SELECT project_root FROM sync_config WHERE id = 1",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(to_string)?;
+        Ok(root)
+    })
+    .await
+}
+
+#[tauri::command]
+async fn set_project_root(state: State<'_, AppState>, project_root: Option<String>) -> Result<SyncStatus, String> {
+    run_blocking(state, move |state| {
+        let conn = state.db.blocking_lock();
+        ensure_sync_config(&conn)?;
+        let now = now();
+        let value = project_root.as_deref().unwrap_or("");
+        conn.execute(
+            "UPDATE sync_config SET project_root = ?1, updated_at = ?2 WHERE id = 1",
+            params![value, now],
+        )
+        .map_err(to_string)?;
+        get_sync_config(&conn)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -1721,43 +1802,49 @@ async fn login_sync(state: State<'_, AppState>, input: LoginInput) -> Result<Syn
 }
 
 #[tauri::command]
-fn logout_sync(state: State<AppState>) -> Result<SyncStatus, String> {
-    let conn = state.db.blocking_lock();
-    ensure_sync_config(&conn)?;
+async fn logout_sync(state: State<'_, AppState>) -> Result<SyncStatus, String> {
+    run_blocking(state, move |state| {
+        let conn = state.db.blocking_lock();
+        ensure_sync_config(&conn)?;
 
-    let server_url: String = conn
-        .query_row(
-            "SELECT server_url FROM sync_config WHERE id = 1",
-            [],
-            |r| r.get(0),
+        let server_url: String = conn
+            .query_row(
+                "SELECT server_url FROM sync_config WHERE id = 1",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(to_string)?;
+        if let Some(token) = get_sync_token(&conn)? {
+            let _ = reqwest::blocking::Client::new()
+                .post(format!(
+                    "{}/api/v1/auth/logout",
+                    server_url.trim_end_matches('/')
+                ))
+                .header("Authorization", format!("Bearer {}", token))
+                .header("Accept", "application/json")
+                .send();
+        }
+
+        delete_sync_token(&conn)?;
+        let now = now();
+        conn.execute(
+            "UPDATE sync_config SET auth_token = NULL, username = NULL, user_id = NULL, last_sync_at = NULL, sync_enabled = 0, updated_at = ?1 WHERE id = 1",
+            params![now],
         )
         .map_err(to_string)?;
-    if let Some(token) = get_sync_token(&conn)? {
-        let _ = reqwest::blocking::Client::new()
-            .post(format!(
-                "{}/api/v1/auth/logout",
-                server_url.trim_end_matches('/')
-            ))
-            .header("Authorization", format!("Bearer {}", token))
-            .header("Accept", "application/json")
-            .send();
-    }
 
-    delete_sync_token(&conn)?;
-    let now = now();
-    conn.execute(
-        "UPDATE sync_config SET auth_token = NULL, username = NULL, user_id = NULL, last_sync_at = NULL, sync_enabled = 0, updated_at = ?1 WHERE id = 1",
-        params![now],
-    )
-    .map_err(to_string)?;
-
-    get_sync_config(&conn)
+        get_sync_config(&conn)
+    })
+    .await
 }
 
 #[tauri::command]
-fn get_sync_status(state: State<AppState>) -> Result<SyncStatus, String> {
-    let conn = state.db.blocking_lock();
-    get_sync_config(&conn)
+async fn get_sync_status(state: State<'_, AppState>) -> Result<SyncStatus, String> {
+    run_blocking(state, move |state| {
+        let conn = state.db.blocking_lock();
+        get_sync_config(&conn)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -2188,81 +2275,84 @@ where
 }
 
 #[tauri::command]
-fn debug_sync_state(state: State<AppState>) -> Result<Value, String> {
-    let conn = state.db.blocking_lock();
+async fn debug_sync_state(state: State<'_, AppState>) -> Result<Value, String> {
+    run_blocking(state, move |state| {
+        let conn = state.db.blocking_lock();
 
-    let pending: i64 = conn
-        .query_row("SELECT COUNT(*) FROM usage_events WHERE synced_at IS NULL", [], |r| r.get(0))
-        .unwrap_or(0);
+        let pending: i64 = conn
+            .query_row("SELECT COUNT(*) FROM usage_events WHERE synced_at IS NULL", [], |r| r.get(0))
+            .unwrap_or(0);
 
-    let with_error: i64 = conn
-        .query_row("SELECT COUNT(*) FROM usage_events WHERE synced_at IS NULL AND sync_error IS NOT NULL", [], |r| r.get(0))
-        .unwrap_or(0);
+        let with_error: i64 = conn
+            .query_row("SELECT COUNT(*) FROM usage_events WHERE synced_at IS NULL AND sync_error IS NOT NULL", [], |r| r.get(0))
+            .unwrap_or(0);
 
-    let total_events: i64 = conn
-        .query_row("SELECT COUNT(*) FROM usage_events", [], |r| r.get(0))
-        .unwrap_or(0);
+        let total_events: i64 = conn
+            .query_row("SELECT COUNT(*) FROM usage_events", [], |r| r.get(0))
+            .unwrap_or(0);
 
-    let mut stmt = conn
-        .prepare(
-            "SELECT id, provider_id, timestamp, model, source_file_path, sync_error
-             FROM usage_events
-             WHERE synced_at IS NULL
-             ORDER BY timestamp DESC
-             LIMIT 10",
-        )
-        .map_err(to_string)?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, provider_id, timestamp, model, source_file_path, sync_error
+                 FROM usage_events
+                 WHERE synced_at IS NULL
+                 ORDER BY timestamp DESC
+                 LIMIT 10",
+            )
+            .map_err(to_string)?;
 
-    let sample_events: Vec<Value> = stmt
-        .query_map([], |r| {
-            let source_file_path: Option<String> = r.get(4)?;
-            let redacted_path = source_file_path.as_deref().map(|p| {
-                Path::new(p)
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("<redacted>")
-                    .to_string()
-            });
-            Ok(serde_json::json!({
-                "id": r.get::<_, String>(0)?,
-                "provider_id": r.get::<_, String>(1)?,
-                "timestamp": r.get::<_, String>(2)?,
-                "model": r.get::<_, Option<String>>(3)?,
-                "source_file_basename": redacted_path,
-                "sync_error": r.get::<_, Option<String>>(5)?,
-            }))
-        })
-        .map_err(to_string)?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(to_string)?;
-
-    let sync_config: Value = conn
-        .query_row(
-            "SELECT server_url, auth_token IS NOT NULL, username, last_sync_at, last_sync_error, sync_enabled, NULL, last_sync_attempt_at
-             FROM sync_config WHERE id = 1",
-            [],
-            |r| {
+        let sample_events: Vec<Value> = stmt
+            .query_map([], |r| {
+                let source_file_path: Option<String> = r.get(4)?;
+                let redacted_path = source_file_path.as_deref().map(|p| {
+                    Path::new(p)
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("<redacted>")
+                        .to_string()
+                });
                 Ok(serde_json::json!({
-                    "server_url": r.get::<_, String>(0)?,
-                    "logged_in": r.get::<_, i64>(1)? == 1,
-                    "username": r.get::<_, Option<String>>(2)?,
-                    "last_sync_at": r.get::<_, Option<String>>(3)?,
-                    "last_sync_error": r.get::<_, Option<String>>(4)?,
-                    "sync_enabled": r.get::<_, i64>(5)? == 1,
-                    "device_uuid": None::<Option<String>>,
-                    "last_sync_attempt_at": r.get::<_, Option<String>>(7)?,
+                    "id": r.get::<_, String>(0)?,
+                    "provider_id": r.get::<_, String>(1)?,
+                    "timestamp": r.get::<_, String>(2)?,
+                    "model": r.get::<_, Option<String>>(3)?,
+                    "source_file_basename": redacted_path,
+                    "sync_error": r.get::<_, Option<String>>(5)?,
                 }))
-            },
-        )
-        .unwrap_or_else(|_| serde_json::json!({"error": "sync_config not initialized"}));
+            })
+            .map_err(to_string)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(to_string)?;
 
-    Ok(serde_json::json!({
-        "pending_events": pending,
-        "events_with_sync_error": with_error,
-        "total_events": total_events,
-        "sample_pending_events": sample_events,
-        "sync_config": sync_config,
-    }))
+        let sync_config: Value = conn
+            .query_row(
+                "SELECT server_url, auth_token IS NOT NULL, username, last_sync_at, last_sync_error, sync_enabled, NULL, last_sync_attempt_at
+                 FROM sync_config WHERE id = 1",
+                [],
+                |r| {
+                    Ok(serde_json::json!({
+                        "server_url": r.get::<_, String>(0)?,
+                        "logged_in": r.get::<_, i64>(1)? == 1,
+                        "username": r.get::<_, Option<String>>(2)?,
+                        "last_sync_at": r.get::<_, Option<String>>(3)?,
+                        "last_sync_error": r.get::<_, Option<String>>(4)?,
+                        "sync_enabled": r.get::<_, i64>(5)? == 1,
+                        "device_uuid": None::<Option<String>>,
+                        "last_sync_attempt_at": r.get::<_, Option<String>>(7)?,
+                    }))
+                },
+            )
+            .unwrap_or_else(|_| serde_json::json!({"error": "sync_config not initialized"}));
+
+        Ok(serde_json::json!({
+            "pending_events": pending,
+            "events_with_sync_error": with_error,
+            "total_events": total_events,
+            "sample_pending_events": sample_events,
+            "sync_config": sync_config,
+        }))
+    })
+    .await
 }
 
 fn sync_subscriptions(
