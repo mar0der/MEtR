@@ -1274,36 +1274,43 @@ async fn add_pricing(state: State<'_, AppState>, input: AddPricingInput) -> Resu
 async fn list_missing_models(state: State<'_, AppState>) -> Result<Vec<Value>, String> {
     run_blocking(state, move |state| {
         let conn = state.db.blocking_lock();
-        let mut stmt = conn
-            .prepare(
-                "SELECT u.provider_id, u.model, COUNT(*) as event_count
-                 FROM usage_events u
-                 WHERE u.model IS NOT NULL AND u.model != ''
-                   AND NOT EXISTS (
-                     SELECT 1 FROM pricing_catalogs p
-                     WHERE p.provider_id = u.provider_id
-                       AND (lower(p.model) = lower(u.model)
-                            OR EXISTS (
-                              SELECT 1 FROM json_each(p.aliases_json)
-                              WHERE lower(json_each.value) = lower(u.model)
-                            ))
-                   )
-                 GROUP BY u.provider_id, u.model
-                 ORDER BY event_count DESC",
-            )
-            .map_err(to_string)?;
-        let rows = stmt
-            .query_map([], |r| {
-                Ok(serde_json::json!({
-                    "provider_id": r.get::<_, String>(0)?,
-                    "model": r.get::<_, String>(1)?,
-                    "event_count": r.get::<_, i64>(2)?,
-                }))
-            })
-            .map_err(to_string)?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(to_string)
+        query_missing_models(&conn)
     })
     .await
+}
+
+fn query_missing_models(conn: &Connection) -> Result<Vec<Value>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT u.provider_id, u.model, u.event_count
+             FROM (
+               SELECT provider_id, model, COUNT(*) as event_count
+               FROM usage_events
+               WHERE model IS NOT NULL AND model != ''
+               GROUP BY provider_id, model
+             ) u
+             WHERE NOT EXISTS (
+                 SELECT 1 FROM pricing_catalogs p
+                 WHERE p.provider_id = u.provider_id
+                   AND (lower(p.model) = lower(u.model)
+                        OR EXISTS (
+                          SELECT 1 FROM json_each(p.aliases_json)
+                          WHERE lower(json_each.value) = lower(u.model)
+                        ))
+               )
+             ORDER BY u.event_count DESC",
+        )
+        .map_err(to_string)?;
+    let rows = stmt
+        .query_map([], |r| {
+            Ok(serde_json::json!({
+                "provider_id": r.get::<_, String>(0)?,
+                "model": r.get::<_, String>(1)?,
+                "event_count": r.get::<_, i64>(2)?,
+            }))
+        })
+        .map_err(to_string)?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(to_string)
 }
 
 #[tauri::command]
@@ -4644,6 +4651,37 @@ mod tests {
             plan.iter()
                 .any(|d| d.contains("idx_usage_events_provider_request")),
             "{plan:?}"
+        );
+    }
+
+    #[test]
+    fn missing_models_excludes_priced_and_aliased_models() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+        for (model, aliases) in [("priced", "[]"), ("canonical", r#"["Aliased"]"#)] {
+            conn.execute(
+                "INSERT INTO pricing_catalogs (id, provider_id, model, aliases_json, catalog_version, effective_from, created_at, updated_at)
+                 VALUES (?1, 'p', ?1, ?2, 'v', 'now', 'now', 'now')",
+                params![model, aliases],
+            )
+            .unwrap();
+        }
+        for (i, model) in ["priced", "aliased", "unpriced", "unpriced", "Unpriced"].iter().enumerate() {
+            conn.execute(
+                "INSERT INTO usage_events (id, provider_id, source_id, parser_id, parser_version, timestamp, model,
+                   pricing_match_confidence, source_file_path, source_file_modified_at, source_hash, raw_record_hash,
+                   confidence, created_at, updated_at)
+                 VALUES (?1, 'p', 's', 'x', '1', 'now', ?2, 'none', 'f', 'now', 'h', 'h', 'high', 'now', 'now')",
+                params![i.to_string(), model],
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            query_missing_models(&conn).unwrap(),
+            vec![
+                json!({"provider_id": "p", "model": "unpriced", "event_count": 2}),
+                json!({"provider_id": "p", "model": "Unpriced", "event_count": 1}),
+            ]
         );
     }
 
