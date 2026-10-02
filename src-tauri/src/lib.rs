@@ -2672,6 +2672,7 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         );
         CREATE INDEX IF NOT EXISTS idx_usage_events_timestamp ON usage_events(timestamp);
         CREATE INDEX IF NOT EXISTS idx_usage_events_provider ON usage_events(provider_id);
+        CREATE INDEX IF NOT EXISTS idx_usage_events_provider_request ON usage_events(provider_id, request_id);
         CREATE INDEX IF NOT EXISTS idx_usage_events_project ON usage_events(project_id);
         CREATE INDEX IF NOT EXISTS idx_usage_events_model ON usage_events(model);
         CREATE UNIQUE INDEX IF NOT EXISTS idx_usage_events_dedupe ON usage_events(id);
@@ -3922,6 +3923,12 @@ fn insert_event(
     Ok(changed > 0)
 }
 
+const CLAUDE_LEGACY_EVENT_SQL: &str = "SELECT id FROM usage_events
+     WHERE provider_id = ?1 AND request_id = ?2
+     ORDER BY CASE WHEN source_file_path LIKE '%--claude-worktrees-%' THEN 1 ELSE 0 END,
+              source_file_path, source_offset
+     LIMIT 1";
+
 fn find_legacy_event_id(
     conn: &Connection,
     source: &Source,
@@ -3932,11 +3939,7 @@ fn find_legacy_event_id(
         if let Some(request_id) = event.request_id.as_deref() {
             return conn
                 .query_row(
-                    "SELECT id FROM usage_events
-                     WHERE provider_id = ?1 AND request_id = ?2
-                     ORDER BY CASE WHEN source_file_path LIKE '%--claude-worktrees-%' THEN 1 ELSE 0 END,
-                              source_file_path, source_offset
-                     LIMIT 1",
+                    CLAUDE_LEGACY_EVENT_SQL,
                     params![source.provider_id, request_id],
                     |row| row.get(0),
                 )
@@ -4535,6 +4538,23 @@ mod tests {
         migrate(&conn).unwrap();
         seed_defaults(&conn).unwrap();
         conn
+    }
+
+    #[test]
+    fn claude_legacy_event_lookup_uses_request_index() {
+        let conn = scan_test_conn();
+        let plan: Vec<String> = conn
+            .prepare(&format!("EXPLAIN QUERY PLAN {CLAUDE_LEGACY_EVENT_SQL}"))
+            .unwrap()
+            .query_map(params!["anthropic", "req-1"], |r| r.get(3))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert!(
+            plan.iter()
+                .any(|d| d.contains("idx_usage_events_provider_request")),
+            "{plan:?}"
+        );
     }
 
     fn scan_test_root(name: &str) -> PathBuf {
