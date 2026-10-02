@@ -19,7 +19,7 @@ const MAX_SCAN_FILES_PER_SOURCE: usize = 50_000;
 const MAX_SOURCE_TOTAL_BYTES: u64 = 5 * 1024 * 1024 * 1024; // 5 GB
 const MAX_LINE_LENGTH: usize = 1_048_576; // 1 MB
 const MAX_JSON_DEPTH: usize = 64;
-const PARSER_VERSION: &str = "0.1.10";
+const PARSER_VERSION: &str = "0.1.11";
 const KEYRING_SERVICE: &str = "com.petarpetkov.metr.sync";
 const KEYRING_USERNAME: &str = "auth_token";
 const OFFICIAL_SERVER_HOST: &str = "metr.petarpetkov.com";
@@ -233,6 +233,8 @@ struct ParsedEvent {
     output_tokens: i64,
     cached_input_tokens: i64,
     cache_write_tokens: i64,
+    /// Subset of cache_write_tokens written with the 1-hour TTL (billed at 2x input).
+    cache_write_1h_tokens: i64,
     cache_read_tokens: i64,
     reasoning_tokens: i64,
     tool_tokens: i64,
@@ -2100,7 +2102,7 @@ where
                  u.official_api_cost_usd, u.pricing_match_confidence, u.warnings_json,
                  p.path, p.display_name,
                  c.external_conversation_id, c.display_name,
-                 u.created_at, u.updated_at, u.message_id, u.request_id
+                 u.created_at, u.updated_at, u.message_id, u.request_id, u.cache_write_1h_tokens
                  FROM usage_events u
                  LEFT JOIN projects p ON p.id = u.project_id
                  LEFT JOIN conversations c ON c.id = u.conversation_id
@@ -2142,6 +2144,7 @@ where
                         "output": r.get::<_, i64>(5)?,
                         "cached_input": r.get::<_, i64>(6)?,
                         "cache_write": r.get::<_, i64>(7)?,
+                        "cache_write_1h": r.get::<_, i64>(27)?,
                         "cache_read": r.get::<_, i64>(8)?,
                         "reasoning": r.get::<_, i64>(9)?,
                         "tool": r.get::<_, i64>(10)?,
@@ -2787,6 +2790,7 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     add_column_if_missing(conn, "usage_events", "sync_batch_id", "TEXT")?;
     add_column_if_missing(conn, "usage_events", "sync_error", "TEXT")?;
     add_column_if_missing(conn, "usage_events", "event_type", "TEXT")?;
+    add_column_if_missing(conn, "usage_events", "cache_write_1h_tokens", "INTEGER NOT NULL DEFAULT 0")?;
     add_column_if_missing(conn, "sync_config", "last_sync_error", "TEXT")?;
     add_column_if_missing(conn, "sync_config", "last_sync_attempt_at", "TEXT")?;
     add_column_if_missing(conn, "sync_config", "project_root", "TEXT")?;
@@ -2860,7 +2864,8 @@ fn cleanup_known_bad_imports(conn: &Connection) -> rusqlite::Result<()> {
 fn recalculate_event_costs(conn: &Connection) -> rusqlite::Result<()> {
     let mut stmt = conn.prepare(
         "SELECT id, provider_id, model, input_tokens, output_tokens, cached_input_tokens,
-         cache_write_tokens, cache_read_tokens, reasoning_tokens, tool_tokens, unknown_tokens
+         cache_write_tokens, cache_read_tokens, reasoning_tokens, tool_tokens, unknown_tokens,
+         cache_write_1h_tokens
          FROM usage_events",
     )?;
     let rows = stmt.query_map([], |r| {
@@ -2882,6 +2887,7 @@ fn recalculate_event_costs(conn: &Connection) -> rusqlite::Result<()> {
                 output_tokens: r.get(4)?,
                 cached_input_tokens: r.get(5)?,
                 cache_write_tokens: r.get(6)?,
+                cache_write_1h_tokens: r.get(11)?,
                 cache_read_tokens: r.get(7)?,
                 reasoning_tokens: r.get(8)?,
                 tool_tokens: r.get(9)?,
@@ -3667,6 +3673,7 @@ fn parse_codex_value(
         output_tokens: output,
         cached_input_tokens: cached,
         cache_write_tokens: cache_write,
+        cache_write_1h_tokens: 0,
         cache_read_tokens: cache_read,
         reasoning_tokens: reasoning,
         tool_tokens: 0,
@@ -3849,6 +3856,7 @@ fn parse_value(
         output_tokens: output,
         cached_input_tokens: cached,
         cache_write_tokens: cache_write,
+        cache_write_1h_tokens: nested_cache_write_1h_tokens(usage).min(cache_write),
         cache_read_tokens: cache_read,
         reasoning_tokens: reasoning,
         tool_tokens: tool,
@@ -3934,7 +3942,7 @@ fn insert_event(
              pricing_match_confidence = ?22, source_file_modified_at = ?23,
              source_offset = ?24, source_hash = ?25, raw_record_hash = ?26,
              source_project_path = ?27, confidence = ?28, warnings_json = ?29,
-             updated_at = ?30,
+             updated_at = ?30, cache_write_1h_tokens = ?33,
              source_file_path = CASE WHEN source_file_path LIKE '%--claude-worktrees-%'
                                      THEN ?32 ELSE source_file_path END
              WHERE id = ?31
@@ -3974,6 +3982,7 @@ fn insert_event(
                 now,
                 legacy_id,
                 file_path.to_string_lossy(),
+                event.cache_write_1h_tokens,
             ],
         )
         .map_err(to_string)?;
@@ -3987,9 +3996,10 @@ fn insert_event(
              message_id, request_id, model, event_type, input_tokens, output_tokens, cached_input_tokens, cache_write_tokens,
              cache_read_tokens, reasoning_tokens, tool_tokens, unknown_tokens, official_api_cost_usd, pricing_catalog_id,
              pricing_match_confidence, source_file_path, source_file_modified_at, source_offset, source_hash,
-             raw_record_hash, source_project_path, confidence, warnings_json, created_at, updated_at)
+             raw_record_hash, source_project_path, confidence, warnings_json, created_at, updated_at,
+             cache_write_1h_tokens)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18,
-             ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33, ?33)",
+             ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33, ?33, ?34)",
             params![
                 id,
                 event.provider_id,
@@ -4023,10 +4033,20 @@ fn insert_event(
                 event.project_path.as_deref(),
                 event.confidence,
                 serde_json::to_string(&event.warnings).unwrap_or_else(|_| "[]".into()),
-                now
+                now,
+                event.cache_write_1h_tokens
             ],
         )
         .map_err(to_string)?;
+    if changed == 0 {
+        // Already stored: a re-parse may still bring the 1-hour cache write split.
+        conn.execute(
+            "UPDATE usage_events SET cache_write_1h_tokens = ?1, official_api_cost_usd = ?2
+             WHERE id = ?3 AND cache_write_1h_tokens != ?1",
+            params![event.cache_write_1h_tokens, cost, id],
+        )
+        .map_err(to_string)?;
+    }
     Ok(changed > 0)
 }
 
@@ -4280,15 +4300,18 @@ fn calculate_cost_parts(event: &ParsedEvent, pricing: &Pricing) -> (f64, f64, f6
     };
 
     let input_cost = (effective_input as f64 / million) * pricing.input_per_1m.unwrap_or(0.0);
+    let cache_write_5m_rate = pricing
+        .cache_write_per_1m
+        .unwrap_or(pricing.input_per_1m.unwrap_or(0.0));
+    // Anthropic bills 1-hour cache writes at 2x the input price; the catalog has no column for it.
+    let cache_write_1h_rate = pricing.input_per_1m.map_or(cache_write_5m_rate, |input| input * 2.0);
     let output_cost = (event.output_tokens as f64 / million) * pricing.output_per_1m.unwrap_or(0.0);
     let cached_cost = (event.cached_input_tokens as f64 / million)
         * pricing
             .cached_input_per_1m
             .unwrap_or(pricing.input_per_1m.unwrap_or(0.0))
-        + (event.cache_write_tokens as f64 / million)
-            * pricing
-                .cache_write_per_1m
-                .unwrap_or(pricing.input_per_1m.unwrap_or(0.0))
+        + ((event.cache_write_tokens - event.cache_write_1h_tokens) as f64 / million) * cache_write_5m_rate
+        + (event.cache_write_1h_tokens as f64 / million) * cache_write_1h_rate
         + (event.cache_read_tokens as f64 / million)
             * pricing
                 .cache_read_per_1m
@@ -4413,7 +4436,8 @@ fn query_recent_sessions(conn: &Connection, provider_filter: Option<&str>, offse
          (u.cached_input_tokens + u.cache_write_tokens + u.cache_read_tokens),
          ((CASE WHEN u.cache_read_tokens > 0 OR u.cache_write_tokens > 0 THEN u.input_tokens ELSE max(u.input_tokens - u.cached_input_tokens, 0) END) + u.output_tokens + u.cached_input_tokens + u.cache_write_tokens + u.cache_read_tokens + u.reasoning_tokens + u.tool_tokens + u.unknown_tokens),
          u.official_api_cost_usd, u.confidence,
-         u.cached_input_tokens, u.cache_write_tokens, u.cache_read_tokens, u.reasoning_tokens, u.tool_tokens, u.unknown_tokens
+         u.cached_input_tokens, u.cache_write_tokens, u.cache_read_tokens, u.reasoning_tokens, u.tool_tokens, u.unknown_tokens,
+         u.cache_write_1h_tokens
          FROM usage_events u LEFT JOIN projects pr ON pr.id = u.project_id
          {}
          ORDER BY u.timestamp DESC LIMIT ?{} OFFSET ?{}",
@@ -4439,6 +4463,7 @@ fn query_recent_sessions(conn: &Connection, provider_filter: Option<&str>, offse
             output_tokens: r.get(9)?,
             cached_input_tokens: r.get(14)?,
             cache_write_tokens: r.get(15)?,
+            cache_write_1h_tokens: r.get(20)?,
             cache_read_tokens: r.get(16)?,
             reasoning_tokens: r.get(17)?,
             tool_tokens: r.get(18)?,
@@ -4536,6 +4561,13 @@ fn nested_cache_creation_tokens(usage: &Value) -> i64 {
     } else {
         int_field(cache_creation, &["input_tokens", "total_tokens", "tokens"])
     }
+}
+
+fn nested_cache_write_1h_tokens(usage: &Value) -> i64 {
+    usage
+        .get("cache_creation")
+        .map(|cache_creation| int_field(cache_creation, &["ephemeral_1h_input_tokens"]))
+        .unwrap_or(0)
 }
 
 fn nested_cache_read_tokens(usage: &Value) -> i64 {
@@ -4739,6 +4771,117 @@ mod tests {
             .query_row("SELECT official_api_cost_usd FROM usage_events WHERE id = 'e1'", [], |r| r.get(0))
             .unwrap();
         assert!((cost - 0.0743098).abs() < 1e-9, "{cost}");
+    }
+
+    #[test]
+    fn claude_usage_splits_one_hour_cache_writes() {
+        let source = claude_test_source();
+        let value = json!({
+            "type": "assistant",
+            "requestId": "request-1",
+            "message": {
+                "id": "message-1",
+                "model": "claude-opus-5-5",
+                "usage": {
+                    "input_tokens": 2,
+                    "output_tokens": 1346,
+                    "cache_creation": {
+                        "ephemeral_5m_input_tokens": 100,
+                        "ephemeral_1h_input_tokens": 448
+                    }
+                }
+            }
+        });
+        let event = parse_value(
+            &source,
+            Path::new("/Users/petar/.claude/projects/metr/session.jsonl"),
+            &value,
+            Some(0),
+            &value.to_string(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(event.cache_write_tokens, 548);
+        assert_eq!(event.cache_write_1h_tokens, 448);
+    }
+
+    #[test]
+    fn one_hour_cache_writes_are_priced_at_twice_input() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO pricing_catalogs (id, provider_id, model, catalog_version, effective_from,
+               input_per_1m, output_per_1m, cache_write_per_1m, cache_read_per_1m, created_at, updated_at)
+             VALUES ('anthropic:claude-opus-5-5', 'anthropic', 'claude-opus-5-5', 'v', 'now', 4, 20, 5, 0.2, 'now', 'now')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO usage_events (id, provider_id, source_id, parser_id, parser_version, timestamp, model,
+               input_tokens, output_tokens, cache_write_tokens, cache_write_1h_tokens, cache_read_tokens,
+               pricing_match_confidence, source_file_path, source_file_modified_at, source_hash, raw_record_hash,
+               confidence, created_at, updated_at)
+             VALUES ('e1', 'anthropic', 's', 'claude', '1', 'now', 'claude-opus-5-5', 2, 1346, 448, 448, 275260,
+               'exact', 'f', 'now', 'h', 'h', 'high', 'now', 'now')",
+            [],
+        )
+        .unwrap();
+
+        recalculate_event_costs(&conn).unwrap();
+
+        let cost: f64 = conn
+            .query_row("SELECT official_api_cost_usd FROM usage_events WHERE id = 'e1'", [], |r| r.get(0))
+            .unwrap();
+        assert!((cost - 0.085564).abs() < 1e-9, "{cost}");
+    }
+
+    #[test]
+    fn reparse_fills_one_hour_cache_writes_on_existing_rows() {
+        let conn = scan_test_conn();
+        let root = scan_test_root("claude-1h");
+        let file = root.join("projects").join("-Users-petar-Developer-App").join("session.jsonl");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        let line = |request_id: Option<&str>, message_id: &str| {
+            let mut v = json!({
+                "type": "assistant",
+                "timestamp": "2026-09-22T08:00:00Z",
+                "message": {
+                    "id": message_id,
+                    "model": "claude-opus-5-5",
+                    "usage": {
+                        "input_tokens": 2,
+                        "output_tokens": 10,
+                        "cache_creation": {"ephemeral_5m_input_tokens": 0, "ephemeral_1h_input_tokens": 448}
+                    }
+                }
+            });
+            if let Some(id) = request_id {
+                v["requestId"] = json!(id);
+            }
+            v.to_string()
+        };
+        // One event takes the request_id UPDATE path, the other the INSERT OR IGNORE path.
+        std::fs::write(&file, format!("{}\n{}\n", line(Some("req-1"), "msg-1"), line(None, "msg-2"))).unwrap();
+        let mut source = claude_test_source();
+        source.path = root.to_string_lossy().to_string();
+        scan_source(&conn, &source, false).unwrap();
+        // Simulate rows and an index written by the previous parser version.
+        conn.execute_batch(
+            "UPDATE usage_events SET cache_write_1h_tokens = 0;
+             UPDATE indexed_files SET parser_version = '0.1.10';",
+        )
+        .unwrap();
+
+        scan_source(&conn, &source, false).unwrap();
+
+        let rows: Vec<i64> = conn
+            .prepare("SELECT cache_write_1h_tokens FROM usage_events ORDER BY message_id")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(rows, [448, 448]);
     }
 
     fn scan_test_root(name: &str) -> PathBuf {
