@@ -1319,7 +1319,6 @@ async fn pull_pricing(state: State<'_, AppState>) -> Result<Value, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let conn = db.blocking_lock();
         let count = pull_pricing_from_server(&conn)?;
-        recalculate_event_costs(&conn).map_err(to_string)?;
         Ok::<_, String>(serde_json::json!({ "pulled": count }))
     })
     .await
@@ -1800,7 +1799,6 @@ async fn login_sync(state: State<'_, AppState>, input: LoginInput) -> Result<Syn
         .map_err(to_string)?;
         set_sync_token(&conn, token)?;
         let _ = pull_pricing_from_server(&conn);
-        recalculate_event_costs(&conn).map_err(to_string)?;
 
         get_sync_config(&conn)
     })
@@ -2465,74 +2463,9 @@ fn pull_pricing_from_server(conn: &Connection) -> Result<usize, String> {
     let mut pulled = 0usize;
     let now_ts = now();
     for item in prices {
-        let provider_id = item.get("provider_id").and_then(Value::as_str).unwrap_or("");
-        let model = item.get("model").and_then(Value::as_str).unwrap_or("");
-        if provider_id.is_empty() || model.is_empty() {
-            continue;
+        if upsert_server_price(conn, item, &now_ts)? {
+            pulled += 1;
         }
-
-        let aliases_json = match item.get("aliases_json") {
-            Some(Value::String(s)) => s.clone(),
-            Some(Value::Array(arr)) => serde_json::to_string(arr).unwrap_or_else(|_| "[]".to_string()),
-            _ => "[]".to_string(),
-        };
-        let source_url = item.get("source_url").and_then(Value::as_str);
-        let input = json_f64(item.get("input_per_1m"));
-        let output = json_f64(item.get("output_per_1m"));
-        let cached = json_f64(item.get("cached_input_per_1m"));
-        let cache_write = json_f64(item.get("cache_write_per_1m"));
-        let cache_read = json_f64(item.get("cache_read_per_1m"));
-        let reasoning = json_f64(item.get("reasoning_per_1m"));
-        let tool = json_f64(item.get("tool_per_1m"));
-        let catalog_version = item
-            .get("catalog_version")
-            .and_then(Value::as_str)
-            .unwrap_or("server-sync");
-        let effective_from = item
-            .get("effective_from")
-            .and_then(Value::as_str)
-            .unwrap_or("2026-01-01");
-        let id = format!("{}:{}", provider_id, model.to_ascii_lowercase());
-
-        conn.execute(
-            "INSERT INTO pricing_catalogs
-             (id, provider_id, model, aliases_json, source_url, catalog_version, effective_from,
-              input_per_1m, output_per_1m, cached_input_per_1m, cache_write_per_1m, cache_read_per_1m,
-              reasoning_per_1m, tool_per_1m, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?15)
-             ON CONFLICT(id) DO UPDATE SET
-               aliases_json = CASE WHEN pricing_catalogs.user_override = 0 THEN excluded.aliases_json ELSE pricing_catalogs.aliases_json END,
-               source_url = CASE WHEN pricing_catalogs.user_override = 0 THEN excluded.source_url ELSE pricing_catalogs.source_url END,
-               input_per_1m = CASE WHEN pricing_catalogs.user_override = 0 THEN excluded.input_per_1m ELSE pricing_catalogs.input_per_1m END,
-               output_per_1m = CASE WHEN pricing_catalogs.user_override = 0 THEN excluded.output_per_1m ELSE pricing_catalogs.output_per_1m END,
-               cached_input_per_1m = CASE WHEN pricing_catalogs.user_override = 0 THEN excluded.cached_input_per_1m ELSE pricing_catalogs.cached_input_per_1m END,
-               cache_write_per_1m = CASE WHEN pricing_catalogs.user_override = 0 THEN excluded.cache_write_per_1m ELSE pricing_catalogs.cache_write_per_1m END,
-               cache_read_per_1m = CASE WHEN pricing_catalogs.user_override = 0 THEN excluded.cache_read_per_1m ELSE pricing_catalogs.cache_read_per_1m END,
-               reasoning_per_1m = CASE WHEN pricing_catalogs.user_override = 0 THEN excluded.reasoning_per_1m ELSE pricing_catalogs.reasoning_per_1m END,
-               tool_per_1m = CASE WHEN pricing_catalogs.user_override = 0 THEN excluded.tool_per_1m ELSE pricing_catalogs.tool_per_1m END,
-               catalog_version = CASE WHEN pricing_catalogs.user_override = 0 THEN excluded.catalog_version ELSE pricing_catalogs.catalog_version END,
-               effective_from = CASE WHEN pricing_catalogs.user_override = 0 THEN excluded.effective_from ELSE pricing_catalogs.effective_from END,
-               updated_at = excluded.updated_at",
-            params![
-                id,
-                provider_id,
-                model,
-                aliases_json,
-                source_url,
-                catalog_version,
-                effective_from,
-                input,
-                output,
-                cached,
-                cache_write,
-                cache_read,
-                reasoning,
-                tool,
-                now_ts
-            ],
-        )
-        .map_err(to_string)?;
-        pulled += 1;
     }
 
     // Delete non-user-override prices that are no longer returned by the server.
@@ -2569,7 +2502,80 @@ fn pull_pricing_from_server(conn: &Connection) -> Result<usize, String> {
         println!("[Pricing] Removed {} unused server prices from local catalog", removed);
     }
 
+    // Every caller (manual pull, login, sync) needs costs repriced with the pulled catalog.
+    recalculate_event_costs(conn).map_err(to_string)?;
     Ok(pulled)
+}
+
+fn upsert_server_price(conn: &Connection, item: &Value, now_ts: &str) -> Result<bool, String> {
+    let provider_id = item.get("provider_id").and_then(Value::as_str).unwrap_or("");
+    let model = item.get("model").and_then(Value::as_str).unwrap_or("");
+    if provider_id.is_empty() || model.is_empty() {
+        return Ok(false);
+    }
+
+    let aliases_json = match item.get("aliases_json") {
+        Some(Value::String(s)) => s.clone(),
+        Some(Value::Array(arr)) => serde_json::to_string(arr).unwrap_or_else(|_| "[]".to_string()),
+        _ => "[]".to_string(),
+    };
+    let source_url = item.get("source_url").and_then(Value::as_str);
+    let input = json_f64(item.get("input_per_1m"));
+    let output = json_f64(item.get("output_per_1m"));
+    let cached = json_f64(item.get("cached_input_per_1m"));
+    let cache_write = json_f64(item.get("cache_write_per_1m"));
+    let cache_read = json_f64(item.get("cache_read_per_1m"));
+    let reasoning = json_f64(item.get("reasoning_per_1m"));
+    let tool = json_f64(item.get("tool_per_1m"));
+    let catalog_version = item
+        .get("catalog_version")
+        .and_then(Value::as_str)
+        .unwrap_or("server-sync");
+    let effective_from = item
+        .get("effective_from")
+        .and_then(Value::as_str)
+        .unwrap_or("2026-01-01");
+    let id = format!("{}:{}", provider_id, model.to_ascii_lowercase());
+
+    conn.execute(
+        "INSERT INTO pricing_catalogs
+         (id, provider_id, model, aliases_json, source_url, catalog_version, effective_from,
+          input_per_1m, output_per_1m, cached_input_per_1m, cache_write_per_1m, cache_read_per_1m,
+          reasoning_per_1m, tool_per_1m, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?15)
+         ON CONFLICT(id) DO UPDATE SET
+           aliases_json = CASE WHEN pricing_catalogs.user_override = 0 THEN excluded.aliases_json ELSE pricing_catalogs.aliases_json END,
+           source_url = CASE WHEN pricing_catalogs.user_override = 0 THEN excluded.source_url ELSE pricing_catalogs.source_url END,
+           input_per_1m = CASE WHEN pricing_catalogs.user_override = 0 THEN excluded.input_per_1m ELSE COALESCE(pricing_catalogs.input_per_1m, excluded.input_per_1m) END,
+           output_per_1m = CASE WHEN pricing_catalogs.user_override = 0 THEN excluded.output_per_1m ELSE COALESCE(pricing_catalogs.output_per_1m, excluded.output_per_1m) END,
+           cached_input_per_1m = CASE WHEN pricing_catalogs.user_override = 0 THEN excluded.cached_input_per_1m ELSE COALESCE(pricing_catalogs.cached_input_per_1m, excluded.cached_input_per_1m) END,
+           cache_write_per_1m = CASE WHEN pricing_catalogs.user_override = 0 THEN excluded.cache_write_per_1m ELSE COALESCE(pricing_catalogs.cache_write_per_1m, excluded.cache_write_per_1m) END,
+           cache_read_per_1m = CASE WHEN pricing_catalogs.user_override = 0 THEN excluded.cache_read_per_1m ELSE COALESCE(pricing_catalogs.cache_read_per_1m, excluded.cache_read_per_1m) END,
+           reasoning_per_1m = CASE WHEN pricing_catalogs.user_override = 0 THEN excluded.reasoning_per_1m ELSE COALESCE(pricing_catalogs.reasoning_per_1m, excluded.reasoning_per_1m) END,
+           tool_per_1m = CASE WHEN pricing_catalogs.user_override = 0 THEN excluded.tool_per_1m ELSE COALESCE(pricing_catalogs.tool_per_1m, excluded.tool_per_1m) END,
+           catalog_version = CASE WHEN pricing_catalogs.user_override = 0 THEN excluded.catalog_version ELSE pricing_catalogs.catalog_version END,
+           effective_from = CASE WHEN pricing_catalogs.user_override = 0 THEN excluded.effective_from ELSE pricing_catalogs.effective_from END,
+           updated_at = excluded.updated_at",
+        params![
+            id,
+            provider_id,
+            model,
+            aliases_json,
+            source_url,
+            catalog_version,
+            effective_from,
+            input,
+            output,
+            cached,
+            cache_write,
+            cache_read,
+            reasoning,
+            tool,
+            now_ts
+        ],
+    )
+    .map_err(to_string)?;
+    Ok(true)
 }
 
 fn add_column_if_missing(
@@ -4687,6 +4693,52 @@ mod tests {
                 json!({"provider_id": "p", "model": "Unpriced", "event_count": 1}),
             ]
         );
+    }
+
+    #[test]
+    fn server_pull_fills_missing_prices_on_user_override() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO pricing_catalogs (id, provider_id, model, catalog_version, effective_from,
+               input_per_1m, output_per_1m, user_override, created_at, updated_at)
+             VALUES ('anthropic:claude-opus-5-5', 'anthropic', 'claude-opus-5-5', 'user', 'now', 4, 20, 1, 'now', 'now')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO usage_events (id, provider_id, source_id, parser_id, parser_version, timestamp, model,
+               input_tokens, output_tokens, cache_write_tokens, cache_read_tokens,
+               pricing_match_confidence, source_file_path, source_file_modified_at, source_hash, raw_record_hash,
+               confidence, created_at, updated_at)
+             VALUES ('e1', 'anthropic', 's', 'claude', '1', 'now', 'claude-opus-5-5', 2, 450, 1346, 292859,
+               'exact', 'f', 'now', 'h', 'h', 'high', 'now', 'now')",
+            [],
+        )
+        .unwrap();
+        // The user's input/output prices win; the server only fills what the user left empty.
+        let server_row = json!({
+            "provider_id": "anthropic", "model": "claude-opus-5-5",
+            "input_per_1m": 99, "output_per_1m": 99,
+            "cache_write_per_1m": 5, "cache_read_per_1m": 0.2
+        });
+
+        assert!(upsert_server_price(&conn, &server_row, "now").unwrap());
+        recalculate_event_costs(&conn).unwrap();
+
+        let prices: (f64, f64, f64, f64, i64) = conn
+            .query_row(
+                "SELECT input_per_1m, output_per_1m, cache_write_per_1m, cache_read_per_1m, user_override
+                 FROM pricing_catalogs WHERE id = 'anthropic:claude-opus-5-5'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
+            .unwrap();
+        assert_eq!(prices, (4.0, 20.0, 5.0, 0.2, 1));
+        let cost: f64 = conn
+            .query_row("SELECT official_api_cost_usd FROM usage_events WHERE id = 'e1'", [], |r| r.get(0))
+            .unwrap();
+        assert!((cost - 0.0743098).abs() < 1e-9, "{cost}");
     }
 
     fn scan_test_root(name: &str) -> PathBuf {
