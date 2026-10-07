@@ -98,4 +98,27 @@ class ResolveModelPriceTest extends TestCase
         $this->assertNotNull($price);
         $this->assertSame($manual->id, $price->id);
     }
+
+    public function test_alias_resolves_to_the_catalog_price(): void
+    {
+        Provider::factory()->create(['id' => 'anthropic']);
+
+        $catalog = ModelPrice::create([
+            'provider_id' => 'anthropic',
+            'model' => 'claude-opus-5-5',
+            'aliases_json' => json_encode(['claude-opus-5.5']),
+            'input_per_1m' => 4.00,
+            'output_per_1m' => 20.00,
+            'effective_from' => Carbon::parse('2025-01-01'),
+            'catalog_version' => 'catalog-hash',
+            'user_override' => false,
+        ]);
+
+        $resolver = new ResolveModelPrice;
+        $price = $resolver->handle('anthropic', 'claude-opus-5.5', Carbon::parse('2026-09-23'));
+
+        $this->assertNotNull($price);
+        $this->assertSame($catalog->id, $price->id);
+        $this->assertSame($catalog->id, $resolver->handle('anthropic', 'claude-opus-5-5', Carbon::parse('2026-09-23'))?->id);
+    }
 }

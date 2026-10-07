@@ -7,35 +7,23 @@ use Carbon\Carbon;
 
 class ResolveModelPrice
 {
+    /** @var array<string, array<string, list<ModelPrice>>> */
+    private array $byProviderAndName = [];
+
     /**
      * Find the active model price for a given provider/model/timestamp.
      */
     public function handle(string $providerId, string $model, Carbon $timestamp): ?ModelPrice
     {
-        $candidates = ModelPrice::where('provider_id', $providerId)
-            ->where('effective_from', '<=', $timestamp)
-            ->where(function ($q) use ($timestamp) {
-                $q->whereNull('effective_to')
-                    ->orWhere('effective_to', '>', $timestamp);
-            })
-            ->orderBy('effective_from', 'desc')
-            ->get();
-
         $matches = [];
-        foreach ($candidates as $price) {
-            if (strtolower($price->model) === strtolower($model)) {
-                $matches[] = $price;
-
+        foreach ($this->rowsFor($providerId, strtolower($model)) as $price) {
+            if ($price->effective_from->gt($timestamp)) {
                 continue;
             }
-
-            $aliases = json_decode($price->aliases_json ?? '[]', true);
-            foreach ($aliases as $alias) {
-                if (strtolower($alias) === strtolower($model)) {
-                    $matches[] = $price;
-                    break;
-                }
+            if ($price->effective_to !== null && ! $price->effective_to->gt($timestamp)) {
+                continue;
             }
+            $matches[] = $price;
         }
 
         if ($matches === []) {
@@ -50,5 +38,59 @@ class ResolveModelPrice
         ));
 
         return ($official !== [] ? $official : $matches)[0];
+    }
+
+    /**
+     * @return list<ModelPrice>
+     */
+    private function rowsFor(string $providerId, string $needle): array
+    {
+        if (! array_key_exists($providerId, $this->byProviderAndName)) {
+            $this->byProviderAndName[$providerId] = $this->indexProvider($providerId);
+        }
+
+        return $this->byProviderAndName[$providerId][$needle] ?? [];
+    }
+
+    /**
+     * Prices are stored newest-first, so the first dated match is the current one.
+     *
+     * @return array<string, list<ModelPrice>>
+     */
+    private function indexProvider(string $providerId): array
+    {
+        $indexed = [];
+        $prices = ModelPrice::query()
+            ->where('provider_id', $providerId)
+            ->orderByDesc('effective_from')
+            ->get();
+
+        foreach ($prices as $price) {
+            $this->pushPrice($indexed, strtolower($price->model), $price);
+            $aliases = json_decode($price->aliases_json ?? '[]', true);
+            if (! is_array($aliases)) {
+                continue;
+            }
+            foreach ($aliases as $alias) {
+                if (! is_string($alias) || $alias === '') {
+                    continue;
+                }
+                $key = strtolower($alias);
+                if ($key === strtolower($price->model)) {
+                    continue;
+                }
+                $this->pushPrice($indexed, $key, $price);
+            }
+        }
+
+        return $indexed;
+    }
+
+    /**
+     * @param  array<string, list<ModelPrice>>  $indexed
+     */
+    private function pushPrice(array &$indexed, string $key, ModelPrice $price): void
+    {
+        $indexed[$key][] = $price;
     }
 }
