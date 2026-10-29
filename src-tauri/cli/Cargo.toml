@@ -1,0 +1,13 @@
+[package]
+name = "metr-cli"
+version = "26.40.2"
+description = "METR command line and daemon for Linux dev machines and servers"
+authors = ["MEtR"]
+edition = "2021"
+
+[[bin]]
+name = "metr"
+path = "src/main.rs"
+
+[dependencies]
+metr = { path = "..", default-features = false }

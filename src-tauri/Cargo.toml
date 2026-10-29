@@ -9,8 +9,21 @@ edition = "2021"
 name = "metr_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+[[bin]]
+name = "metr"
+path = "src/main.rs"
+required-features = ["app"]
+
+[features]
+default = ["app"]
+# The Tauri desktop app. The Linux CLI (cli/) builds the core without it.
+app = ["dep:tauri", "dep:tauri-build", "dep:tauri-plugin-updater", "dep:tauri-plugin-dialog", "dep:tauri-plugin-process"]
+
+[workspace]
+members = ["cli"]
+
 [build-dependencies]
-tauri-build = { version = "2.5.2", features = [] }
+tauri-build = { version = "2.5.2", features = [], optional = true }
 
 [dependencies]
 chrono = { version = "0.4.42", features = ["serde"] }
@@ -22,14 +35,14 @@ serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
 sha2 = "0.10.9"
 md5 = "0.7.0"
-tauri = { version = "2.10.1", features = [] }
+tauri = { version = "2.10.1", features = [], optional = true }
 thiserror = "2.0.17"
 uuid = { version = "1.19.0", features = ["v4", "serde"] }
 walkdir = "2.5.0"
 zstd = "0.13"
-tauri-plugin-updater = "2.10.1"
-tauri-plugin-dialog = "2.7.1"
-tauri-plugin-process = "2.3.1"
+tauri-plugin-updater = { version = "2.10.1", optional = true }
+tauri-plugin-dialog = { version = "2.7.1", optional = true }
+tauri-plugin-process = { version = "2.3.1", optional = true }
 opener = "0.7"
 keyring = { version = "3", features = ["apple-native", "windows-native", "linux-native"] }
 tokio = { version = "1", features = ["rt", "sync"] }
