@@ -57,6 +57,11 @@ Next: M3 (incremental scan by offset, sync batching/retry, reconciliation endpoi
 - Nothing derived the version before (`build-release.sh` read tauri.conf.json; I bumped by hand). Now: `scripts/bump-version.sh` computes YY.WW from the ISO week and the next patch from existing tags and writes package.json, tauri.conf.json, both Cargo.toml and Cargo.lock (`--check`, `--set`, `--date`); `build-release.sh` uses it; release.yml rejects a tag that does not match the files or the ISO week of the tagged commit.
 - Files bumped to 26.44.0. **Tag v26.44.0 is created only after the CI→deploy-host route is fixed.** the20th reinstalled and the18th package rebuilt as 26.44.0.
 
+## 2026-10-29 ~20:05 — both Linux machines live (Guardian 19:50)
+- the18th: Guardian installed 26.41.0 (root timer, device linux-the18th, 589 openai events). the20th: logged in, first sync matches server exactly (anthropic 14,154 / openai 14,437).
+- **Cost mismatch fixed on `fix/price-parity`** (in review): headless sync pulls server prices after each upload (gpt-6.1-terra was unpriced locally), server stores + prices 1-hour cache writes like the client. Needs one additive `artisan migrate` after deploy, then full resync per device.
+- app_version: works (re-registered every sync); the18th simply runs 26.41.0.
+
 ## Mac cleanup: retire ~/.claude-accounts (for Guardian to run on the Mac, Petar approving)
 Petar decision 18:26: one Claude account now; METR scans only the real `~/.claude`. Do not run step 4 until steps 1–3 are clean.
 1. **Read-only checks**
@@ -72,6 +77,11 @@ Petar decision 18:26: one Claude account now; METR scans only the real `~/.claud
 6. Verify: METR → Rescan; Claude totals for the last 30 days unchanged (the account folders only held symlinks to `~/.claude/projects`).
 
 ## needs-petar
+- **After the next backend deploy:** run once `docker exec metr-sync-php php artisan migrate --force` (additive: `usage_events.cache_write_1h_tokens`), then full resync on each device to reprice 1-hour cache writes.
+- **Server device cleanup (nothing deleted yet; destructive, needs your OK):**
+  1. Seed/test devices "Petar's MacBook Air" and "Windows Desktop" (no app version, last seen Jun 5–7, ~15–22 events per provider incl. cline/cursor/google/kimi): look like `metr:demo-seed` data → proposal: delete these 2 devices and their events.
+  2. Stale macos-m1.local and macos-Petars-MacBook-Air.local (May 13): keep for now; once `/sync/reconcile` is live, `metr reconcile --all` shows whether their rows duplicate the current Mac (same raw line on two devices). Delete only duplicated ones.
+  3. Cursor/Kimi rows on the current Mac (tracking is Claude/Codex only): proposal: keep the data, default the dashboards to Anthropic + OpenAI, and stop scanning non-Claude/Codex sources in the next desktop release. Alternative: delete those rows.
 - **CI cannot reach the deploy host** (blocks releases since 26.40.2 and backend deploys): fix the runner→the18th Tailscale route/secret, then re-run runs 40899903389 and 40893433131.
 - **Device alias leak:** server device `windows-DESKTOP-PG7TRK4` (last seen Oct 9) has an API-key-like string as its alias. Proposal: clear that alias (single-row UPDATE, non-destructive). Please rotate that Kimi key. Not printed anywhere.
 - **Linux device login (ready now):** type `! metr login --user <your METR username>` in the PO session (password prompt; device `linux-the20th`). Until then the20th scans hourly but does not upload.

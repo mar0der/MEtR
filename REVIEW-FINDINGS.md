@@ -46,3 +46,9 @@ Confirmed sound: Codex/Claude resume (state, re-emit hashes, CRLF offsets, zst n
 - M2 (med) desktop sync held the DB lock through 429/backoff sleeps (minutes) → FIX: `SyncPatience::ReturnQuickly` for the desktop (stop at 429/5xx as before, short network retries); CLI timer keeps `WaitForServer`.
 - M3 (low) `metr reconcile` counted zero-token events the server skips → FIX: same zero-token filter locally.
 - Not new: one rejected event blocks later batches (now 250 per batch) → noted for M4.
+
+## 2026-10-29 — branch fix/price-parity (Claude subagent)
+Cost math matches the client in every case checked; nothing breaks before the migration; re-sent events update cost.
+- P1 (med) before the migration, events priced with the 1-hour split but stored without it → a later repricing lowers them → FIX: until the column exists, price without the split (stored tokens and cost stay consistent). Auto-migrate on deploy NOT added (policy: migrations need Petar's OK).
+- P2 (med) existing server rows only get the split after a full resync per device → in STATUS needs-petar / handover.
+- P3 (low) client repriced twice per run → FIX: rely on the reprice inside the price pull.

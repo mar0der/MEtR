@@ -38,7 +38,14 @@ class CalculateUsageCost
         $cost += $this->calculateCategory($effectiveInput, $price->input_per_1m, $missingRate);
         $cost += $this->calculateCategory($tokens['output'] ?? 0, $price->output_per_1m, $missingRate);
         $cost += $this->calculateCategory($tokens['cached_input'] ?? 0, $price->cached_input_per_1m ?? $price->input_per_1m, $missingRate);
-        $cost += $this->calculateCategory($tokens['cache_write'] ?? 0, $price->cache_write_per_1m ?? $price->input_per_1m, $missingRate);
+        // cache_write_1h is the part of cache_write written with a 1-hour TTL,
+        // billed at twice the input price (as the desktop client prices it).
+        $cacheWrite1h = min($tokens['cache_write_1h'] ?? 0, $tokens['cache_write'] ?? 0);
+        $cost += $this->calculateCategory(($tokens['cache_write'] ?? 0) - $cacheWrite1h, $price->cache_write_per_1m ?? $price->input_per_1m, $missingRate);
+        $oneHourRate = $price->input_per_1m !== null
+            ? (string) ((float) $price->input_per_1m * 2)
+            : ($price->cache_write_per_1m ?? null);
+        $cost += $this->calculateCategory($cacheWrite1h, $oneHourRate, $missingRate);
         $cost += $this->calculateCategory($tokens['cache_read'] ?? 0, $price->cache_read_per_1m ?? $price->cached_input_per_1m, $missingRate);
         $cost += $this->calculateCategory($tokens['reasoning'] ?? 0, $price->reasoning_per_1m ?? $price->output_per_1m, $missingRate);
         $cost += $this->calculateCategory($tokens['tool'] ?? 0, $price->tool_per_1m ?? $price->input_per_1m, $missingRate);

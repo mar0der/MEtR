@@ -31,6 +31,7 @@ class RepriceModelUsage
                         'output' => (int) $event->output_tokens,
                         'cached_input' => (int) $event->cached_input_tokens,
                         'cache_write' => (int) $event->cache_write_tokens,
+                        'cache_write_1h' => (int) ($event->cache_write_1h_tokens ?? 0),
                         'cache_read' => (int) $event->cache_read_tokens,
                         'reasoning' => (int) $event->reasoning_tokens,
                         'tool' => (int) $event->tool_tokens,

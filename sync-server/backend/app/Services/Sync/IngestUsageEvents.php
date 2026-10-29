@@ -13,6 +13,7 @@ use App\Services\Projects\ResolveProject;
 use Carbon\Carbon;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Schema;
 
 class IngestUsageEvents
 {
@@ -161,7 +162,10 @@ class IngestUsageEvents
             if ($price) {
                 // Server recalculates using the same provider-aware logic as the desktop app.
                 // Keep in sync with src-tauri/src/lib.rs calculate_cost()
-                $costData = $this->calculateUsageCost->handle($price, $tokens, $providerId);
+                // Until the migration stores the 1-hour split, price without it,
+                // so a later repricing of the stored tokens gives the same cost.
+                $priced = self::hasOneHourColumn() ? $tokens : array_diff_key($tokens, ['cache_write_1h' => 0]);
+                $costData = $this->calculateUsageCost->handle($price, $priced, $providerId);
             } elseif (($tokens['unknown'] ?? 0) === 0 && isset($event['client_cost']['official_api_cost_usd'])) {
                 $costData = [
                     'cost' => (float) $event['client_cost']['official_api_cost_usd'],
@@ -203,6 +207,12 @@ class IngestUsageEvents
             'client_updated_at' => isset($event['client_updated_at']) ? Carbon::parse($event['client_updated_at']) : null,
             'updated_at' => now(),
         ];
+
+        // Written only once the column exists: deploys do not run migrations,
+        // so the code must work before `php artisan migrate` adds it.
+        if (self::hasOneHourColumn()) {
+            $payload['cache_write_1h_tokens'] = min($tokens['cache_write_1h'] ?? 0, $tokens['cache_write'] ?? 0);
+        }
 
         if ($existing) {
             $existing->update($payload);
@@ -253,5 +263,12 @@ class IngestUsageEvents
             'started_at' => $timestamp,
             'last_seen_at' => $timestamp,
         ]);
+    }
+
+    private static ?bool $oneHourColumn = null;
+
+    public static function hasOneHourColumn(): bool
+    {
+        return self::$oneHourColumn ??= Schema::hasColumn('usage_events', 'cache_write_1h_tokens');
     }
 }

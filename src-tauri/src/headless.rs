@@ -95,6 +95,12 @@ pub fn sync(conn: &Connection, full: bool) -> Result<Value, String> {
         return Err("Not logged in. Run `metr login` first.".to_string());
     }
     let result = perform_sync(conn, full, SyncPatience::WaitForServer, |_, _| {})?;
+    // The server only lists prices for models it has seen events for, so a
+    // model first uploaded just now gets its price on this pull (which also
+    // reprices local events). A failed pull leaves local prices as they were.
+    if let Err(error) = pull_pricing_from_server(conn) {
+        eprintln!("[Pricing] pull failed: {error}");
+    }
     serde_json::to_value(result).map_err(to_string)
 }
 
