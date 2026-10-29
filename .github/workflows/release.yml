@@ -38,6 +38,25 @@ jobs:
           fi
           echo "All version files are in sync."
 
+      - name: Verify version is YY.WW.PATCH for the ISO week of the tagged commit
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          # scripts/bump-version.sh sets it; this also covers src-tauri/cli/Cargo.toml.
+          VERSION=$(scripts/bump-version.sh --check)
+          TAG="${GITHUB_REF_NAME}"
+          if [ "$TAG" != "v$VERSION" ]; then
+            echo "ERROR: tag $TAG does not match version files ($VERSION)"
+            exit 1
+          fi
+          COMMIT_DATE=$(git log -1 --format=%cI)
+          WEEK_PREFIX="$((10#$(date -u -d "$COMMIT_DATE" +%g))).$((10#$(date -u -d "$COMMIT_DATE" +%V)))"
+          if [ "${VERSION%.*}" != "$WEEK_PREFIX" ]; then
+            echo "ERROR: version $VERSION is not for ISO week $WEEK_PREFIX of the tagged commit ($COMMIT_DATE)."
+            echo "Run scripts/bump-version.sh to set it."
+            exit 1
+          fi
+          echo "Version $VERSION matches ISO week $WEEK_PREFIX."
+
   build-macos:
     needs: [validate-version]
     runs-on: macos-14

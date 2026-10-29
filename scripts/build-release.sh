@@ -1,18 +1,15 @@
 #!/bin/bash
 set -e
 
-# Read version from tauri.conf.json as the source of truth
+# Version: YY.WW.PATCH from the ISO week (scripts/bump-version.sh), unless
+# one is given as the first argument.
 VERSION="${1:-}"
 if [ -z "$VERSION" ]; then
-  if command -v jq >/dev/null 2>&1; then
-    VERSION="$(jq -r '.version' src-tauri/tauri.conf.json)"
-  else
-    VERSION="$(grep '"version"' src-tauri/tauri.conf.json | head -1 | sed -E 's/.*"version": *"([^"]+)".*/\1/')"
-  fi
+  VERSION="$(scripts/bump-version.sh)"
 fi
 
 if [ -z "$VERSION" ] || [ "$VERSION" = "null" ]; then
-  echo "ERROR: Could not determine version from src-tauri/tauri.conf.json"
+  echo "ERROR: Could not determine the version"
   exit 1
 fi
 
@@ -30,11 +27,9 @@ if [ -z "$TAURI_SIGNING_PRIVATE_KEY" ]; then
   exit 1
 fi
 
-# Sync version across all config files
-sed -i.bak -E "s/\"version\": *\"[^\"]+\"/\"version\": \"${VERSION}\"/" package.json && rm -f package.json.bak
-sed -i.bak -E "s/^version = \"[^\"]+\"/version = \"${VERSION}\"/" src-tauri/Cargo.toml && rm -f src-tauri/Cargo.toml.bak
-sed -i.bak -E "s/^version = \"[^\"]+\"/version = \"${VERSION}\"/" src-tauri/cli/Cargo.toml && rm -f src-tauri/cli/Cargo.toml.bak
-echo "Synced version ${VERSION} to package.json and Cargo.toml"
+# Sync version across all config files (package.json, tauri.conf.json, Cargo.toml x2, Cargo.lock)
+scripts/bump-version.sh --set "$VERSION" >/dev/null
+echo "Synced version ${VERSION}"
 
 npm run tauri:build
 

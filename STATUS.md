@@ -51,6 +51,12 @@ Next: M3 (incremental scan by offset, sync batching/retry, reconciliation endpoi
 - **Cleanup done**: removed src-tauri/target (16.2 GB), sync-server/backend/vendor (83 MB), node_modules (177 MB), dist, scratch tools; merged branches deleted; no worktrees. Kept: zig 0.13 in `~/.local/opt/zig-linux-x86_64-0.13.0` and `cargo-zigbuild` in `~/.cargo/bin` (needed by `scripts/build-linux-cli.sh`).
 - **Next (M4 / follow-ups)**: one rejected event blocks later sync batches (quarantine bad events); per-machine reconciliation report once all 4 machines sync; Claude desktop agent sessions; Codex sqlite fallback only if the Mac re-sweep still shows a gap.
 
+## 2026-10-29 ~19:45 — version numbering fixed (Petar 19:37)
+- METR versions are **YY.WW.PATCH with WW = ISO week** (no leading zero). I had bumped 26.40.2 → 26.41.0 as if semver; this week is ISO week 44, so the next release is **26.44.0**.
+- **Tag `v26.41.0` stays as is** (no history rewrite): built, never published (publish job blocked), superseded by 26.44.0.
+- Nothing derived the version before (`build-release.sh` read tauri.conf.json; I bumped by hand). Now: `scripts/bump-version.sh` computes YY.WW from the ISO week and the next patch from existing tags and writes package.json, tauri.conf.json, both Cargo.toml and Cargo.lock (`--check`, `--set`, `--date`); `build-release.sh` uses it; release.yml rejects a tag that does not match the files or the ISO week of the tagged commit.
+- Files bumped to 26.44.0. **Tag v26.44.0 is created only after the CI→deploy-host route is fixed.** the20th reinstalled and the18th package rebuilt as 26.44.0.
+
 ## Mac cleanup: retire ~/.claude-accounts (for Guardian to run on the Mac, Petar approving)
 Petar decision 18:26: one Claude account now; METR scans only the real `~/.claude`. Do not run step 4 until steps 1–3 are clean.
 1. **Read-only checks**
