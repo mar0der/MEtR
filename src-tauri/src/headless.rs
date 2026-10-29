@@ -94,7 +94,7 @@ pub fn sync(conn: &Connection, full: bool) -> Result<Value, String> {
     if get_sync_token(conn)?.is_none() {
         return Err("Not logged in. Run `metr login` first.".to_string());
     }
-    let result = perform_sync(conn, full, |_, _| {})?;
+    let result = perform_sync(conn, full, SyncPatience::WaitForServer, |_, _| {})?;
     serde_json::to_value(result).map_err(to_string)
 }
 
@@ -274,7 +274,12 @@ pub fn reconcile(conn: &Connection) -> Result<Value, String> {
         .prepare(
             "SELECT provider_id, COUNT(*), SUM(synced_at IS NOT NULL), SUM(input_tokens),
                     SUM(output_tokens), SUM(cached_input_tokens), SUM(cache_read_tokens)
-             FROM usage_events GROUP BY provider_id",
+             FROM usage_events
+             -- The server skips events whose token fields sum to zero.
+             WHERE input_tokens + output_tokens + cached_input_tokens + cache_write_tokens
+                   + cache_write_1h_tokens + cache_read_tokens + reasoning_tokens
+                   + tool_tokens + unknown_tokens > 0
+             GROUP BY provider_id",
         )
         .map_err(to_string)?;
     let rows = stmt

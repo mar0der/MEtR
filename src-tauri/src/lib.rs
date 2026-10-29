@@ -1020,10 +1020,21 @@ fn dashboard_summary(conn: &Connection) -> Result<DashboardSummary, String> {
     })
 }
 
-/// Posts one batch. Retries network errors and 5xx with backoff, and 429
-/// after the server's Retry-After (capped), up to 5 attempts; other HTTP
-/// errors are returned to the caller. The server dedupes, so a retry of a
-/// batch that did arrive is harmless.
+/// How long a sync may wait on the server.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum SyncPatience {
+    /// Desktop app: it holds the database lock while syncing, so stop at the
+    /// first 429/5xx (as before) and retry network errors only briefly.
+    ReturnQuickly,
+    /// Headless timer: nobody waits on it, so ride out rate limits.
+    WaitForServer,
+}
+
+/// Posts one batch. Patient mode retries network errors and 5xx with backoff,
+/// and 429 after the server's Retry-After (capped), up to 5 attempts; quick
+/// mode retries only network errors, 3 attempts. Other HTTP errors are
+/// returned to the caller. The server dedupes, so retrying a batch that did
+/// arrive is harmless.
 fn post_with_retry(
     client: &reqwest::blocking::Client,
     base_url: &str,
@@ -1031,11 +1042,17 @@ fn post_with_retry(
     payload: &Value,
     event_count: usize,
     payload_bytes: usize,
+    patience: SyncPatience,
 ) -> Result<reqwest::blocking::Response, String> {
-    const ATTEMPTS: u32 = 5;
+    let patient = patience == SyncPatience::WaitForServer;
+    let attempts: u32 = if patient { 5 } else { 3 };
     let mut last_error = String::new();
-    for attempt in 0..ATTEMPTS {
-        let backoff = Duration::from_secs(2u64.pow(attempt + 1).min(30));
+    for attempt in 0..attempts {
+        let backoff = if patient {
+            Duration::from_secs(2u64.pow(attempt + 1).min(30))
+        } else {
+            Duration::from_secs(2u64.pow(attempt))
+        };
         match client
             .post(format!("{}/api/v1/sync/events", base_url))
             .header("Authorization", auth_header)
@@ -1043,7 +1060,7 @@ fn post_with_retry(
             .json(payload)
             .send()
         {
-            Ok(resp) if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS => {
+            Ok(resp) if patient && resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS => {
                 let wait = resp
                     .headers()
                     .get(reqwest::header::RETRY_AFTER)
@@ -1056,7 +1073,7 @@ fn post_with_retry(
                 std::thread::sleep(Duration::from_secs(wait));
                 continue;
             }
-            Ok(resp) if resp.status().is_server_error() && attempt + 1 < ATTEMPTS => {
+            Ok(resp) if patient && resp.status().is_server_error() && attempt + 1 < attempts => {
                 last_error = format!("Server error (HTTP {})", resp.status());
                 eprintln!("[Sync] {last_error}, retrying");
             }
@@ -1074,14 +1091,19 @@ fn post_with_retry(
                 }
             }
         }
-        if attempt + 1 < ATTEMPTS {
+        if attempt + 1 < attempts {
             std::thread::sleep(backoff);
         }
     }
     Err(last_error)
 }
 
-fn perform_sync<F>(conn: &Connection, force_all: bool, mut progress: F) -> Result<SyncResult, String>
+fn perform_sync<F>(
+    conn: &Connection,
+    force_all: bool,
+    patience: SyncPatience,
+    mut progress: F,
+) -> Result<SyncResult, String>
 where
     F: FnMut(usize, usize),
 {
@@ -1283,7 +1305,15 @@ where
             "events": events,
         });
         let payload_bytes = serde_json::to_string(&payload).unwrap_or_default().len();
-        let resp = post_with_retry(&client, base_url, &auth_header, &payload, events.len(), payload_bytes)?;
+        let resp = post_with_retry(
+            &client,
+            base_url,
+            &auth_header,
+            &payload,
+            events.len(),
+            payload_bytes,
+            patience,
+        )?;
 
         if resp.status().is_success() {
             let now = now();
@@ -2836,8 +2866,16 @@ fn parse_file_with_drift(
     let compressed = is_zstd_file(path);
     let logical = logical_path(path);
     let path = logical.as_path();
-    let resume = resume.filter(|r| !compressed && r.byte_offset <= metadata.len());
-    let resumed = resume.is_some();
+    // Only append-only JSONL logs can be resumed; whole-JSON files (Gemini,
+    // Cline, Continue) are rewritten in place and must be parsed whole.
+    let resumable = !compressed
+        && matches!(source.parser_id.as_str(), "codex" | "claude")
+        && path
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("jsonl"));
+    let resume = resume.filter(|r| resumable && r.byte_offset <= metadata.len());
+    let resumed = resume.as_ref().is_some_and(|r| r.byte_offset > 0);
     let ResumePoint {
         byte_offset: mut byte_pos,
         line_offset: mut offset,
@@ -2923,7 +2961,7 @@ fn parse_file_with_drift(
 
     let mut drift = codex_context.drift();
     drift.incomplete = incomplete;
-    let resume = (!compressed && !incomplete).then(|| {
+    let resume = (resumable && !incomplete).then(|| {
         snapshot.unwrap_or(ResumePoint {
             byte_offset: byte_pos,
             line_offset: offset,
@@ -4874,6 +4912,7 @@ mod tests {
             &json!({"events": []}),
             0,
             0,
+            SyncPatience::WaitForServer,
         )
         .unwrap();
         assert!(resp.status().is_success());
@@ -5979,6 +6018,42 @@ mod codex_tests {
         let tail = format!("\n{}\n", reemit_free[reemit_free.len() - 1]);
         let (_, rows) = grow_and_scan("codex-tail", &[head + &usage, tail], "\n");
         assert_eq!(rows, 2);
+    }
+
+    #[test]
+    fn growing_whole_json_files_are_reparsed_not_resumed() {
+        // Gemini/Cline style: one pretty-printed JSON document rewritten in place.
+        let conn = conn();
+        let root = temp_root("whole-json");
+        let file = root.join("chats").join("session-1.json");
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        let message = |id: &str, input: i64| {
+            json!({"id": id, "timestamp": "2026-10-29T10:00:00Z", "model": "gemini-3-pro",
+                   "usage": {"input_tokens": input, "output_tokens": 1}})
+        };
+        let mut source = codex_source(&root);
+        source.parser_id = "gemini".to_string();
+        source.provider_id = "google".to_string();
+        let input_sum = |conn: &Connection| -> i64 {
+            conn.query_row("SELECT COALESCE(SUM(input_tokens), 0) FROM usage_events", [], |r| r.get(0))
+                .unwrap()
+        };
+        let pad = "x".repeat(5000); // keep the first 4 KB identical across rewrites
+        let doc = |messages: Vec<Value>| {
+            serde_json::to_string_pretty(&json!({"padding": pad, "messages": messages})).unwrap()
+        };
+        fs::write(&file, doc(vec![message("m1", 100)])).unwrap();
+        scan_source(&conn, &source, false).unwrap();
+        let first = input_sum(&conn);
+        assert!(first >= 100, "{first}");
+        fs::write(&file, doc(vec![message("m1", 100), message("m2", 1000)])).unwrap();
+        scan_source(&conn, &source, false).unwrap();
+        assert!(input_sum(&conn) >= first + 1000, "second message must be imported");
+        let state: Option<String> = conn
+            .query_row("SELECT parse_state FROM indexed_files", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(state, None, "whole-JSON files keep no resume point");
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

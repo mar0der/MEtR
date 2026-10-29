@@ -867,7 +867,7 @@ async fn sync_now(state: State<'_, AppState>, app: tauri::AppHandle) -> Result<S
     let sync_task = tauri::async_runtime::spawn_blocking(move || {
         let conn = db.blocking_lock();
         let _ = ensure_subscription_renewals(&conn).map_err(|e| e.to_string());
-        let result = perform_sync(&conn, false, |uploaded, total| {
+        let result = perform_sync(&conn, false, SyncPatience::ReturnQuickly, |uploaded, total| {
             let _ = progress_tx_clone.send((uploaded, total));
         });
         let _ = pull_pricing_from_server(&conn);
@@ -927,7 +927,7 @@ async fn full_resync(state: State<'_, AppState>, app: tauri::AppHandle) -> Resul
     let sync_task = tauri::async_runtime::spawn_blocking(move || {
         let conn = db.blocking_lock();
         let _ = ensure_subscription_renewals(&conn).map_err(|e| e.to_string());
-        let result = perform_sync(&conn, true, |uploaded, total| {
+        let result = perform_sync(&conn, true, SyncPatience::ReturnQuickly, |uploaded, total| {
             let _ = progress_tx_clone.send((uploaded, total));
         });
         let _ = pull_pricing_from_server(&conn);
