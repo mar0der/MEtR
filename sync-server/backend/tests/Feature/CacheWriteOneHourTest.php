@@ -83,6 +83,8 @@ class CacheWriteOneHourTest extends TestCase
                 ]],
             ])->assertOk();
             $this->assertSame(1, UsageEvent::count());
+            // Without the stored split, the cost ignores it too (stays consistent on repricing).
+            $this->assertSame(10, (int) UsageEvent::first()->cache_write_tokens);
         } finally {
             $flag->setValue(null, null);
         }

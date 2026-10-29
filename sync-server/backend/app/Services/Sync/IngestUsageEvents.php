@@ -162,7 +162,10 @@ class IngestUsageEvents
             if ($price) {
                 // Server recalculates using the same provider-aware logic as the desktop app.
                 // Keep in sync with src-tauri/src/lib.rs calculate_cost()
-                $costData = $this->calculateUsageCost->handle($price, $tokens, $providerId);
+                // Until the migration stores the 1-hour split, price without it,
+                // so a later repricing of the stored tokens gives the same cost.
+                $priced = self::hasOneHourColumn() ? $tokens : array_diff_key($tokens, ['cache_write_1h' => 0]);
+                $costData = $this->calculateUsageCost->handle($price, $priced, $providerId);
             } elseif (($tokens['unknown'] ?? 0) === 0 && isset($event['client_cost']['official_api_cost_usd'])) {
                 $costData = [
                     'cost' => (float) $event['client_cost']['official_api_cost_usd'],

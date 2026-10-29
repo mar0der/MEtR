@@ -96,11 +96,11 @@ pub fn sync(conn: &Connection, full: bool) -> Result<Value, String> {
     }
     let result = perform_sync(conn, full, SyncPatience::WaitForServer, |_, _| {})?;
     // The server only lists prices for models it has seen events for, so a
-    // model first uploaded just now gets its price on this pull. Then reprice.
+    // model first uploaded just now gets its price on this pull (which also
+    // reprices local events). A failed pull leaves local prices as they were.
     if let Err(error) = pull_pricing_from_server(conn) {
         eprintln!("[Pricing] pull failed: {error}");
     }
-    recalculate_event_costs(conn).map_err(to_string)?;
     serde_json::to_value(result).map_err(to_string)
 }
 
