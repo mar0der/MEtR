@@ -274,6 +274,7 @@ pub fn run() {
             seed_defaults(&conn)?;
             ensure_subscription_renewals(&conn).map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
             ensure_claude_shared_source(&conn).map_err(|e| Box::new(std::io::Error::other(e)) as Box<dyn std::error::Error>)?;
+            ensure_codex_sources(&conn).map_err(|e| Box::new(std::io::Error::other(e)) as Box<dyn std::error::Error>)?;
             let db = Arc::new(Mutex::new(conn));
             app.manage(AppState {
                 db: db.clone(),
@@ -686,6 +687,7 @@ async fn rescan_all(state: State<'_, AppState>) -> Result<Value, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let conn = db.blocking_lock();
         ensure_claude_shared_source(&conn)?;
+        ensure_codex_sources(&conn)?;
         let sources = query_sources(&conn)?;
         let mut imported = 0usize;
         for source in sources.into_iter().filter(|s| s.enabled) {
@@ -703,6 +705,7 @@ async fn rescan_all_full(state: State<'_, AppState>) -> Result<Value, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let conn = db.blocking_lock();
         ensure_claude_shared_source(&conn)?;
+        ensure_codex_sources(&conn)?;
         let sources = query_sources(&conn)?;
         let mut imported = 0usize;
         for source in sources.into_iter().filter(|s| s.enabled) {
@@ -2779,6 +2782,7 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         CREATE INDEX IF NOT EXISTS idx_usage_events_timestamp ON usage_events(timestamp);
         CREATE INDEX IF NOT EXISTS idx_usage_events_provider ON usage_events(provider_id);
         CREATE INDEX IF NOT EXISTS idx_usage_events_provider_request ON usage_events(provider_id, request_id);
+        CREATE INDEX IF NOT EXISTS idx_usage_events_provider_raw_hash ON usage_events(provider_id, raw_record_hash);
         CREATE INDEX IF NOT EXISTS idx_usage_events_project ON usage_events(project_id);
         CREATE INDEX IF NOT EXISTS idx_usage_events_model ON usage_events(model);
         CREATE UNIQUE INDEX IF NOT EXISTS idx_usage_events_dedupe ON usage_events(id);
@@ -2847,6 +2851,18 @@ fn cleanup_known_bad_imports(conn: &Connection) -> rusqlite::Result<()> {
         WHERE replace(lower(source_file_path), '/', '\\') LIKE '%\\.codex\\tmp\\%'
            OR replace(lower(source_file_path), '/', '\\') LIKE '%\\.codex\\plugins\\%'
            OR replace(lower(source_file_path), '/', '\\') LIKE '%\\plugin-eval\\%';
+
+        -- Codex rollouts copied by archiving or zstd compression: keep the first row.
+        DELETE FROM usage_events
+        WHERE parser_id = 'codex' AND id IN (
+          SELECT id FROM (
+            SELECT id, ROW_NUMBER() OVER (
+              PARTITION BY provider_id, raw_record_hash ORDER BY created_at, id
+            ) AS copy_number
+            FROM usage_events
+            WHERE parser_id = 'codex' AND raw_record_hash IS NOT NULL
+          ) WHERE copy_number > 1
+        );
 
         DELETE FROM conversations
         WHERE id NOT IN (
@@ -2966,16 +2982,75 @@ fn is_configured_claude_path(path: &Path) -> bool {
         .any(|root| path == root || path.starts_with(root))
 }
 
+/// Folders inside a Codex home that hold rollouts with token usage.
+const CODEX_ROLLOUT_DIRS: [&str; 3] = ["sessions", "archived_sessions", "handoffs"];
+
+fn is_codex_home(path: &Path) -> bool {
+    CODEX_ROLLOUT_DIRS.iter().any(|dir| path.join(dir).is_dir())
+}
+
+fn absolute_from_home(home: &Path, raw: &str) -> PathBuf {
+    let path = expand_tilde(raw);
+    if path.is_absolute() {
+        path
+    } else {
+        home.join(path)
+    }
+}
+
+/// `~/.codex`, `$CODEX_HOME`, and extra homes used for other accounts:
+/// `~/.codex-<name>` and `~/.codex-accounts/<name>`.
+fn codex_source_paths(home: &Path, configured_dir: Option<&str>) -> Vec<PathBuf> {
+    let mut paths = vec![home.join(".codex")];
+    if let Some(raw) = configured_dir.map(str::trim).filter(|value| !value.is_empty()) {
+        paths.push(absolute_from_home(home, raw));
+    }
+    let child_homes = |dir: &Path, prefix: &str| -> Vec<PathBuf> {
+        let mut found: Vec<PathBuf> = fs::read_dir(dir)
+            .into_iter()
+            .flatten()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().starts_with(prefix))
+            .map(|entry| entry.path())
+            .filter(|path| is_codex_home(path))
+            .collect();
+        found.sort();
+        found
+    };
+    paths.extend(child_homes(home, ".codex-"));
+    paths.extend(child_homes(&home.join(".codex-accounts"), ""));
+    let mut unique = Vec::new();
+    for path in paths {
+        if !unique.contains(&path) {
+            unique.push(path);
+        }
+    }
+    unique
+}
+
+fn is_configured_codex_path(path: &Path) -> bool {
+    let Some(home) = dirs::home_dir() else {
+        return false;
+    };
+    let Some(configured) = std::env::var("CODEX_HOME").ok().filter(|v| !v.trim().is_empty()) else {
+        return false;
+    };
+    path.starts_with(absolute_from_home(&home, configured.trim()))
+}
+
 fn candidate_sources() -> Vec<CandidateSource> {
     let mut candidates = Vec::new();
     if let Some(home) = dirs::home_dir() {
-        candidates.extend([
-            CandidateSource {
+        let configured_codex_dir = std::env::var("CODEX_HOME").ok();
+        for path in codex_source_paths(&home, configured_codex_dir.as_deref()) {
+            candidates.push(CandidateSource {
                 provider_id: "openai",
                 parser_id: "codex",
                 display_name: "Codex",
-                path: home.join(".codex"),
-            },
+                path,
+            });
+        }
+        candidates.extend([
             CandidateSource {
                 provider_id: "google",
                 parser_id: "gemini",
@@ -3068,7 +3143,27 @@ fn count_candidate_files(path: &Path) -> usize {
         .count()
 }
 
+fn is_zstd_file(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("zst"))
+}
+
+/// Codex compresses old rollouts to `*.jsonl.zst`; parse them under their
+/// uncompressed name so file-name based inference stays the same.
+fn logical_path(path: &Path) -> PathBuf {
+    if is_zstd_file(path) {
+        path.with_extension("")
+    } else {
+        path.to_path_buf()
+    }
+}
+
 fn is_candidate_file(path: &Path) -> bool {
+    if is_zstd_file(path) {
+        let inner = logical_path(path);
+        return !is_zstd_file(&inner) && is_candidate_file(&inner);
+    }
     if is_skipped_file(path) {
         return false;
     }
@@ -3160,24 +3255,73 @@ fn ensure_claude_source_at(conn: &Connection, path: &Path) -> Result<bool, Strin
     if existing.is_some() {
         return Ok(false);
     }
-    ensure_provider(conn, "anthropic", provider_display_name("anthropic")).map_err(to_string)?;
-    let id = Uuid::new_v4().to_string();
+    insert_auto_source(conn, "anthropic", "claude", "Claude Code", &path_str)?;
+    Ok(true)
+}
+
+fn insert_auto_source(
+    conn: &Connection,
+    provider_id: &str,
+    parser_id: &str,
+    display_name: &str,
+    path: &str,
+) -> Result<(), String> {
+    ensure_provider(conn, provider_id, provider_display_name(provider_id)).map_err(to_string)?;
     let now_ts = now();
     conn.execute(
         "INSERT INTO log_sources
         (id, provider_id, parser_id, display_name, path, enabled, recursive, include_patterns, exclude_patterns,
          detection_confidence, last_scan_status, last_scan_message, created_at, updated_at)
-         VALUES (?1, 'anthropic', 'claude', 'Claude Code', ?2, 1, 1, ?3, ?4, 'auto', NULL, NULL, ?5, ?5)",
+         VALUES (?1, ?2, ?3, ?4, ?5, 1, 1, ?6, ?7, 'auto', NULL, NULL, ?8, ?8)",
         params![
-            id,
-            path_str,
-            "*.json,*.jsonl,*.log,*.txt,*.md",
+            Uuid::new_v4().to_string(),
+            provider_id,
+            parser_id,
+            display_name,
+            path,
+            "*.json,*.jsonl,*.jsonl.zst,*.log,*.txt,*.md",
             "node_modules,.git,target,dist,build,.next,vendor",
             now_ts
         ],
     )
     .map_err(to_string)?;
-    Ok(true)
+    Ok(())
+}
+
+fn ensure_codex_sources(conn: &Connection) -> Result<usize, String> {
+    let Some(home) = dirs::home_dir() else {
+        return Ok(0);
+    };
+    let configured_dir = std::env::var("CODEX_HOME").ok();
+    ensure_codex_sources_at(conn, &codex_source_paths(&home, configured_dir.as_deref()))
+}
+
+/// Registers every Codex home that holds rollouts, unless an existing source
+/// already covers it (same folder, a parent, or a folder inside it).
+fn ensure_codex_sources_at(conn: &Connection, homes: &[PathBuf]) -> Result<usize, String> {
+    let mut existing: Vec<PathBuf> = conn
+        .prepare("SELECT path FROM log_sources")
+        .map_err(to_string)?
+        .query_map([], |r| r.get::<_, String>(0))
+        .map_err(to_string)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(to_string)?
+        .into_iter()
+        .map(PathBuf::from)
+        .collect();
+    let mut added = 0;
+    for home in homes {
+        if !home.is_dir() || !is_codex_home(home) {
+            continue;
+        }
+        if existing.iter().any(|path| home.starts_with(path) || path.starts_with(home)) {
+            continue;
+        }
+        insert_auto_source(conn, "openai", "codex", "Codex", &home.to_string_lossy())?;
+        existing.push(home.clone());
+        added += 1;
+    }
+    Ok(added)
 }
 
 fn infer_source(path: &Path) -> (String, String, String) {
@@ -3187,7 +3331,7 @@ fn infer_source(path: &Path) -> (String, String, String) {
         || is_configured_claude_path(path)
     {
         ("anthropic".into(), "claude".into(), "Claude Code".into())
-    } else if text.contains(".codex") {
+    } else if text.contains(".codex") || is_configured_codex_path(path) {
         ("openai".into(), "codex".into(), "Codex".into())
     } else if text.contains(".gemini") {
         ("google".into(), "gemini".into(), "Gemini".into())
@@ -3274,6 +3418,13 @@ fn scan_source(conn: &Connection, source: &Source, full_scan: bool) -> Result<us
     let mut walk_roots = vec![root.clone()];
     if source.parser_id == "claude" {
         walk_roots.extend(claude_projects_link(&root));
+    }
+    if source.parser_id == "codex" && is_codex_home(&root) {
+        walk_roots = CODEX_ROLLOUT_DIRS
+            .iter()
+            .map(|dir| root.join(dir))
+            .filter(|dir| dir.is_dir())
+            .collect();
     }
     'walk: for entry in walk_roots.iter().flat_map(|walk_root| {
         WalkDir::new(walk_root)
@@ -3483,7 +3634,17 @@ fn parse_content(source: &Source, path: &Path, content: &str) -> Vec<ParsedEvent
 fn parse_file_streaming(source: &Source, path: &Path) -> Result<Vec<ParsedEvent>, String> {
     let file = fs::File::open(path).map_err(to_string)?;
     let metadata = file.metadata().map_err(to_string)?;
-    let reader = BufReader::new(file);
+    let compressed = is_zstd_file(path);
+    let logical = logical_path(path);
+    let path = logical.as_path();
+    let reader: Box<dyn BufRead> = if compressed {
+        let mut decoder = zstd::stream::read::Decoder::new(file).map_err(to_string)?;
+        // Accept frames written with long-distance matching (window up to 2 GB).
+        decoder.window_log_max(31).map_err(to_string)?;
+        Box::new(BufReader::new(decoder))
+    } else {
+        Box::new(BufReader::new(file))
+    };
     let mut events = Vec::new();
     let mut offset = 0i64;
     let mut codex_context = CodexParseContext::default();
@@ -3510,7 +3671,7 @@ fn parse_file_streaming(source: &Source, path: &Path) -> Result<Vec<ParsedEvent>
 
     // If no JSONL events were found and the file is small enough, try parsing it as a
     // single JSON object/array. Files larger than 100 MB are not read into memory.
-    if events.is_empty() && metadata.len() <= 100 * 1024 * 1024 {
+    if events.is_empty() && !compressed && metadata.len() <= 100 * 1024 * 1024 {
         if let Ok(content) = fs::read_to_string(path) {
             events.extend(parse_content(source, path, &content));
         }
@@ -3535,6 +3696,9 @@ fn parse_line_into_events(
         update_codex_context(codex_context, &value);
         update_generic_context(source, generic_context, &value);
         let parsed = if source.parser_id == "codex" {
+            if codex_context.repeats_last_total(&value) {
+                return;
+            }
             parse_codex_value(source, path, &value, offset, trimmed, codex_context)
         } else {
             parse_value(source, path, &value, offset, trimmed, Some(generic_context))
@@ -3554,6 +3718,20 @@ struct CodexParseContext {
     cwd: Option<String>,
     session_id: Option<String>,
     model: Option<String>,
+    last_total: Option<Value>,
+}
+
+impl CodexParseContext {
+    /// Codex re-emits token_count (e.g. on rate-limit updates) with unchanged
+    /// totals; counting its last_token_usage again would double count.
+    fn repeats_last_total(&mut self, value: &Value) -> bool {
+        let Some(total) = value.pointer("/payload/info/total_token_usage") else {
+            return false;
+        };
+        let repeated = self.last_total.as_ref() == Some(total);
+        self.last_total = Some(total.clone());
+        repeated
+    }
 }
 
 fn update_codex_context(context: &mut CodexParseContext, value: &Value) {
@@ -3636,7 +3814,7 @@ fn parse_codex_value(
                 .unwrap_or(0)
         }
     };
-    let cache_write = int_field(usage, &["cache_creation_input_tokens", "cache_write_tokens"]);
+    let cache_write = int_field(usage, &["cache_creation_input_tokens", "cache_write_tokens", "cache_write_input_tokens"]);
     let cache_read = int_field(usage, &["cache_read_input_tokens", "cache_read_tokens"]);
     let reasoning = int_field(usage, &["reasoning_output_tokens", "reasoning_tokens"]);
     let total = int_field(usage, &["total_tokens"]);
@@ -3929,7 +4107,7 @@ fn insert_event(
             event.raw_record_hash
         ))
     };
-    if let Some(legacy_id) = find_legacy_event_id(conn, source, file_path, &event)? {
+    if let Some(legacy_id) = find_legacy_event_id(conn, source, file_path, &event, &id)? {
         let now = now();
         conn.execute(
             "UPDATE usage_events SET
@@ -4050,6 +4228,11 @@ fn insert_event(
     Ok(changed > 0)
 }
 
+const CODEX_LEGACY_EVENT_SQL: &str = "SELECT id FROM usage_events
+     WHERE provider_id = ?1 AND raw_record_hash = ?2 AND id != ?3
+     ORDER BY created_at, id
+     LIMIT 1";
+
 const CLAUDE_LEGACY_EVENT_SQL: &str = "SELECT id FROM usage_events
      WHERE provider_id = ?1 AND request_id = ?2
      ORDER BY CASE WHEN source_file_path LIKE '%--claude-worktrees-%' THEN 1 ELSE 0 END,
@@ -4061,7 +4244,20 @@ fn find_legacy_event_id(
     source: &Source,
     file_path: &Path,
     event: &ParsedEvent,
+    id: &str,
 ) -> Result<Option<String>, String> {
+    if source.parser_id == "codex" {
+        // The same rollout line reappears when Codex archives a session or
+        // compresses it to `.jsonl.zst`, and when two Codex homes overlap.
+        return conn
+            .query_row(
+                CODEX_LEGACY_EVENT_SQL,
+                params![event.provider_id, event.raw_record_hash, id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(to_string);
+    }
     if source.parser_id == "claude" {
         if let Some(request_id) = event.request_id.as_deref() {
             return conn
@@ -5555,5 +5751,336 @@ fn json_f64(value: Option<&Value>) -> Option<f64> {
         Some(Value::Number(n)) => n.as_f64(),
         Some(Value::String(s)) => s.parse().ok(),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod codex_tests {
+    use super::*;
+
+    const FIXTURE_DIR: &str = "../fixtures/codex/rollout-2026-10";
+
+    fn conn() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+        seed_defaults(&conn).unwrap();
+        conn
+    }
+
+    fn temp_root(name: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("metr-{name}-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    fn fixture(ext: &str) -> PathBuf {
+        fs::read_dir(FIXTURE_DIR)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .find(|p| p.to_string_lossy().ends_with(ext))
+            .unwrap()
+    }
+
+    fn codex_source(path: &Path) -> Source {
+        Source {
+            id: format!("codex-{}", Uuid::new_v4()),
+            provider_id: "openai".to_string(),
+            parser_id: "codex".to_string(),
+            display_name: "Codex".to_string(),
+            path: path.to_string_lossy().to_string(),
+            enabled: true,
+            detection_confidence: "auto".to_string(),
+            last_scan_status: None,
+            last_scan_message: None,
+        }
+    }
+
+    fn token_rows(conn: &Connection) -> Vec<(String, i64, i64, i64)> {
+        conn.prepare(
+            "SELECT timestamp, input_tokens, cached_input_tokens, output_tokens
+             FROM usage_events ORDER BY timestamp",
+        )
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
+    }
+
+    fn copy_fixture(to: &Path, ext: &str) {
+        fs::create_dir_all(to.parent().unwrap()).unwrap();
+        fs::copy(fixture(ext), to).unwrap();
+    }
+
+    const ROLLOUT: &str = "rollout-2026-10-29T10-00-00-fixture.jsonl";
+
+    #[test]
+    fn zst_rollout_parses_like_plain_rollout() {
+        let source = codex_source(Path::new(FIXTURE_DIR));
+        let plain = parse_file_streaming(&source, &fixture(".jsonl")).unwrap();
+        let compressed = parse_file_streaming(&source, &fixture(".jsonl.zst")).unwrap();
+        assert_eq!(plain.len(), 2, "repeated token_count totals must not count twice");
+        let summary = |events: &[ParsedEvent]| -> Vec<_> {
+            events
+                .iter()
+                .map(|e| {
+                    (
+                        e.timestamp.clone(),
+                        e.input_tokens,
+                        e.cached_input_tokens,
+                        e.output_tokens,
+                        e.reasoning_tokens,
+                        e.model.clone(),
+                        e.project_path.clone(),
+                        e.source_offset,
+                        e.raw_record_hash.clone(),
+                    )
+                })
+                .collect()
+        };
+        assert_eq!(summary(&plain), summary(&compressed));
+        assert_eq!(plain[0].input_tokens, 12000);
+        assert_eq!(plain[1].input_tokens, 13000);
+        assert_eq!(plain[0].model.as_deref(), Some("gpt-6.1-terra"));
+        assert_eq!(plain[0].project_path.as_deref(), Some("/home/dev/Projects/fixture-app"));
+    }
+
+    #[test]
+    fn zst_candidates_require_a_supported_inner_extension() {
+        assert!(is_candidate_file(Path::new("/h/.codex/sessions/rollout-a.jsonl.zst")));
+        assert!(is_candidate_file(Path::new("/h/.codex/sessions/rollout-a.JSONL.ZST")));
+        assert!(!is_candidate_file(Path::new("/h/.codex/sessions/rollout-a.zst")));
+        assert!(!is_candidate_file(Path::new("/h/.codex/sessions/backup.tar.zst")));
+        assert!(!is_candidate_file(Path::new("/h/.codex/sessions/a.jsonl.zst.zst")));
+    }
+
+    #[test]
+    fn compressing_or_archiving_a_rollout_adds_no_events() {
+        let conn = conn();
+        let home = temp_root("codex-zst");
+        let live = home.join("sessions/2026/10/29").join(ROLLOUT);
+        copy_fixture(&live, ".jsonl");
+        let source = codex_source(&home);
+
+        scan_source(&conn, &source, false).unwrap();
+        let before = token_rows(&conn);
+        assert_eq!(before.len(), 2);
+
+        // Codex compresses the rollout in place, then archives it.
+        fs::remove_file(&live).unwrap();
+        copy_fixture(&live.with_extension("jsonl.zst"), ".jsonl.zst");
+        scan_source(&conn, &source, false).unwrap();
+        assert_eq!(token_rows(&conn), before);
+
+        copy_fixture(&home.join("archived_sessions").join(format!("{ROLLOUT}.zst")), ".jsonl.zst");
+        scan_source(&conn, &source, true).unwrap();
+        assert_eq!(token_rows(&conn), before);
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn overlapping_codex_homes_do_not_double_count() {
+        let conn = conn();
+        let root = temp_root("codex-overlap");
+        let a = root.join(".codex-acct2");
+        let b = root.join(".codex-accounts/acct2");
+        copy_fixture(&a.join("sessions").join(ROLLOUT), ".jsonl");
+        copy_fixture(&b.join("sessions").join(format!("{ROLLOUT}.zst")), ".jsonl.zst");
+        scan_source(&conn, &codex_source(&a), false).unwrap();
+        scan_source(&conn, &codex_source(&b), false).unwrap();
+        assert_eq!(token_rows(&conn).len(), 2);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn codex_home_scans_only_rollout_folders() {
+        let conn = conn();
+        let home = temp_root("codex-dirs");
+        copy_fixture(&home.join("handoffs/h1").join(ROLLOUT), ".jsonl");
+        // Same token lines in a log folder must be ignored inside a Codex home.
+        let other = fs::read_to_string(fixture(".jsonl"))
+            .unwrap()
+            .replace("2026-10-29T10:00:0", "2026-10-28T10:00:0");
+        fs::create_dir_all(home.join("log")).unwrap();
+        fs::write(home.join("log/codex.log"), other).unwrap();
+        scan_source(&conn, &codex_source(&home), false).unwrap();
+        let rows = token_rows(&conn);
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|r| r.0.starts_with("2026-10-29")));
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn existing_codex_duplicates_are_cleaned_up() {
+        let conn = conn();
+        let home = temp_root("codex-cleanup");
+        copy_fixture(&home.join("sessions").join(ROLLOUT), ".jsonl");
+        scan_source(&conn, &codex_source(&home), false).unwrap();
+        // Simulate rows written by older versions for an archived copy.
+        conn.execute(
+            "INSERT INTO usage_events (id, provider_id, source_id, parser_id, parser_version, timestamp,
+               input_tokens, output_tokens, pricing_match_confidence, source_file_path,
+               source_file_modified_at, source_hash, raw_record_hash, confidence, warnings_json,
+               created_at, updated_at)
+             SELECT id || '-copy', provider_id, source_id, parser_id, parser_version, timestamp,
+               input_tokens, output_tokens, pricing_match_confidence, 'archived_sessions/' || source_file_path,
+               source_file_modified_at, source_hash, raw_record_hash, confidence, warnings_json,
+               '9999-01-01', updated_at
+             FROM usage_events",
+            [],
+        )
+        .unwrap();
+        assert_eq!(token_rows(&conn).len(), 4);
+        cleanup_known_bad_imports(&conn).unwrap();
+        let ids: Vec<String> = conn
+            .prepare("SELECT id FROM usage_events")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(ids.len(), 2);
+        assert!(ids.iter().all(|id| !id.ends_with("-copy")), "keeps the original rows");
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn codex_legacy_event_lookup_uses_raw_hash_index() {
+        let conn = conn();
+        let plan: Vec<String> = conn
+            .prepare(&format!("EXPLAIN QUERY PLAN {CODEX_LEGACY_EVENT_SQL}"))
+            .unwrap()
+            .query_map(params!["openai", "hash", "id"], |r| r.get(3))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert!(
+            plan.iter().any(|d| d.contains("idx_usage_events_provider_raw_hash")),
+            "{plan:?}"
+        );
+    }
+
+    #[test]
+    fn codex_homes_include_env_and_account_homes() {
+        let home = temp_root("codex-homes");
+        for dir in [
+            ".codex/sessions",
+            ".codex-acct2/sessions",
+            ".codex-accounts/acct2/archived_sessions",
+            ".codex-accounts/acct1",
+            ".codex-empty",
+            "work/codex-home/sessions",
+        ] {
+            fs::create_dir_all(home.join(dir)).unwrap();
+        }
+        fs::write(home.join(".codex-accounts/acct1/auth.json"), "{}").unwrap();
+        fs::write(home.join(".codex-notes"), "").unwrap();
+
+        let paths = codex_source_paths(&home, Some("work/codex-home"));
+        assert_eq!(
+            paths,
+            vec![
+                home.join(".codex"),
+                home.join("work/codex-home"),
+                home.join(".codex-acct2"),
+                home.join(".codex-accounts/acct2"),
+            ]
+        );
+        assert_eq!(codex_source_paths(&home, Some("  ")), {
+            let mut expected = paths.clone();
+            expected.remove(1);
+            expected
+        });
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    /// Smoke check against this machine's real Codex homes (prints counts only):
+    /// `cargo test --lib real_codex_homes -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn real_codex_homes_smoke() {
+        let conn = conn();
+        let home = dirs::home_dir().unwrap();
+        let configured = std::env::var("CODEX_HOME").ok();
+        let homes = codex_source_paths(&home, configured.as_deref());
+        ensure_codex_sources_at(&conn, &homes).unwrap();
+        for source in query_sources(&conn).unwrap() {
+            let imported = scan_source(&conn, &source, true).unwrap();
+            println!("{}: imported {imported}", source.path);
+        }
+        let (events, input, output): (i64, i64, i64) = conn
+            .query_row(
+                "SELECT COUNT(*), SUM(input_tokens), SUM(output_tokens) FROM usage_events",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        println!("total events {events}, input {input}, output {output}");
+        if let Ok(cutoff) = std::env::var("METR_SMOKE_CUTOFF") {
+            let stable: (i64, i64, i64) = conn
+                .query_row(
+                    "SELECT COUNT(*), SUM(input_tokens), SUM(output_tokens) FROM usage_events
+                     WHERE source_file_modified_at < ?1",
+                    params![cutoff],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .unwrap();
+            println!("files modified before {cutoff}: {stable:?}");
+        }
+    }
+
+    /// Compares a real rollout with a zstd copy of it (prints counts only):
+    /// `METR_SMOKE_PLAIN=a.jsonl METR_SMOKE_ZST=a.jsonl.zst cargo test --lib real_zst -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn real_zst_pair_smoke() {
+        let plain = PathBuf::from(std::env::var("METR_SMOKE_PLAIN").unwrap());
+        let compressed = PathBuf::from(std::env::var("METR_SMOKE_ZST").unwrap());
+        let source = codex_source(plain.parent().unwrap());
+        let a = parse_file_streaming(&source, &plain).unwrap();
+        let b = parse_file_streaming(&source, &compressed).unwrap();
+        let hashes = |events: &[ParsedEvent]| -> Vec<String> {
+            events.iter().map(|e| e.raw_record_hash.clone()).collect()
+        };
+        println!("plain {} events, zst {} events", a.len(), b.len());
+        assert_eq!(hashes(&a), hashes(&b));
+    }
+
+    #[test]
+    fn codex_homes_are_registered_once_and_respect_existing_sources() {
+        let conn = conn();
+        let home = temp_root("codex-register");
+        for dir in [".codex/sessions", ".codex-acct2/sessions", ".codex-x/sessions"] {
+            fs::create_dir_all(home.join(dir)).unwrap();
+        }
+        // An existing manual source inside .codex-x covers that home.
+        insert_auto_source(
+            &conn,
+            "openai",
+            "codex",
+            "Codex",
+            &home.join(".codex-x/sessions").to_string_lossy(),
+        )
+        .unwrap();
+        let homes = codex_source_paths(&home, None);
+
+        assert_eq!(ensure_codex_sources_at(&conn, &homes).unwrap(), 2);
+        assert_eq!(ensure_codex_sources_at(&conn, &homes).unwrap(), 0);
+        let mut paths: Vec<String> = query_sources(&conn)
+            .unwrap()
+            .into_iter()
+            .map(|s| {
+                assert_eq!((s.provider_id.as_str(), s.parser_id.as_str()), ("openai", "codex"));
+                s.path
+            })
+            .collect();
+        paths.sort();
+        let mut expected: Vec<String> = [".codex", ".codex-acct2", ".codex-x/sessions"]
+            .iter()
+            .map(|d| home.join(d).to_string_lossy().to_string())
+            .collect();
+        expected.sort();
+        assert_eq!(paths, expected);
+        fs::remove_dir_all(home).unwrap();
     }
 }
