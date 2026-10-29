@@ -19,6 +19,19 @@ Inputs: PO brief (`~/Developer/_po/metr-po.md`), Guardian sweep (Oct 29) + adden
    (127.0.0.1 and Tailscale only).
 6. **GitHub:** Guardian will add the deploy key; keep committing locally until then.
 
+## Definition of done (Petar, Oct 29 18:29 Dubai)
+A correct, **deduplicated total of ALL Claude (Anthropic) and Codex (OpenAI) usage across every
+machine**, with optimized scanning and app → server sync, proven by a **reconciliation report per
+machine and per provider** (files found, events, tokens locally vs what the server holds; zero
+double counts).
+
+| Machine | Sources | How |
+|---|---|---|
+| the20th | `~/.claude`, `~/.codex`, `~/.codex-acct2` (+ `~/.codex-accounts/*`) | Linux CLI/daemon (M2) |
+| the18th (server) | `/root/.codex` (254 session files, codex CLI at `/usr/local/bin/codex`), no Claude | Same Linux build, run as root (root-readable scan), syncing to local metr-sync. **Guardian installs; PO provides build + steps.** |
+| Mac | `~/.claude` (single account), Codex incl. `.zst` + Codex app DBs if they hold usage | Desktop release (M1 fixes) |
+| Windows | later, via Windows-side agent sweep (Guardian drafts email for Petar) | Desktop release |
+
 ## Goals
 - **(a)** Own METR development on the20th.
 - **(b)** Linux edition: headless daemon (`systemd --user`) + CLI (`metr usage|sync|status|self-update`)
@@ -60,8 +73,9 @@ costs reporting, not data).
    Codex Oct counts should jump, no duplicates. Then decide item 2.
 
 ### M2 — the20th tracked: Linux CLI/daemon + web UI
-1. **Core crate split** (mechanical): workspace `crates/metr-core` (db, scanner, parsers, pricing,
-   sync client) shared by `src-tauri` and `crates/metr-cli`. CLI token in a 0600 file under
+1. **Shared core** (mechanical): Tauri commands and `run()` behind an `app` cargo feature (default on);
+   tauri crates optional. Workspace member `src-tauri/cli` (binary `metr`) depends on the core with
+   `default-features = false`, so it builds without webkit and Mac/Windows builds are unchanged. CLI token in a 0600 file under
    `~/.config/metr/` when no Secret Service.
 2. **CLI** `metr`: `status` (incl. drift report), `usage [--since --until --provider --by day|model|project] --json`,
    `scan`, `sync [--full]`, `login` (Petar types the password), `self-update`, `daemon`, `serve`.
@@ -69,11 +83,29 @@ costs reporting, not data).
    (127.0.0.1 + Tailscale IP via `tailscale ip -4`); refuses `0.0.0.0`/`::`.
 4. **Install on the20th**: `~/.local/bin/metr`, `systemd --user` `metr.service`. Sources: `~/.claude`
    + all Codex homes. Device `linux-the20th`. Verify server receives events; Mac + Windows keep syncing.
-5. **Linux self-update**: release.yml builds the signed `metr-cli-linux-x86_64` tarball; server
-   UpdateController serves target `linux-cli` (additive; Mac/Windows untouched).
+4b. **the18th**: release build + install steps for the Guardian (root, `/root/.codex`, system or root
+   user unit, sync to the local metr-sync URL; web UI off or localhost-only).
+5. **Linux self-update:** stage 1 `metr self-update` rebuilds from the local git checkout and swaps the
+   binary atomically (the20th). Stage 2 (later): signed tarball via release.yml + server target
+   `linux-cli` (needs the18th's `/usr/local/sbin/metr-release-publish` wrapper changed: Guardian).
 6. Review + test before deploy.
 
-### M3 — Follow-ups
+### M3 — Fast scan + sync, reconciliation (definition of done)
+1. **Incremental scan by offset:** append-only JSONL (Claude, plain Codex) resumes at the last parsed
+   byte offset when the file only grew (prefix check), with the Codex parse context (session, cwd,
+   model, last total) saved per file. No full rescans in normal operation; `.zst` files are immutable,
+   parsed once.
+2. **Sync:** larger batches, idempotent event ids (already: server dedupes on request/message/raw hash),
+   retry with backoff on 429/5xx, resume after failure without resending synced rows.
+3. **Reconciliation report:** `metr reconcile` (CLI) and a desktop view: per provider, files found,
+   events, input/output/cache tokens locally vs server totals for this device; flags mismatches and any
+   duplicate identities. Needs an additive read-only server endpoint
+   (`GET /api/v1/sync/summary`, per device + provider), on a branch, reviewed, deploy verified.
+4. Cross-machine report (server side): per device × provider totals, plus a duplicate-identity check
+   (same raw hash from two devices = expected only for copied logs).
+5. Run on all 4 machines; publish the report (STATUS.md + artifact for Petar).
+
+### M4 — Follow-ups
 - Claude desktop `local-agent-mode-sessions` (B) once sample arrives.
 - Grok Bot scanner, only if research finds local token data.
 - Codex sqlite fallback (2) only if the Mac re-sweep still shows a gap.
