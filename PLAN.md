@@ -86,3 +86,11 @@ costs reporting, not data).
 No DB restarts or destructive migrations without Petar; additive migrations only. Never expose
 ports publicly. Never print/commit secrets, tokens, or conversation content (inspect key names and
 counts only). No kill-by-name on the20th. Don't break Mac/Windows update channel.
+
+## Branch, deploy and release rules (Guardian, Oct 29)
+- Push to `main` touching `sync-server/backend/**` (or `deploy-backend.yml`) **auto-deploys live metr-sync**.
+  All code work on feature branches; merge to `main` only after review + test.
+- Right after any backend merge: verify metr-sync (login, dashboard, `/api/v1/sync/events` still
+  accepted from the Mac and Windows devices).
+- Tag `vX.Y.Z` triggers app releases (release.yml): tag only when a release is reviewed and ready.
+- Docs-only commits may go straight to `main`.
