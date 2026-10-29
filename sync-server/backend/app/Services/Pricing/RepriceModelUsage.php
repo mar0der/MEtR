@@ -11,13 +11,18 @@ class RepriceModelUsage
         private CalculateUsageCost $calculateUsageCost,
     ) {}
 
-    public function handle(string $providerId, string $model): int
+    /**
+     * Reprices one provider/model with the current catalog. Writes only rows
+     * whose cost or price match changed; returns the number of rows written.
+     */
+    public function handle(string $providerId, string $model, bool $onlyMissing = false): int
     {
         $updated = 0;
 
         UsageEvent::query()
             ->where('provider_id', $providerId)
             ->where('model', $model)
+            ->when($onlyMissing, fn ($query) => $query->whereNull('official_api_cost_usd'))
             ->orderBy('id')
             ->chunkById(500, function ($events) use (&$updated) {
                 foreach ($events as $event) {
@@ -41,12 +46,15 @@ class RepriceModelUsage
                         ? $this->calculateUsageCost->handle($price, $tokens, $event->provider_id)
                         : ['cost' => null, 'pricing_match_confidence' => 'missing'];
 
-                    $event->update([
+                    $event->fill([
                         'official_api_cost_usd' => $costData['cost'],
                         'model_price_id' => $price?->id,
                         'pricing_match_confidence' => $costData['pricing_match_confidence'],
                     ]);
-                    $updated++;
+                    if ($event->isDirty()) {
+                        $event->save();
+                        $updated++;
+                    }
                 }
             });
 

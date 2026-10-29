@@ -70,12 +70,16 @@ class UpdateModelPrices extends Command
             $grouped[$providerId][$model] = $price;
         }
 
+        $startedAt = now()->subSecond();
         foreach ($grouped as $providerId => $prices) {
             $this->info("Updating {$providerId}: ".count($prices).' model(s)');
             $updater->handleMultiProvider($observation, $providerId, $prices, '2025-01-01');
         }
 
         $this->info('Done. Total models: '.count($parsed));
+
+        // New catalog rows do not reprice stored events by themselves.
+        $this->call('metr:prices:reprice', ['--changed-since' => $startedAt->toDateTimeString()]);
 
         return self::SUCCESS;
     }
