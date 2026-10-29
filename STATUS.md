@@ -62,6 +62,12 @@ Next: M3 (incremental scan by offset, sync batching/retry, reconciliation endpoi
 - **Cost mismatch fixed on `fix/price-parity`** (in review): headless sync pulls server prices after each upload (gpt-6.1-terra was unpriced locally), server stores + prices 1-hour cache writes like the client. Needs one additive `artisan migrate` after deploy, then full resync per device.
 - app_version: works (re-registered every sync); the18th simply runs 26.41.0.
 
+## 2026-10-29 ~20:20 — price parity merged (`cdfaec3`)
+- Version scheme fixed (26.44.0 = ISO week 44; `scripts/bump-version.sh`; CI checks the week; tag v26.41.0 left as is, unpublished). Tag v26.44.0 waits for the CI route fix.
+- Price parity merged (reviewed): the20th local costs now track the server (openai $96.16 local vs $94.60 server before the latest uploads). Server 1-hour cache pricing goes live with the next deploy + one `artisan migrate`.
+- the20th reinstalled (26.44.0 with price pull). the18th upgrade package + steps: outbox `20261029-2015-the18th-26.44.0.md`.
+- Cleanup: src-tauri/target, backend vendor, scratch files removed again.
+
 ## Mac cleanup: retire ~/.claude-accounts (for Guardian to run on the Mac, Petar approving)
 Petar decision 18:26: one Claude account now; METR scans only the real `~/.claude`. Do not run step 4 until steps 1–3 are clean.
 1. **Read-only checks**
