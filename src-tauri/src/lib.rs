@@ -5078,6 +5078,7 @@ mod tests {
             .collect::<Result<_, _>>()
             .unwrap();
         assert_eq!(rows, [448, 448]);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     fn scan_test_root(name: &str) -> PathBuf {
