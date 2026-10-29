@@ -113,7 +113,9 @@ costs reporting, not data).
    (`GET /api/v1/sync/summary`, per device + provider), on a branch, reviewed, deploy verified.
 4. Cross-machine report (server side): per device × provider totals, plus a duplicate-identity check
    (same raw hash from two devices = expected only for copied logs).
-5. Run on all 4 machines; publish the report (STATUS.md + artifact for Petar).
+5. Run on all 4 machines; publish the report (STATUS.md + artifact for Petar). Report "son's MacBook Air"
+   (server device "Petar's MacBook Air") as its own line, with grand totals both with and without it.
+   Never delete any device or its events (Petar, Oct 29 20:20).
 
 ### M4 — Follow-ups
 - Claude desktop `local-agent-mode-sessions` (B) once sample arrives.

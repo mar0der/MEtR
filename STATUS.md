@@ -84,9 +84,9 @@ Petar decision 18:26: one Claude account now; METR scans only the real `~/.claud
 
 ## needs-petar
 - **After the next backend deploy:** run once `docker exec metr-sync-php php artisan migrate --force` (additive: `usage_events.cache_write_1h_tokens`), then full resync on each device to reprice 1-hour cache writes.
-- **Server device cleanup (nothing deleted yet; destructive, needs your OK):**
-  1. Seed/test devices "Petar's MacBook Air" and "Windows Desktop" (no app version, last seen Jun 5–7, ~15–22 events per provider incl. cline/cursor/google/kimi): look like `metr:demo-seed` data → proposal: delete these 2 devices and their events.
-  2. Stale macos-m1.local and macos-Petars-MacBook-Air.local (May 13): keep for now; once `/sync/reconcile` is live, `metr reconcile --all` shows whether their rows duplicate the current Mac (same raw line on two devices). Delete only duplicated ones.
+- **Server devices (Petar 20:20: NO deletions):**
+  1. "Petar's MacBook Air" = **Petar's son's MacBook Air** (real, keep forever, never delete). Reported as its own line "son's MacBook Air"; reports give totals with and without it. "Windows Desktop" is treated as real too. (My earlier "seed device" proposal is withdrawn.)
+  2. Petar's own Macs: "MacBook Air 3" / "MacBook Air 5" (macos-…). Stale macos-m1.local / macos-Petars-MacBook-Air.local (May 13): kept; `metr reconcile --all` (once deployed) only reports whether their rows duplicate another device.
   3. Cursor/Kimi rows on the current Mac (tracking is Claude/Codex only): proposal: keep the data, default the dashboards to Anthropic + OpenAI, and stop scanning non-Claude/Codex sources in the next desktop release. Alternative: delete those rows.
 - **CI cannot reach the deploy host** (blocks releases since 26.40.2 and backend deploys): fix the runner→the18th Tailscale route/secret, then re-run runs 40899903389 and 40893433131.
 - **Device alias leak:** server device `windows-DESKTOP-PG7TRK4` (last seen Oct 9) has an API-key-like string as its alias. Proposal: clear that alias (single-row UPDATE, non-destructive). Please rotate that Kimi key. Not printed anywhere.
