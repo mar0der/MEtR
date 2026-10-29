@@ -17,7 +17,12 @@ required-features = ["app"]
 [features]
 default = ["app"]
 # The Tauri desktop app. The Linux CLI (cli/) builds the core without it.
-app = ["dep:tauri", "dep:tauri-build", "dep:tauri-plugin-updater", "dep:tauri-plugin-dialog", "dep:tauri-plugin-process"]
+app = ["native-tls", "dep:tauri", "dep:tauri-build", "dep:tauri-plugin-updater", "dep:tauri-plugin-dialog", "dep:tauri-plugin-process"]
+
+# HTTPS for the sync client: the desktop app uses the OS TLS stack; the
+# portable Linux CLI uses rustls so it does not need libssl.
+native-tls = ["reqwest/default-tls"]
+rustls = ["reqwest/rustls-tls"]
 
 [workspace]
 members = ["cli"]
@@ -28,7 +33,7 @@ tauri-build = { version = "2.5.2", features = [], optional = true }
 [dependencies]
 chrono = { version = "0.4.42", features = ["serde"] }
 dirs = "6.0.0"
-reqwest = { version = "0.12", features = ["json", "blocking"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "blocking", "http2", "charset", "macos-system-configuration"] }
 whoami = "1.6.0"
 rusqlite = { version = "0.37.0", features = ["bundled"] }
 serde = { version = "1.0.228", features = ["derive"] }
