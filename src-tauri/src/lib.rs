@@ -3,10 +3,10 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::error::Error;
 use std::fs;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -2791,6 +2791,8 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         ",
     )?;
     add_column_if_missing(conn, "usage_events", "synced_at", "TEXT")?;
+    add_column_if_missing(conn, "indexed_files", "drift_json", "TEXT")?;
+    add_column_if_missing(conn, "log_sources", "drift_json", "TEXT")?;
     add_column_if_missing(conn, "usage_events", "sync_batch_id", "TEXT")?;
     add_column_if_missing(conn, "usage_events", "sync_error", "TEXT")?;
     add_column_if_missing(conn, "usage_events", "event_type", "TEXT")?;
@@ -3415,11 +3417,13 @@ fn scan_source(conn: &Connection, source: &Source, full_scan: bool) -> Result<us
     let mut skipped_unchanged = 0usize;
     let mut skipped_after_limit = false;
     let mut total_bytes_scanned: u64 = 0;
+    let codex_home = source.parser_id == "codex" && is_codex_home(&root);
+    let mut drift = DriftReport::default();
     let mut walk_roots = vec![root.clone()];
     if source.parser_id == "claude" {
         walk_roots.extend(claude_projects_link(&root));
     }
-    if source.parser_id == "codex" && is_codex_home(&root) {
+    if codex_home {
         walk_roots = CODEX_ROLLOUT_DIRS
             .iter()
             .map(|dir| root.join(dir))
@@ -3434,7 +3438,16 @@ fn scan_source(conn: &Connection, source: &Source, full_scan: bool) -> Result<us
             .filter_entry(|e| !e.file_type().is_dir() || !is_skipped_dir(e.path()))
             .filter_map(Result::ok)
     }) {
-        if !entry.file_type().is_file() || !is_candidate_file(entry.path()) {
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        if !is_candidate_file(entry.path()) {
+            if codex_home {
+                let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
+                let ext = name.split_once('.').map(|(_, ext)| ext).unwrap_or("(none)");
+                *drift.unscanned_file_types.entry(ext.to_string()).or_default() += 1;
+                drift.note_sample(entry.path());
+            }
             continue;
         }
         if scanned_files >= MAX_SCAN_FILES_PER_SOURCE {
@@ -3468,9 +3481,13 @@ fn scan_source(conn: &Connection, source: &Source, full_scan: bool) -> Result<us
             metadata.len(),
             modified
         ));
-        let events = match parse_file_streaming(source, entry.path()) {
-            Ok(events) => events,
-            Err(_) => continue,
+        let (events, file_drift) = match parse_file_with_drift(source, entry.path()) {
+            Ok(parsed) => parsed,
+            Err(_) => {
+                drift.unreadable_files += 1;
+                drift.note_sample(entry.path());
+                continue;
+            }
         };
         // One transaction per file: far fewer WAL commits, and a failure rolls back only this file.
         let tx = conn.unchecked_transaction().map_err(to_string)?;
@@ -3488,14 +3505,45 @@ fn scan_source(conn: &Connection, source: &Source, full_scan: bool) -> Result<us
             "ok",
             Some("Indexed successfully."),
         )?;
+        tx.execute(
+            "UPDATE indexed_files SET drift_json = ?1 WHERE source_id = ?2 AND path = ?3",
+            params![
+                (!file_drift.is_clean())
+                    .then(|| serde_json::to_string(&file_drift).unwrap_or_default()),
+                source.id,
+                entry.path().to_string_lossy()
+            ],
+        )
+        .map_err(to_string)?;
         tx.commit().map_err(to_string)?;
     }
+    collect_indexed_drift(conn, source, &mut drift)?;
+    if codex_home {
+        let outside = codex_token_files_outside_rollout_dirs(&root);
+        drift.token_files_outside_rollout_dirs = outside.len();
+        for path in &outside {
+            drift.note_sample(path);
+        }
+    }
+    let drift_note = if drift.is_clean() {
+        String::new()
+    } else {
+        format!(" {}", drift.summary())
+    };
+    conn.execute(
+        "UPDATE log_sources SET drift_json = ?1 WHERE id = ?2",
+        params![
+            (!drift.is_clean()).then(|| serde_json::to_string(&drift).unwrap_or_default()),
+            source.id
+        ],
+    )
+    .map_err(to_string)?;
     conn.execute(
         "UPDATE log_sources SET last_scan_finished_at = ?1, last_scan_status = 'ok', last_scan_message = ?2 WHERE id = ?3",
         params![
             now(),
             format!(
-                "{} {scanned_files} file(s), imported {imported} new model calls{}{}{}.",
+                "{} {scanned_files} file(s), imported {imported} new model calls{}{}{}.{drift_note}",
                 if full_scan {
                     "Full scanned"
                 } else {
@@ -3525,6 +3573,36 @@ fn scan_source(conn: &Connection, source: &Source, full_scan: bool) -> Result<us
     )
     .map_err(to_string)?;
     Ok(imported)
+}
+
+/// Adds format observations remembered for unchanged files, so an
+/// incremental scan still reports drift found by an earlier scan.
+fn collect_indexed_drift(
+    conn: &Connection,
+    source: &Source,
+    drift: &mut DriftReport,
+) -> Result<(), String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT path, drift_json FROM indexed_files
+             WHERE source_id = ?1 AND drift_json IS NOT NULL ORDER BY path",
+        )
+        .map_err(to_string)?;
+    let rows = stmt
+        .query_map(params![source.id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+        .map_err(to_string)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(to_string)?;
+    for (path, json) in rows {
+        let path = PathBuf::from(path);
+        if !path.exists() {
+            continue;
+        }
+        if let Ok(file_drift) = serde_json::from_str::<FileDrift>(&json) {
+            drift.add_file(&path, &file_drift);
+        }
+    }
+    Ok(())
 }
 
 fn indexed_file_is_current(
@@ -3631,7 +3709,15 @@ fn parse_content(source: &Source, path: &Path, content: &str) -> Vec<ParsedEvent
     events
 }
 
+#[cfg(test)]
 fn parse_file_streaming(source: &Source, path: &Path) -> Result<Vec<ParsedEvent>, String> {
+    parse_file_with_drift(source, path).map(|(events, _)| events)
+}
+
+fn parse_file_with_drift(
+    source: &Source,
+    path: &Path,
+) -> Result<(Vec<ParsedEvent>, FileDrift), String> {
     let file = fs::File::open(path).map_err(to_string)?;
     let metadata = file.metadata().map_err(to_string)?;
     let compressed = is_zstd_file(path);
@@ -3677,7 +3763,136 @@ fn parse_file_streaming(source: &Source, path: &Path) -> Result<Vec<ParsedEvent>
         }
     }
 
-    Ok(events)
+    Ok((events, codex_context.drift()))
+}
+
+/// Per-file format observations, kept in `indexed_files.drift_json`.
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct FileDrift {
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    unknown_record_types: BTreeSet<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    usage_records_without_token_count: bool,
+}
+
+impl FileDrift {
+    fn is_clean(&self) -> bool {
+        self.unknown_record_types.is_empty() && !self.usage_records_without_token_count
+    }
+}
+
+/// Signs that a tool changed its log format or layout, per source
+/// (`log_sources.drift_json`). Empty means everything was understood.
+#[derive(Debug, Default, PartialEq, Serialize, Deserialize)]
+struct DriftReport {
+    #[serde(default)]
+    unreadable_files: usize,
+    #[serde(default)]
+    unknown_record_types: BTreeMap<String, usize>,
+    #[serde(default)]
+    usage_records_without_token_count: usize,
+    #[serde(default)]
+    unscanned_file_types: BTreeMap<String, usize>,
+    #[serde(default)]
+    token_files_outside_rollout_dirs: usize,
+    #[serde(default)]
+    samples: Vec<String>,
+}
+
+impl DriftReport {
+    fn is_clean(&self) -> bool {
+        self.unreadable_files == 0
+            && self.unknown_record_types.is_empty()
+            && self.usage_records_without_token_count == 0
+            && self.unscanned_file_types.is_empty()
+            && self.token_files_outside_rollout_dirs == 0
+    }
+
+    fn note_sample(&mut self, path: &Path) {
+        if self.samples.len() < 5 {
+            self.samples.push(path.to_string_lossy().to_string());
+        }
+    }
+
+    fn add_file(&mut self, path: &Path, drift: &FileDrift) {
+        for record_type in &drift.unknown_record_types {
+            *self.unknown_record_types.entry(record_type.clone()).or_default() += 1;
+        }
+        if drift.usage_records_without_token_count {
+            self.usage_records_without_token_count += 1;
+        }
+        self.note_sample(path);
+    }
+
+    fn summary(&self) -> String {
+        let mut parts = Vec::new();
+        if self.unreadable_files > 0 {
+            parts.push(format!("{} unreadable file(s)", self.unreadable_files));
+        }
+        if !self.unknown_record_types.is_empty() {
+            let types: Vec<String> = self
+                .unknown_record_types
+                .iter()
+                .map(|(t, files)| format!("{t} ({files} file(s))"))
+                .collect();
+            parts.push(format!("unknown record types {}", types.join(", ")));
+        }
+        if self.usage_records_without_token_count > 0 {
+            parts.push(format!(
+                "{} rollout(s) with usage only in token_usage_record",
+                self.usage_records_without_token_count
+            ));
+        }
+        if !self.unscanned_file_types.is_empty() {
+            let types: Vec<String> = self
+                .unscanned_file_types
+                .iter()
+                .map(|(ext, files)| format!(".{ext} ({files})"))
+                .collect();
+            parts.push(format!("unscanned files {}", types.join(", ")));
+        }
+        if self.token_files_outside_rollout_dirs > 0 {
+            parts.push(format!(
+                "{} file(s) with token data outside sessions/archived_sessions/handoffs",
+                self.token_files_outside_rollout_dirs
+            ));
+        }
+        format!("Format drift: {}. METR may be missing usage; update the parser.", parts.join("; "))
+    }
+}
+
+/// Files in a Codex home, outside the rollout folders, that look like they
+/// hold token usage: a new layout we do not scan yet.
+fn codex_token_files_outside_rollout_dirs(home: &Path) -> Vec<PathBuf> {
+    let markers: [&[u8]; 3] = [b"\"token_count\"", b"\"last_token_usage\"", b"\"token_usage_record\""];
+    WalkDir::new(home)
+        .max_depth(5)
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(|e| {
+            if !e.file_type().is_dir() || e.depth() == 0 {
+                return true;
+            }
+            let name = e.file_name().to_string_lossy();
+            !(e.depth() == 1 && CODEX_ROLLOUT_DIRS.contains(&name.as_ref())) && !is_skipped_dir(e.path())
+        })
+        .filter_map(Result::ok)
+        .filter(|e| e.file_type().is_file())
+        .map(|e| e.into_path())
+        .filter(|path| {
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if name.starts_with("rollout-") {
+                return true;
+            }
+            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
+            if ext != "jsonl" && ext != "json" {
+                return false;
+            }
+            let mut head = Vec::new();
+            let read = fs::File::open(path).and_then(|f| f.take(65_536).read_to_end(&mut head));
+            read.is_ok() && markers.iter().any(|m| head.windows(m.len()).any(|w| w == *m))
+        })
+        .collect()
 }
 
 fn parse_line_into_events(
@@ -3696,6 +3911,7 @@ fn parse_line_into_events(
         update_codex_context(codex_context, &value);
         update_generic_context(source, generic_context, &value);
         let parsed = if source.parser_id == "codex" {
+            codex_context.observe(&value);
             if codex_context.repeats_last_total(&value) {
                 return;
             }
@@ -3719,9 +3935,46 @@ struct CodexParseContext {
     session_id: Option<String>,
     model: Option<String>,
     last_total: Option<Value>,
+    unknown_record_types: BTreeSet<String>,
+    token_counts: usize,
+    usage_records: usize,
 }
 
+/// Top-level `type` values seen in Codex rollouts. Anything else means the
+/// format moved and the parser needs a look.
+const KNOWN_CODEX_RECORD_TYPES: [&str; 8] = [
+    "session_meta",
+    "turn_context",
+    "event_msg",
+    "response_item",
+    "world_state",
+    "token_usage_record",
+    "compacted",
+    // Seen 2026-10-29: `{"trigger_turn": bool}`, no usage.
+    "inter_agent_communication_metadata",
+];
+
 impl CodexParseContext {
+    fn observe(&mut self, value: &Value) {
+        let record_type = value.get("type").and_then(Value::as_str).unwrap_or("<none>");
+        if !KNOWN_CODEX_RECORD_TYPES.contains(&record_type) {
+            self.unknown_record_types.insert(record_type.to_string());
+        }
+        if record_type == "token_usage_record" {
+            self.usage_records += 1;
+        }
+        if value.pointer("/payload/info/last_token_usage").is_some() {
+            self.token_counts += 1;
+        }
+    }
+
+    fn drift(&self) -> FileDrift {
+        FileDrift {
+            unknown_record_types: self.unknown_record_types.clone(),
+            usage_records_without_token_count: self.usage_records > 0 && self.token_counts == 0,
+        }
+    }
+
     /// Codex re-emits token_count (e.g. on rate-limit updates) with unchanged
     /// totals; counting its last_token_usage again would double count.
     fn repeats_last_total(&mut self, value: &Value) -> bool {
@@ -5995,6 +6248,140 @@ mod codex_tests {
         fs::remove_dir_all(home).unwrap();
     }
 
+    #[derive(Deserialize)]
+    struct ExpectedTotals {
+        events: usize,
+        input_tokens: i64,
+        cached_input_tokens: i64,
+        output_tokens: i64,
+        reasoning_tokens: i64,
+    }
+
+    /// One folder per known Codex rollout format; each holds rollouts (plain
+    /// and/or .zst) and `expected.json`. Add a folder for every new format.
+    #[test]
+    fn every_known_codex_format_parses_to_its_expected_totals() {
+        let mut formats = 0;
+        for dir in fs::read_dir("../fixtures/codex").unwrap() {
+            let dir = dir.unwrap().path();
+            let expected_path = dir.join("expected.json");
+            if !expected_path.is_file() {
+                continue;
+            }
+            formats += 1;
+            let expected: ExpectedTotals =
+                serde_json::from_str(&fs::read_to_string(&expected_path).unwrap()).unwrap();
+            let source = codex_source(&dir);
+            let mut rollouts = 0;
+            for file in fs::read_dir(&dir).unwrap() {
+                let file = file.unwrap().path();
+                let name = file.file_name().unwrap().to_string_lossy().to_string();
+                if !name.starts_with("rollout-") {
+                    continue;
+                }
+                rollouts += 1;
+                let (events, drift) = parse_file_with_drift(&source, &file).unwrap();
+                let sum = |f: fn(&ParsedEvent) -> i64| events.iter().map(f).sum::<i64>();
+                assert_eq!(events.len(), expected.events, "{name}");
+                assert_eq!(sum(|e| e.input_tokens), expected.input_tokens, "{name}");
+                assert_eq!(sum(|e| e.cached_input_tokens), expected.cached_input_tokens, "{name}");
+                assert_eq!(sum(|e| e.output_tokens), expected.output_tokens, "{name}");
+                assert_eq!(sum(|e| e.reasoning_tokens), expected.reasoning_tokens, "{name}");
+                assert!(drift.is_clean(), "{name}: {drift:?}");
+            }
+            assert!(rollouts > 0, "{}", dir.display());
+        }
+        assert!(formats >= 1);
+    }
+
+    fn registered_codex_source(conn: &Connection, path: &Path) -> Source {
+        insert_auto_source(conn, "openai", "codex", "Codex", &path.to_string_lossy()).unwrap();
+        query_sources(conn)
+            .unwrap()
+            .into_iter()
+            .find(|s| s.path == path.to_string_lossy())
+            .unwrap()
+    }
+
+    fn drift_of(conn: &Connection, source: &Source) -> (Option<DriftReport>, String) {
+        conn.query_row(
+            "SELECT drift_json, last_scan_message FROM log_sources WHERE id = ?1",
+            params![source.id],
+            |r| {
+                let json: Option<String> = r.get(0)?;
+                Ok((json.map(|j| serde_json::from_str(&j).unwrap()), r.get(1)?))
+            },
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn known_layout_reports_no_drift() {
+        let conn = conn();
+        let home = temp_root("codex-drift-clean");
+        copy_fixture(&home.join("sessions/2026/10/29").join(ROLLOUT), ".jsonl");
+        copy_fixture(&home.join("archived_sessions").join(format!("{ROLLOUT}.zst")), ".jsonl.zst");
+        fs::create_dir_all(home.join("log")).unwrap();
+        fs::write(home.join("log/codex-tui.log"), "plain text log").unwrap();
+        fs::write(home.join("history.jsonl"), "{\"session_id\":\"s\",\"text\":\"hi\"}\n").unwrap();
+        let source = registered_codex_source(&conn, &home);
+        scan_source(&conn, &source, false).unwrap();
+        let (report, message) = drift_of(&conn, &source);
+        assert_eq!(report, None);
+        assert!(!message.contains("drift"), "{message}");
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn format_and_layout_changes_are_reported_and_remembered() {
+        let conn = conn();
+        let home = temp_root("codex-drift");
+        let day = home.join("sessions/2026/10/30");
+        // A rollout with a new record type.
+        let renamed = fs::read_to_string(fixture(".jsonl"))
+            .unwrap()
+            .replace("\"type\":\"turn_context\"", "\"type\":\"turn_context_v2\"");
+        fs::create_dir_all(&day).unwrap();
+        fs::write(day.join("rollout-a.jsonl"), renamed).unwrap();
+        // A rollout whose usage only comes as token_usage_record.
+        let usage_only: String = fs::read_to_string(fixture(".jsonl"))
+            .unwrap()
+            .lines()
+            .filter(|l| !l.contains("\"token_count\""))
+            .map(|l| format!("{l}\n"))
+            .collect();
+        fs::write(day.join("rollout-b.jsonl"), usage_only).unwrap();
+        // A corrupt compressed rollout and a new compression format.
+        fs::write(day.join("rollout-c.jsonl.zst"), b"not zstd").unwrap();
+        fs::write(day.join("rollout-d.jsonl.gz"), b"gzip?").unwrap();
+        // Token data in a folder we do not scan.
+        copy_fixture(&home.join("rollouts_v2").join("thread.jsonl"), ".jsonl");
+
+        let source = registered_codex_source(&conn, &home);
+        scan_source(&conn, &source, false).unwrap();
+        let (report, message) = drift_of(&conn, &source);
+        let report = report.expect("drift expected");
+        assert_eq!(report.unreadable_files, 1);
+        assert_eq!(report.unknown_record_types.get("turn_context_v2"), Some(&1));
+        assert_eq!(report.usage_records_without_token_count, 1);
+        assert_eq!(report.unscanned_file_types.get("jsonl.gz"), Some(&1));
+        assert_eq!(report.token_files_outside_rollout_dirs, 1);
+        assert!(message.contains("Format drift"), "{message}");
+
+        // An incremental scan with nothing changed still reports it.
+        scan_source(&conn, &source, false).unwrap();
+        assert_eq!(drift_of(&conn, &source).0, Some(report));
+
+        // Once the odd files are gone the report clears.
+        for f in ["rollout-a.jsonl", "rollout-b.jsonl", "rollout-c.jsonl.zst", "rollout-d.jsonl.gz"] {
+            fs::remove_file(day.join(f)).unwrap();
+        }
+        fs::remove_dir_all(home.join("rollouts_v2")).unwrap();
+        scan_source(&conn, &source, false).unwrap();
+        assert_eq!(drift_of(&conn, &source).0, None);
+        fs::remove_dir_all(home).unwrap();
+    }
+
     /// Smoke check against this machine's real Codex homes (prints counts only):
     /// `cargo test --lib real_codex_homes -- --ignored --nocapture`
     #[test]
@@ -6007,7 +6394,12 @@ mod codex_tests {
         ensure_codex_sources_at(&conn, &homes).unwrap();
         for source in query_sources(&conn).unwrap() {
             let imported = scan_source(&conn, &source, true).unwrap();
-            println!("{}: imported {imported}", source.path);
+            let (drift, _) = drift_of(&conn, &source);
+            println!(
+                "{}: imported {imported}, drift: {}",
+                source.path,
+                drift.map(|d| d.summary()).unwrap_or_else(|| "none".to_string())
+            );
         }
         let (events, input, output): (i64, i64, i64) = conn
             .query_row(
