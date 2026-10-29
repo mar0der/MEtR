@@ -26,6 +26,13 @@ Next: fold review/test findings, merge to main (src-tauri only, no backend deplo
 - **M2 on `feat/linux-cli`** (`2feb608`): Tauri behind an `app` feature (desktop unchanged), `metr` CLI: status/scan/usage/sync/login/logout, `run` (load-aware one-shot), `install`/`uninstall` (systemd timer hourly|daily, Nice 19, idle IO; optional web UI service), `serve` (127.0.0.1 + Tailscale only, Host-header check), `self-update` (builds latest tag from source). Review + test running (Claude subagents; Codex quota exhausted).
 Next: fold findings → merge → install on the20th (timer + web UI) → Petar runs `! metr login --user <name>` → provide the18th build + steps to the Guardian → M3.
 
+## 2026-10-29 ~19:05 — M2 done on the20th (pending login)
+- **Merged to main:** headless CLI (`ba0287a`, reviewed + tested, 12 review and 4 test findings fixed), port 8790 (`71ef219`; 8765 is llama-server), portable build (`dc4019c`: rustls + glibc 2.17 via cargo-zigbuild; desktop keeps native TLS, identical reqwest features). Tests: 49 core + 8 CLI.
+- **the20th installed:** `~/.local/bin/metr` (portable 26.41.0), user units `metr-sync.timer` (hourly, Nice 19, idle IO) + `metr-web.service`; linger on. Web UI: http://127.0.0.1:8790/ and http://100.115.64.43:8790/ (LAN address does not answer, verified). First scan 10 s: 13,929 Claude + 14,135 Codex calls from `~/.claude`, `~/.codex`, `~/.codex-acct2`, `~/.codex-accounts/acct2`. Scheduled pass verified (`metr status` shows last run).
+- **Release 26.41.0 not published:** builds OK on all 3 platforms; publish job fails at "Connect to Tailscale" (same as 26.40.2) → asked Guardian to rotate `TAILSCALE_AUTH_KEY` and re-run (outbox 20261029-1910).
+- **the18th:** package `src-tauri/target/dist/metr-26.41.0-linux-x86_64.tar.gz` (+ .sha256) and steps in `docs/linux-cli.md` handed to the Guardian (outbox 20261029-1915).
+Next: M3 (incremental scan by offset, sync batching/retry, reconciliation endpoint + `metr reconcile`).
+
 ## Mac cleanup: retire ~/.claude-accounts (for Guardian to run on the Mac, Petar approving)
 Petar decision 18:26: one Claude account now; METR scans only the real `~/.claude`. Do not run step 4 until steps 1–3 are clean.
 1. **Read-only checks**
@@ -42,4 +49,4 @@ Petar decision 18:26: one Claude account now; METR scans only the real `~/.claud
 
 ## needs-petar
 - **Device alias leak:** server device `windows-DESKTOP-PG7TRK4` (last seen Oct 9) has an API-key-like string as its alias. Proposal: clear that alias (single-row UPDATE, non-destructive). Please rotate that Kimi key. Not printed anywhere.
-- **Linux device login:** `metr login` on the20th needs your METR password typed by you (`! metr login`) when M1 install is ready.
+- **Linux device login (ready now):** type `! metr login --user <your METR username>` in the PO session (password prompt; device `linux-the20th`). Until then the20th scans hourly but does not upload.
