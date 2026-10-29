@@ -16,3 +16,11 @@ No new double-count path for Codex tokens. Findings and disposition:
 - R10 (low) Windows `~\` CODEX_HOME, `\\?\` compare → FIX; macOS GUI apps don't see CODEX_HOME (noted, default homes cover Petar's setup).
 - Pre-existing: update_codex_context takes session_id from any payload.id → FIX: only from session_meta.
 - Perf: startup cleanup scans table each start (ms) → acceptable.
+
+## 2026-10-29 — re-review of d770938 (Claude subagent)
+Confirmed fine: hash stability, byte line reader offsets (= BufRead::lines), incomplete-file handling, early return, path keys, dismissed sources, unchanged Claude standard paths.
+- RR1 (med) path-based stale cleanup misses rollouts that moved since first scan → FIX: delete rows by the raw hash of skipped re-emits, any path.
+- RR2 (med-low) path-based cleanup could delete newer rows of a plain twin → FIX: same (only re-emit hashes are ever deleted); regression test with twins.
+- RR3 (low) session-id fix did not repair stored rows → FIX: re-parse updates conversation_id on existing Codex rows; orphan conversations are removed by the startup cleanup.
+- RR4 (low) manual add of a ~/.claude symlink alias fell back to the generic parser → FIX: raw CLAUDE_CONFIG_DIR still counts in is_configured_claude_path.
+- RR5 (low, accepted) a generic source over a Codex folder can now hold a second copy of a line the Codex source also stores; not a supported setup.
