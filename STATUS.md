@@ -68,6 +68,10 @@ Next: M3 (incremental scan by offset, sync batching/retry, reconciliation endpoi
 - the20th reinstalled (26.44.0 with price pull). the18th upgrade package + steps: outbox `20261029-2015-the18th-26.44.0.md`.
 - Cleanup: src-tauri/target, backend vendor, scratch files removed again.
 
+## 2026-10-29 ~20:35 — reprice command merged (`4f1c365`, `499cd0d`)
+- `metr:prices:reprice` (+ nightly after metr:prices:update); resolver tie-break fix. Reviewed + tested; waits for deploy. Run order in outbox `20261029-2030-reprice.md`.
+- the20th vs server: 29,452 = 29,452 events; cost gap $65.87 = Anthropic 1-hour writes (closes after deploy + migrate + full resync). codex-auto-review left unpriced (no published price, 4 events in Petar's account).
+
 ## Mac cleanup: retire ~/.claude-accounts (for Guardian to run on the Mac, Petar approving)
 Petar decision 18:26: one Claude account now; METR scans only the real `~/.claude`. Do not run step 4 until steps 1–3 are clean.
 1. **Read-only checks**
