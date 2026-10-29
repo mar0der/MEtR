@@ -11,15 +11,24 @@ class RepriceModelUsage
         private CalculateUsageCost $calculateUsageCost,
     ) {}
 
-    public function handle(string $providerId, string $model): int
+    /**
+     * Reprices one provider/model with the current catalog. Writes only rows
+     * whose cost or price match changed; returns the number of rows written.
+     */
+    /** Cost change (USD) of the rows counted by the last handle() call. */
+    public float $lastCostDelta = 0.0;
+
+    public function handle(string $providerId, string $model, bool $onlyMissing = false, bool $dryRun = false): int
     {
         $updated = 0;
+        $this->lastCostDelta = 0.0;
 
         UsageEvent::query()
             ->where('provider_id', $providerId)
             ->where('model', $model)
+            ->when($onlyMissing, fn ($query) => $query->whereNull('official_api_cost_usd'))
             ->orderBy('id')
-            ->chunkById(500, function ($events) use (&$updated) {
+            ->chunkById(500, function ($events) use (&$updated, $dryRun) {
                 foreach ($events as $event) {
                     $price = $this->resolveModelPrice->handle(
                         $event->provider_id,
@@ -41,12 +50,19 @@ class RepriceModelUsage
                         ? $this->calculateUsageCost->handle($price, $tokens, $event->provider_id)
                         : ['cost' => null, 'pricing_match_confidence' => 'missing'];
 
-                    $event->update([
+                    $event->fill([
                         'official_api_cost_usd' => $costData['cost'],
                         'model_price_id' => $price?->id,
                         'pricing_match_confidence' => $costData['pricing_match_confidence'],
                     ]);
-                    $updated++;
+                    if ($event->isDirty()) {
+                        $this->lastCostDelta += (float) $event->official_api_cost_usd
+                            - (float) $event->getOriginal('official_api_cost_usd');
+                        if (! $dryRun) {
+                            $event->save();
+                        }
+                        $updated++;
+                    }
                 }
             });
 
