@@ -12,7 +12,11 @@ Done (tests: 30 pass + 2 ignored real-data smoke tests; baseline was 21):
 - **Overcount fix:** Codex re-emits token_count with unchanged totals (28 of 13,674 lines on the20th, ~0.2%); those repeats are now skipped (fix-forward, see BUGS.md).
 - **Real-data check on the20th:** scanner vs independent Python count on stable files: 13,362 events, identical input/output sums. All 3 homes: 13,678 events.
 - **Format drift seen already:** rollouts since 2026-10-27 also carry a new `token_usage_record` (per response_id). Totals match token_count within 0.01%; we keep token_count as source of truth (no double counting). Drift check (M1.4) must alert if token_count disappears.
-Next: M1.4 format-drift report, M1.5 `.claude-accounts` test, review + test, then release.
+- **18:18 Petar go-ahead:** continue through milestones without waiting; ask only for destructive/risky actions.
+- **M1.4 format-drift check done** (`0f0f625`): per source, the scanner reports unknown Codex record types, rollouts with usage only in token_usage_record, unreadable files (e.g. corrupt .zst), unscanned file types in rollout folders (e.g. `.jsonl.gz`), and token data outside sessions/archived_sessions/handoffs. Shown as "Format drift: …" in the source's status; kept per file so incremental scans keep reporting it. `fixtures/codex/<format>/expected.json` per known format. First real catch: new record type `inter_agent_communication_metadata` (no usage; now known). the20th homes: no drift.
+- **M1.5 done** (`eeaa63d`): `.claude-accounts/account-N/projects` symlinks are not double counted (test; no code change needed).
+- Codex quota ~exhausted (acct1 98%, acct2 94% weekly) → review + test by Claude subagents, running now.
+Next: fold review/test findings, merge to main (src-tauri only, no backend deploy), then M2 (core crate split, Linux CLI/daemon, web UI) and the Mac/Windows release.
 
 ## needs-petar
 - **Device alias leak:** server device `windows-DESKTOP-PG7TRK4` (last seen Oct 9) has an API-key-like string as its alias. Proposal: clear that alias (single-row UPDATE, non-destructive). Please rotate that Kimi key. Not printed anywhere.
