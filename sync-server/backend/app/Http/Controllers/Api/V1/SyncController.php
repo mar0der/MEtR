@@ -46,6 +46,7 @@ class SyncController extends Controller
             'events.*.tokens.output' => ['required', 'integer', 'min:0'],
             'events.*.tokens.cached_input' => ['required', 'integer', 'min:0'],
             'events.*.tokens.cache_write' => ['required', 'integer', 'min:0'],
+            'events.*.tokens.cache_write_1h' => ['nullable', 'integer', 'min:0'],
             'events.*.tokens.cache_read' => ['required', 'integer', 'min:0'],
             'events.*.tokens.reasoning' => ['required', 'integer', 'min:0'],
             'events.*.tokens.tool' => ['required', 'integer', 'min:0'],

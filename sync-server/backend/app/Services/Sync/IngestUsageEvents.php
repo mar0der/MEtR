@@ -191,6 +191,7 @@ class IngestUsageEvents
             'output_tokens' => $tokens['output'] ?? 0,
             'cached_input_tokens' => $tokens['cached_input'] ?? 0,
             'cache_write_tokens' => $tokens['cache_write'] ?? 0,
+            'cache_write_1h_tokens' => min($tokens['cache_write_1h'] ?? 0, $tokens['cache_write'] ?? 0),
             'cache_read_tokens' => $tokens['cache_read'] ?? 0,
             'reasoning_tokens' => $tokens['reasoning'] ?? 0,
             'tool_tokens' => $tokens['tool'] ?? 0,
