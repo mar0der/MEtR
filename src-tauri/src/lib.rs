@@ -1020,6 +1020,67 @@ fn dashboard_summary(conn: &Connection) -> Result<DashboardSummary, String> {
     })
 }
 
+/// Posts one batch. Retries network errors and 5xx with backoff, and 429
+/// after the server's Retry-After (capped), up to 5 attempts; other HTTP
+/// errors are returned to the caller. The server dedupes, so a retry of a
+/// batch that did arrive is harmless.
+fn post_with_retry(
+    client: &reqwest::blocking::Client,
+    base_url: &str,
+    auth_header: &str,
+    payload: &Value,
+    event_count: usize,
+    payload_bytes: usize,
+) -> Result<reqwest::blocking::Response, String> {
+    const ATTEMPTS: u32 = 5;
+    let mut last_error = String::new();
+    for attempt in 0..ATTEMPTS {
+        let backoff = Duration::from_secs(2u64.pow(attempt + 1).min(30));
+        match client
+            .post(format!("{}/api/v1/sync/events", base_url))
+            .header("Authorization", auth_header)
+            .header("Accept", "application/json")
+            .json(payload)
+            .send()
+        {
+            Ok(resp) if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS => {
+                let wait = resp
+                    .headers()
+                    .get(reqwest::header::RETRY_AFTER)
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|v| v.trim().parse::<u64>().ok())
+                    .unwrap_or(30)
+                    .clamp(1, 120);
+                last_error = format!("Rate limited by the server (HTTP 429), waited {wait} s");
+                eprintln!("[Sync] {last_error}");
+                std::thread::sleep(Duration::from_secs(wait));
+                continue;
+            }
+            Ok(resp) if resp.status().is_server_error() && attempt + 1 < ATTEMPTS => {
+                last_error = format!("Server error (HTTP {})", resp.status());
+                eprintln!("[Sync] {last_error}, retrying");
+            }
+            Ok(resp) => return Ok(resp),
+            Err(e) => {
+                last_error = format!(
+                    "Sync request failed ({} events, ~{} bytes, attempt {}): {}",
+                    event_count,
+                    payload_bytes,
+                    attempt + 1,
+                    e
+                );
+                if let Some(source) = e.source() {
+                    last_error.push_str(&format!(" | caused by: {}", source));
+                }
+            }
+        }
+        if attempt + 1 < ATTEMPTS {
+            std::thread::sleep(backoff);
+        }
+    }
+    Err(last_error)
+}
+
 fn perform_sync<F>(conn: &Connection, force_all: bool, mut progress: F) -> Result<SyncResult, String>
 where
     F: FnMut(usize, usize),
@@ -1154,7 +1215,7 @@ where
                  LEFT JOIN conversations c ON c.id = u.conversation_id
                  WHERE u.synced_at IS NULL
                  ORDER BY u.timestamp ASC
-                 LIMIT 100",
+                 LIMIT 250",
             )
             .map_err(to_string)?;
 
@@ -1222,44 +1283,7 @@ where
             "events": events,
         });
         let payload_bytes = serde_json::to_string(&payload).unwrap_or_default().len();
-        let mut response = None;
-        let mut last_transport_error = None;
-
-        for attempt in 0..3 {
-            match client
-                .post(format!("{}/api/v1/sync/events", base_url))
-                .header("Authorization", &auth_header)
-                .header("Accept", "application/json")
-                .json(&payload)
-                .send()
-            {
-                Ok(resp) => {
-                    response = Some(resp);
-                    break;
-                }
-                Err(e) => {
-                    let mut detail = format!(
-                        "Sync request failed ({} events, ~{} bytes, attempt {}): {}",
-                        events.len(),
-                        payload_bytes,
-                        attempt + 1,
-                        e
-                    );
-                    if let Some(source) = e.source() {
-                        detail.push_str(&format!(" | caused by: {}", source));
-                    }
-                    last_transport_error = Some(detail);
-                    if attempt < 2 {
-                        std::thread::sleep(Duration::from_secs(2u64.pow(attempt as u32)));
-                    }
-                }
-            }
-        }
-
-        let resp = response.ok_or_else(|| {
-            last_transport_error
-                .unwrap_or_else(|| "Sync request failed without a transport error".to_string())
-        })?;
+        let resp = post_with_retry(&client, base_url, &auth_header, &payload, events.len(), payload_bytes)?;
 
         if resp.status().is_success() {
             let now = now();
@@ -1272,8 +1296,9 @@ where
                 })
                 .collect();
 
+            let tx = conn.unchecked_transaction().map_err(to_string)?;
             for id in event_ids {
-                conn.execute(
+                tx.execute(
                     "UPDATE usage_events
                      SET synced_at = ?1, sync_batch_id = ?2, sync_error = NULL, updated_at = ?1
                      WHERE id = ?3",
@@ -1281,6 +1306,7 @@ where
                 )
                 .map_err(to_string)?;
             }
+            tx.commit().map_err(to_string)?;
 
             total_uploaded += events.len();
             batch_count += 1;
@@ -4819,6 +4845,41 @@ mod tests {
             paths,
             vec![home.join(".claude"), home.join("custom-claude")]
         );
+    }
+
+    #[test]
+    fn sync_post_retries_rate_limits_and_server_errors() {
+        use std::io::Write;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let replies = [
+                "HTTP/1.1 429 Too Many Requests\r\nRetry-After: 1\r\nContent-Length: 0\r\n\r\n",
+                "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n",
+                "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}",
+            ];
+            for reply in replies {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut buf = [0u8; 65536];
+                let _ = std::io::Read::read(&mut stream, &mut buf);
+                stream.write_all(reply.as_bytes()).unwrap();
+            }
+        });
+        let client = reqwest::blocking::Client::new();
+        let started = std::time::Instant::now();
+        let resp = post_with_retry(
+            &client,
+            &format!("http://{address}"),
+            "Bearer test",
+            &json!({"events": []}),
+            0,
+            0,
+        )
+        .unwrap();
+        assert!(resp.status().is_success());
+        // 1 s Retry-After + 4 s backoff after the 503 (attempt 2).
+        assert!(started.elapsed() >= std::time::Duration::from_secs(5));
+        server.join().unwrap();
     }
 
     #[cfg(unix)]
