@@ -19,7 +19,7 @@ const MAX_SCAN_FILES_PER_SOURCE: usize = 50_000;
 const MAX_SOURCE_TOTAL_BYTES: u64 = 5 * 1024 * 1024 * 1024; // 5 GB
 const MAX_LINE_LENGTH: usize = 1_048_576; // 1 MB
 const MAX_JSON_DEPTH: usize = 64;
-const PARSER_VERSION: &str = "0.1.11";
+const PARSER_VERSION: &str = "0.1.12";
 const KEYRING_SERVICE: &str = "com.petarpetkov.metr.sync";
 const KEYRING_USERNAME: &str = "auth_token";
 const OFFICIAL_SERVER_HOST: &str = "metr.petarpetkov.com";
@@ -396,6 +396,11 @@ async fn add_source(state: State<'_, AppState>, input: AddSourceInput) -> Result
         };
         let now = now();
         let conn = state.db.blocking_lock();
+        conn.execute(
+            "DELETE FROM dismissed_source_paths WHERE path_key = ?1",
+            params![path_key(&path)],
+        )
+        .map_err(to_string)?;
         ensure_provider(&conn, &provider_id, provider_display_name(&provider_id)).map_err(to_string)?;
         let existing: Option<String> = conn
             .query_row(
@@ -433,11 +438,43 @@ async fn add_source(state: State<'_, AppState>, input: AddSourceInput) -> Result
 async fn remove_source(state: State<'_, AppState>, source_id: String) -> Result<(), String> {
     run_blocking(state, move |state| {
         let conn = state.db.blocking_lock();
-        conn.execute("DELETE FROM log_sources WHERE id = ?1", params![source_id])
-            .map_err(to_string)?;
-        Ok(())
+        remove_source_row(&conn, &source_id)
     })
     .await
+}
+
+/// Removes a source. Auto-detected folders are remembered as dismissed so the
+/// next start or rescan does not add them back.
+fn remove_source_row(conn: &Connection, source_id: &str) -> Result<(), String> {
+    let auto_path: Option<String> = conn
+        .query_row(
+            "SELECT path FROM log_sources WHERE id = ?1 AND detection_confidence = 'auto'",
+            params![source_id],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(to_string)?;
+    if let Some(path) = auto_path {
+        conn.execute(
+            "INSERT OR REPLACE INTO dismissed_source_paths (path_key, dismissed_at) VALUES (?1, ?2)",
+            params![path_key(Path::new(&path)), now()],
+        )
+        .map_err(to_string)?;
+    }
+    conn.execute("DELETE FROM log_sources WHERE id = ?1", params![source_id])
+        .map_err(to_string)?;
+    Ok(())
+}
+
+fn is_dismissed_source(conn: &Connection, path: &Path) -> Result<bool, String> {
+    conn.query_row(
+        "SELECT 1 FROM dismissed_source_paths WHERE path_key = ?1",
+        params![path_key(path)],
+        |_| Ok(()),
+    )
+    .optional()
+    .map(|found| found.is_some())
+    .map_err(to_string)
 }
 
 #[tauri::command]
@@ -2792,6 +2829,12 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     )?;
     add_column_if_missing(conn, "usage_events", "synced_at", "TEXT")?;
     add_column_if_missing(conn, "indexed_files", "drift_json", "TEXT")?;
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS dismissed_source_paths (
+           path_key TEXT PRIMARY KEY,
+           dismissed_at TEXT NOT NULL
+         );",
+    )?;
     add_column_if_missing(conn, "log_sources", "drift_json", "TEXT")?;
     add_column_if_missing(conn, "usage_events", "sync_batch_id", "TEXT")?;
     add_column_if_missing(conn, "usage_events", "sync_error", "TEXT")?;
@@ -2968,7 +3011,8 @@ fn claude_source_paths(home: &Path, configured_dir: Option<&str>) -> Vec<PathBuf
     } else {
         home.join(configured)
     };
-    if !paths.iter().any(|path| path == &configured) {
+    // A config dir that is only another name (symlink) for ~/.claude adds nothing.
+    if !paths.iter().any(|path| path == &configured || path_key(path) == path_key(&configured)) {
         paths.push(configured);
     }
     paths
@@ -2982,6 +3026,25 @@ fn is_configured_claude_path(path: &Path) -> bool {
     claude_source_paths(&home, configured_dir.as_deref())
         .iter()
         .any(|root| path == root || path.starts_with(root))
+}
+
+/// Comparable form of a folder path: resolved, `/`-separated, without the
+/// Windows `\\?\` prefix or a trailing slash, case-folded where the file
+/// system usually ignores case.
+fn path_key(path: &Path) -> String {
+    let resolved = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let text = resolved.to_string_lossy().replace('\\', "/");
+    let text = text.strip_prefix("//?/").unwrap_or(&text).trim_end_matches('/').to_string();
+    if cfg!(any(windows, target_os = "macos")) {
+        text.to_lowercase()
+    } else {
+        text
+    }
+}
+
+/// True when `path` is `ancestor` or inside it (both from `path_key`).
+fn key_contains(ancestor: &str, path: &str) -> bool {
+    path == ancestor || path.starts_with(&format!("{ancestor}/"))
 }
 
 /// Folders inside a Codex home that hold rollouts with token usage.
@@ -3037,7 +3100,7 @@ fn is_configured_codex_path(path: &Path) -> bool {
     let Some(configured) = std::env::var("CODEX_HOME").ok().filter(|v| !v.trim().is_empty()) else {
         return false;
     };
-    path.starts_with(absolute_from_home(&home, configured.trim()))
+    key_contains(&path_key(&absolute_from_home(&home, configured.trim())), &path_key(path))
 }
 
 fn candidate_sources() -> Vec<CandidateSource> {
@@ -3254,7 +3317,7 @@ fn ensure_claude_source_at(conn: &Connection, path: &Path) -> Result<bool, Strin
         )
         .optional()
         .map_err(to_string)?;
-    if existing.is_some() {
+    if existing.is_some() || is_dismissed_source(conn, path)? {
         return Ok(false);
     }
     insert_auto_source(conn, "anthropic", "claude", "Claude Code", &path_str)?;
@@ -3298,10 +3361,12 @@ fn ensure_codex_sources(conn: &Connection) -> Result<usize, String> {
     ensure_codex_sources_at(conn, &codex_source_paths(&home, configured_dir.as_deref()))
 }
 
-/// Registers every Codex home that holds rollouts, unless an existing source
-/// already covers it (same folder, a parent, or a folder inside it).
+/// Registers every Codex home that holds rollouts, unless the user removed it
+/// or an existing source already walks it (the same folder, or a parent that
+/// is not itself a Codex home). Overlap is harmless: Codex events dedupe on
+/// their raw line.
 fn ensure_codex_sources_at(conn: &Connection, homes: &[PathBuf]) -> Result<usize, String> {
-    let mut existing: Vec<PathBuf> = conn
+    let mut existing: Vec<(PathBuf, String)> = conn
         .prepare("SELECT path FROM log_sources")
         .map_err(to_string)?
         .query_map([], |r| r.get::<_, String>(0))
@@ -3309,18 +3374,31 @@ fn ensure_codex_sources_at(conn: &Connection, homes: &[PathBuf]) -> Result<usize
         .collect::<Result<Vec<_>, _>>()
         .map_err(to_string)?
         .into_iter()
-        .map(PathBuf::from)
+        .map(|path| {
+            let path = PathBuf::from(path);
+            let key = path_key(&path);
+            (path, key)
+        })
         .collect();
     let mut added = 0;
     for home in homes {
-        if !home.is_dir() || !is_codex_home(home) {
+        if !home.is_dir() || !is_codex_home(home) || is_dismissed_source(conn, home)? {
             continue;
         }
-        if existing.iter().any(|path| home.starts_with(path) || path.starts_with(home)) {
+        let key = path_key(home);
+        let walked = existing.iter().any(|(path, existing_key)| {
+            key_contains(existing_key, &key)
+                && (existing_key == &key
+                    || !is_codex_home(path)
+                    || CODEX_ROLLOUT_DIRS
+                        .iter()
+                        .any(|dir| key_contains(&format!("{existing_key}/{dir}"), &key)))
+        });
+        if walked {
             continue;
         }
         insert_auto_source(conn, "openai", "codex", "Codex", &home.to_string_lossy())?;
-        existing.push(home.clone());
+        existing.push((home.clone(), key));
         added += 1;
     }
     Ok(added)
@@ -3438,11 +3516,16 @@ fn scan_source(conn: &Connection, source: &Source, full_scan: bool) -> Result<us
             .filter_entry(|e| !e.file_type().is_dir() || !is_skipped_dir(e.path()))
             .filter_map(Result::ok)
     }) {
+        if codex_home && entry.file_type().is_symlink() {
+            *drift.unscanned_file_types.entry("(symlink)".to_string()).or_default() += 1;
+            drift.note_sample(entry.path());
+            continue;
+        }
         if !entry.file_type().is_file() {
             continue;
         }
         if !is_candidate_file(entry.path()) {
-            if codex_home {
+            if codex_home && !is_os_junk_file(entry.path()) {
                 let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
                 let ext = name.split_once('.').map(|(_, ext)| ext).unwrap_or("(none)");
                 *drift.unscanned_file_types.entry(ext.to_string()).or_default() += 1;
@@ -3484,17 +3567,33 @@ fn scan_source(conn: &Connection, source: &Source, full_scan: bool) -> Result<us
         let (events, file_drift) = match parse_file_with_drift(source, entry.path()) {
             Ok(parsed) => parsed,
             Err(_) => {
-                drift.unreadable_files += 1;
-                drift.note_sample(entry.path());
+                if source.parser_id == "codex" {
+                    drift.unreadable_files += 1;
+                    drift.note_sample(entry.path());
+                }
                 continue;
             }
         };
+        if file_drift.incomplete && source.parser_id == "codex" {
+            drift.unreadable_files += 1;
+            drift.note_sample(entry.path());
+        }
+        let produced_hashes: HashSet<String> =
+            events.iter().map(|e| e.raw_record_hash.clone()).collect();
         // One transaction per file: far fewer WAL commits, and a failure rolls back only this file.
         let tx = conn.unchecked_transaction().map_err(to_string)?;
         for event in events {
             if insert_event(&tx, source, entry.path(), &modified, &source_hash, event, custom_root.as_deref())? {
                 imported += 1;
             }
+        }
+        if file_drift.incomplete {
+            // Not marked indexed, so the rest is read on the next scan.
+            tx.commit().map_err(to_string)?;
+            continue;
+        }
+        if source.parser_id == "codex" {
+            remove_stale_codex_rows(&tx, entry.path(), &produced_hashes)?;
         }
         upsert_indexed_file(
             &tx,
@@ -3573,6 +3672,39 @@ fn scan_source(conn: &Connection, source: &Source, full_scan: bool) -> Result<us
     )
     .map_err(to_string)?;
     Ok(imported)
+}
+
+/// Drops rows a complete re-parse of this rollout (or its uncompressed twin)
+/// no longer produces, e.g. token_count re-emits counted by older versions.
+fn remove_stale_codex_rows(
+    conn: &Connection,
+    path: &Path,
+    produced_hashes: &HashSet<String>,
+) -> Result<(), String> {
+    let real = path.to_string_lossy().to_string();
+    let logical = logical_path(path).to_string_lossy().to_string();
+    let rows: Vec<(String, String)> = conn
+        .prepare(
+            "SELECT id, raw_record_hash FROM usage_events
+             WHERE parser_id = 'codex' AND source_file_path IN (?1, ?2)",
+        )
+        .map_err(to_string)?
+        .query_map(params![real, logical], |r| Ok((r.get(0)?, r.get(1)?)))
+        .map_err(to_string)?
+        .collect::<Result<_, _>>()
+        .map_err(to_string)?;
+    for (id, raw_hash) in rows {
+        if !produced_hashes.contains(&raw_hash) {
+            conn.execute("DELETE FROM usage_events WHERE id = ?1", params![id])
+                .map_err(to_string)?;
+        }
+    }
+    Ok(())
+}
+
+fn is_os_junk_file(path: &Path) -> bool {
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    name.starts_with('.') || matches!(name.to_ascii_lowercase().as_str(), "thumbs.db" | "desktop.ini")
 }
 
 /// Adds format observations remembered for unchanged files, so an
@@ -3736,12 +3868,31 @@ fn parse_file_with_drift(
     let mut codex_context = CodexParseContext::default();
     let mut generic_context = GenericParseContext::default();
 
-    for line in reader.lines() {
-        let line = line.map_err(to_string)?;
-        if line.len() > MAX_LINE_LENGTH {
-            offset += line.len() as i64 + 1;
+    let mut reader = reader;
+    let mut buf = Vec::new();
+    let mut incomplete = false;
+    loop {
+        buf.clear();
+        match reader.read_until(b'\n', &mut buf) {
+            Ok(0) => break,
+            Ok(_) => {}
+            // A rollout still being written or compressed: keep what was read.
+            Err(_) => {
+                incomplete = true;
+                break;
+            }
+        }
+        // Same offsets as `BufRead::lines`: the line without `\n` / `\r\n`.
+        let mut bytes = buf.as_slice();
+        bytes = bytes.strip_suffix(b"\n").unwrap_or(bytes);
+        bytes = bytes.strip_suffix(b"\r").unwrap_or(bytes);
+        let line_len = bytes.len() as i64;
+        if bytes.len() > MAX_LINE_LENGTH {
+            offset += line_len + 1;
             continue;
         }
+        // One bad byte must not cost the rest of the file.
+        let line = String::from_utf8_lossy(bytes);
         let trimmed = normalize_json_line(&line);
         parse_line_into_events(
             source,
@@ -3752,18 +3903,25 @@ fn parse_file_with_drift(
             &mut generic_context,
             &mut events,
         );
-        offset += line.len() as i64 + 1;
+        offset += line_len + 1;
     }
 
     // If no JSONL events were found and the file is small enough, try parsing it as a
     // single JSON object/array. Files larger than 100 MB are not read into memory.
-    if events.is_empty() && !compressed && metadata.len() <= 100 * 1024 * 1024 {
+    // Codex rollouts are always JSONL; other JSON in a Codex home is not usage.
+    if events.is_empty()
+        && !compressed
+        && source.parser_id != "codex"
+        && metadata.len() <= 100 * 1024 * 1024
+    {
         if let Ok(content) = fs::read_to_string(path) {
             events.extend(parse_content(source, path, &content));
         }
     }
 
-    Ok((events, codex_context.drift()))
+    let mut drift = codex_context.drift();
+    drift.incomplete = incomplete;
+    Ok((events, drift))
 }
 
 /// Per-file format observations, kept in `indexed_files.drift_json`.
@@ -3773,6 +3931,9 @@ struct FileDrift {
     unknown_record_types: BTreeSet<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     usage_records_without_token_count: bool,
+    /// Reading stopped early; the file is parsed again on the next scan.
+    #[serde(skip)]
+    incomplete: bool,
 }
 
 impl FileDrift {
@@ -3874,7 +4035,10 @@ fn codex_token_files_outside_rollout_dirs(home: &Path) -> Vec<PathBuf> {
                 return true;
             }
             let name = e.file_name().to_string_lossy();
-            !(e.depth() == 1 && CODEX_ROLLOUT_DIRS.contains(&name.as_ref())) && !is_skipped_dir(e.path())
+            // Rollout folders are scanned; nested Codex homes are sources of their own.
+            !(e.depth() == 1 && CODEX_ROLLOUT_DIRS.contains(&name.as_ref()))
+                && !is_skipped_dir(e.path())
+                && !is_codex_home(e.path())
         })
         .filter_map(Result::ok)
         .filter(|e| e.file_type().is_file())
@@ -3972,6 +4136,7 @@ impl CodexParseContext {
         FileDrift {
             unknown_record_types: self.unknown_record_types.clone(),
             usage_records_without_token_count: self.usage_records > 0 && self.token_counts == 0,
+            incomplete: false,
         }
     }
 
@@ -3991,8 +4156,12 @@ fn update_codex_context(context: &mut CodexParseContext, value: &Value) {
     if let Some(cwd) = value.pointer("/payload/cwd").and_then(Value::as_str) {
         context.cwd = Some(cwd.to_string());
     }
-    if let Some(id) = value.pointer("/payload/id").and_then(Value::as_str) {
-        context.session_id = Some(id.to_string());
+    // Only session_meta names the session; other records carry item ids.
+    let is_session_meta = value.get("type").and_then(Value::as_str) == Some("session_meta");
+    if is_session_meta || context.session_id.is_none() {
+        if let Some(id) = value.pointer("/payload/id").and_then(Value::as_str) {
+            context.session_id = Some(id.to_string());
+        }
     }
     if let Some(cwd) = value
         .pointer("/payload/turn_context/cwd")
@@ -4360,7 +4529,12 @@ fn insert_event(
             event.raw_record_hash
         ))
     };
-    if let Some(legacy_id) = find_legacy_event_id(conn, source, file_path, &event, &id)? {
+    let legacy_id = find_legacy_event_id(conn, source, file_path, &event, &id)?;
+    if source.parser_id == "codex" && legacy_id.is_some() {
+        // Same rollout line already stored from another copy: keep that row as is.
+        return Ok(false);
+    }
+    if let Some(legacy_id) = legacy_id {
         let now = now();
         conn.execute(
             "UPDATE usage_events SET
@@ -4482,7 +4656,7 @@ fn insert_event(
 }
 
 const CODEX_LEGACY_EVENT_SQL: &str = "SELECT id FROM usage_events
-     WHERE provider_id = ?1 AND raw_record_hash = ?2 AND id != ?3
+     WHERE provider_id = ?1 AND raw_record_hash = ?2 AND id != ?3 AND parser_id = 'codex'
      ORDER BY created_at, id
      LIMIT 1";
 
@@ -5609,6 +5783,16 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn claude_config_dir_alias_of_dot_claude_is_dropped() {
+        let home = scan_test_root("claude-alias");
+        std::fs::create_dir_all(home.join(".claude")).unwrap();
+        std::os::unix::fs::symlink(home.join(".claude"), home.join("claude-link")).unwrap();
+        assert_eq!(claude_source_paths(&home, Some("claude-link")), vec![home.join(".claude")]);
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
     #[test]
     fn timestamp_field_accepts_unix_seconds_with_fraction() {
         let value = json!({"timestamp": 1777317104.005388});
@@ -5869,7 +6053,7 @@ fn project_root_from_path(path: &Path) -> Option<String> {
 }
 
 fn expand_tilde(path: &str) -> PathBuf {
-    if path.starts_with("~/") || path == "~" {
+    if path.starts_with("~/") || path.starts_with("~\\") || path == "~" {
         dirs::home_dir()
             .map(|h| if path == "~" { h } else { h.join(&path[2..]) })
             .unwrap_or_else(|| PathBuf::from(path))
@@ -6129,6 +6313,11 @@ mod codex_tests {
         assert_eq!(plain[0].input_tokens, 12000);
         assert_eq!(plain[1].input_tokens, 13000);
         assert_eq!(plain[0].model.as_deref(), Some("gpt-6.1-terra"));
+        assert_eq!(
+            plain[0].conversation_id.as_deref(),
+            Some("0199f000-0000-7000-8000-00000000f107"),
+            "item ids must not replace the session id"
+        );
         assert_eq!(plain[0].project_path.as_deref(), Some("/home/dev/Projects/fixture-app"));
     }
 
@@ -6415,6 +6604,187 @@ mod codex_tests {
         fs::remove_dir_all(home).unwrap();
     }
 
+    #[test]
+    fn invalid_utf8_in_one_line_keeps_the_rest_of_the_rollout() {
+        let mut bytes = fs::read(fixture(".jsonl")).unwrap();
+        let at = bytes.windows(14).position(|w| w == b"fixture prompt").unwrap();
+        bytes.splice(at..at + 7, b"\xff\xfe\xc3(xx".iter().copied());
+        let home = temp_root("codex-utf8");
+        let file = home.join("sessions").join(ROLLOUT);
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(&file, bytes).unwrap();
+        let (events, drift) = parse_file_with_drift(&codex_source(&home), &file).unwrap();
+        assert_eq!(events.len(), 2);
+        assert!(!drift.incomplete);
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn plain_offsets_match_line_reader_offsets() {
+        // Event ids include the offset; it must match what older versions stored.
+        let source = codex_source(Path::new(FIXTURE_DIR));
+        let text = fs::read_to_string(fixture(".jsonl")).unwrap();
+        let crlf = text.replace('\n', "\r\n");
+        let home = temp_root("codex-offsets");
+        let file = home.join(ROLLOUT);
+        fs::write(&file, &crlf).unwrap();
+        let events = parse_file_streaming(&source, &file).unwrap();
+        let mut expected = Vec::new();
+        let mut offset = 0i64;
+        for line in crlf.lines() {
+            if line.contains("\"last_token_usage\"") {
+                expected.push(offset);
+            }
+            offset += line.len() as i64 + 1;
+        }
+        expected.remove(1); // the re-emit
+        let got: Vec<i64> = events.iter().map(|e| e.source_offset.unwrap()).collect();
+        assert_eq!(got, expected);
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn stray_json_in_a_codex_home_is_not_usage() {
+        let conn = conn();
+        let home = temp_root("codex-stray-json");
+        fs::create_dir_all(home.join("sessions")).unwrap();
+        fs::write(
+            home.join("sessions/index.json"),
+            "{\n  \"sessions\": [{\"id\": \"s\", \"usage\": {\"input_tokens\": 999, \"output_tokens\": 9}}]\n}\n",
+        )
+        .unwrap();
+        scan_source(&conn, &codex_source(&home), false).unwrap();
+        assert!(token_rows(&conn).is_empty());
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn truncated_zst_keeps_read_events_and_retries_next_scan() {
+        let conn = conn();
+        let home = temp_root("codex-partial");
+        let mut bytes = fs::read(fixture(".jsonl.zst")).unwrap();
+        bytes.extend_from_slice(b"\x28\xb5\x2f\xfd garbage frame");
+        let file = home.join("sessions").join(format!("{ROLLOUT}.zst"));
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(&file, bytes).unwrap();
+        let source = registered_codex_source(&conn, &home);
+        scan_source(&conn, &source, false).unwrap();
+        assert_eq!(token_rows(&conn).len(), 2);
+        let indexed: i64 = conn
+            .query_row("SELECT COUNT(*) FROM indexed_files", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(indexed, 0, "a partly read file is read again next scan");
+        assert_eq!(drift_of(&conn, &source).0.unwrap().unreadable_files, 1);
+        scan_source(&conn, &source, false).unwrap();
+        assert_eq!(token_rows(&conn).len(), 2);
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn reparse_removes_rows_older_versions_counted_twice() {
+        let conn = conn();
+        let home = temp_root("codex-stale");
+        let file = home.join("sessions").join(ROLLOUT);
+        copy_fixture(&file, ".jsonl");
+        let source = codex_source(&home);
+        scan_source(&conn, &source, false).unwrap();
+        // Older parser stored the token_count re-emit as its own row.
+        conn.execute(
+            "INSERT INTO usage_events (id, provider_id, source_id, parser_id, parser_version, timestamp,
+               input_tokens, output_tokens, pricing_match_confidence, source_file_path,
+               source_file_modified_at, source_hash, raw_record_hash, confidence, warnings_json,
+               created_at, updated_at)
+             SELECT 'old-reemit', provider_id, source_id, parser_id, '0.1.11', timestamp,
+               input_tokens, output_tokens, pricing_match_confidence, source_file_path,
+               source_file_modified_at, source_hash, 'hash-of-reemit', confidence, warnings_json,
+               created_at, updated_at
+             FROM usage_events LIMIT 1",
+            [],
+        )
+        .unwrap();
+        conn.execute("UPDATE indexed_files SET parser_version = '0.1.11'", []).unwrap();
+        assert_eq!(token_rows(&conn).len(), 3);
+        // The version bump makes the next incremental scan re-parse the file.
+        scan_source(&conn, &source, false).unwrap();
+        assert_eq!(token_rows(&conn).len(), 2);
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn nested_codex_home_is_registered_beside_the_default_home() {
+        let conn = conn();
+        let home = temp_root("codex-nested");
+        fs::create_dir_all(home.join(".codex/sessions")).unwrap();
+        fs::create_dir_all(home.join(".codex/profile2/sessions")).unwrap();
+        fs::create_dir_all(home.join(".codex/sessions/x/sessions")).unwrap();
+        let homes = vec![
+            home.join(".codex"),
+            home.join(".codex/profile2"),
+            home.join(".codex/sessions/x"), // inside a walked rollout folder
+        ];
+        assert_eq!(ensure_codex_sources_at(&conn, &homes).unwrap(), 2);
+        // The nested home is not reported as "token data outside" ~/.codex.
+        copy_fixture(&home.join(".codex/profile2/sessions").join(ROLLOUT), ".jsonl");
+        assert!(codex_token_files_outside_rollout_dirs(&home.join(".codex")).is_empty());
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_home_alias_is_not_a_second_source() {
+        let conn = conn();
+        let home = temp_root("codex-alias");
+        fs::create_dir_all(home.join(".codex/sessions")).unwrap();
+        std::os::unix::fs::symlink(home.join(".codex"), home.join(".codex-alias")).unwrap();
+        let homes = codex_source_paths(&home, Some(&format!("{}/", home.join(".codex").display())));
+        assert_eq!(ensure_codex_sources_at(&conn, &homes).unwrap(), 1);
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn removed_auto_sources_stay_removed_until_added_by_hand() {
+        let conn = conn();
+        let home = temp_root("codex-dismiss");
+        fs::create_dir_all(home.join(".codex-work/sessions")).unwrap();
+        let homes = vec![home.join(".codex-work")];
+        assert_eq!(ensure_codex_sources_at(&conn, &homes).unwrap(), 1);
+        let id = query_sources(&conn).unwrap()[0].id.clone();
+        remove_source_row(&conn, &id).unwrap();
+        assert_eq!(ensure_codex_sources_at(&conn, &homes).unwrap(), 0);
+        assert!(query_sources(&conn).unwrap().is_empty());
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn symlinks_and_os_junk_in_rollout_folders() {
+        let conn = conn();
+        let home = temp_root("codex-junk");
+        let day = home.join("sessions/2026/10/29");
+        copy_fixture(&day.join(ROLLOUT), ".jsonl");
+        fs::write(day.join(".DS_Store"), b"junk").unwrap();
+        fs::write(day.join("Thumbs.db"), b"junk").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(day.join(ROLLOUT), day.join("rollout-link.jsonl")).unwrap();
+        let source = registered_codex_source(&conn, &home);
+        scan_source(&conn, &source, false).unwrap();
+        let report = drift_of(&conn, &source).0;
+        #[cfg(unix)]
+        assert_eq!(
+            report.unwrap().unscanned_file_types,
+            BTreeMap::from([("(symlink)".to_string(), 1)])
+        );
+        #[cfg(not(unix))]
+        assert_eq!(report, None);
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn path_keys_ignore_trailing_slashes_and_windows_prefixes() {
+        assert_eq!(path_key(Path::new("/no/such/dir/")), path_key(Path::new("/no/such/dir")));
+        assert!(key_contains("/a/b", "/a/b/c"));
+        assert!(!key_contains("/a/b", "/a/bc"));
+    }
+
     /// Smoke check against this machine's real Codex homes (prints counts only):
     /// `cargo test --lib real_codex_homes -- --ignored --nocapture`
     #[test]
@@ -6436,7 +6806,7 @@ mod codex_tests {
         }
         let (events, input, output): (i64, i64, i64) = conn
             .query_row(
-                "SELECT COUNT(*), SUM(input_tokens), SUM(output_tokens) FROM usage_events",
+                "SELECT COUNT(*), COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0) FROM usage_events",
                 [],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
@@ -6445,8 +6815,8 @@ mod codex_tests {
         if let Ok(cutoff) = std::env::var("METR_SMOKE_CUTOFF") {
             let stable: (i64, i64, i64) = conn
                 .query_row(
-                    "SELECT COUNT(*), SUM(input_tokens), SUM(output_tokens) FROM usage_events
-                     WHERE source_file_modified_at < ?1",
+                    "SELECT COUNT(*), COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0)
+                     FROM usage_events WHERE source_file_modified_at < ?1",
                     params![cutoff],
                     |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
                 )
@@ -6479,7 +6849,8 @@ mod codex_tests {
         for dir in [".codex/sessions", ".codex-acct2/sessions", ".codex-x/sessions"] {
             fs::create_dir_all(home.join(dir)).unwrap();
         }
-        // An existing manual source inside .codex-x covers that home.
+        // A manual source inside .codex-x does not stop the home (archived
+        // sessions and handoffs live beside sessions/); overlap dedupes.
         insert_auto_source(
             &conn,
             "openai",
@@ -6490,7 +6861,7 @@ mod codex_tests {
         .unwrap();
         let homes = codex_source_paths(&home, None);
 
-        assert_eq!(ensure_codex_sources_at(&conn, &homes).unwrap(), 2);
+        assert_eq!(ensure_codex_sources_at(&conn, &homes).unwrap(), 3);
         assert_eq!(ensure_codex_sources_at(&conn, &homes).unwrap(), 0);
         let mut paths: Vec<String> = query_sources(&conn)
             .unwrap()
@@ -6501,7 +6872,7 @@ mod codex_tests {
             })
             .collect();
         paths.sort();
-        let mut expected: Vec<String> = [".codex", ".codex-acct2", ".codex-x/sessions"]
+        let mut expected: Vec<String> = [".codex", ".codex-acct2", ".codex-x", ".codex-x/sessions"]
             .iter()
             .map(|d| home.join(d).to_string_lossy().to_string())
             .collect();

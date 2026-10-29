@@ -18,6 +18,20 @@ Done (tests: 30 pass + 2 ignored real-data smoke tests; baseline was 21):
 - Codex quota ~exhausted (acct1 98%, acct2 94% weekly) → review + test by Claude subagents, running now.
 Next: fold review/test findings, merge to main (src-tauri only, no backend deploy), then M2 (core crate split, Linux CLI/daemon, web UI) and the Mac/Windows release.
 
+## Mac cleanup: retire ~/.claude-accounts (for Guardian to run on the Mac, Petar approving)
+Petar decision 18:26: one Claude account now; METR scans only the real `~/.claude`. Do not run step 4 until steps 1–3 are clean.
+1. **Read-only checks**
+   - `ls -la ~/.claude-accounts/ ~/.claude-accounts/*/`
+   - `for d in ~/.claude-accounts/account-*; do echo "$d -> $(readlink "$d/projects")"; done` (expect each → `~/.claude/projects`)
+   - `find ~/.claude-accounts -type f -name '*.jsonl' | wc -l` (expect 0; if >0, list paths only and stop, PO decides whether to move them into `~/.claude/projects` first)
+   - What still points at them: `env | grep -i claude_config`; `launchctl getenv CLAUDE_CONFIG_DIR`; `grep -n 'claude-accounts\|CLAUDE_CONFIG_DIR' ~/.zshrc ~/.zprofile ~/.bash_profile ~/.bashrc 2>/dev/null`; `grep -rln 'claude-accounts' ~/bin ~/.local/bin ~/Library/LaunchAgents 2>/dev/null`
+   - METR sources pointing there (read-only): `sqlite3 -readonly ~/Library/Application\ Support/com.petarpetkov.metr/metr.db "SELECT path, enabled FROM log_sources WHERE path LIKE '%claude-accounts%'"` (adjust the app-data folder name if different)
+2. Report the results to the PO (paths and counts only).
+3. If anything sets `CLAUDE_CONFIG_DIR` to an account dir: remove that line (Petar approves the exact edit) and open a new shell.
+4. **Remove (reversible):** `mv ~/.claude-accounts ~/.Trash/claude-accounts-$(date +%Y%m%d)`. In METR → Sources, remove any source under `.claude-accounts`. Do not touch `~/.claude`.
+5. Optional, by Petar by hand: delete the old per-account "Claude Code-credentials…" items in Keychain Access (no scripting).
+6. Verify: METR → Rescan; Claude totals for the last 30 days unchanged (the account folders only held symlinks to `~/.claude/projects`).
+
 ## needs-petar
 - **Device alias leak:** server device `windows-DESKTOP-PG7TRK4` (last seen Oct 9) has an API-key-like string as its alias. Proposal: clear that alias (single-row UPDATE, non-destructive). Please rotate that Kimi key. Not printed anywhere.
 - **Linux device login:** `metr login` on the20th needs your METR password typed by you (`! metr login`) when M1 install is ready.
