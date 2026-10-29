@@ -82,6 +82,14 @@ enum Command {
         #[arg(long)]
         allow_with_desktop: bool,
     },
+    /// Compare local events with what the server holds for this device.
+    Reconcile {
+        /// Also list every device's totals on the server.
+        #[arg(long)]
+        all: bool,
+        #[arg(long)]
+        json: bool,
+    },
     /// Log this device out and forget the token.
     Logout,
     /// One gentle scan + sync pass (what the systemd timer runs). Waits while
@@ -235,6 +243,10 @@ fn run(command: Command) -> Result<(), String> {
             // Login pulls server prices; refresh the API-equivalent costs.
             headless::maintenance(&conn)
         }
+        Command::Reconcile { all, json } => {
+            let report = headless::reconcile(&conn)?;
+            print_or(json, &report, |r| print_reconcile(r, all))
+        }
         Command::Logout => {
             headless::logout_device(&conn)?;
             println!("Logged out.");
@@ -370,6 +382,49 @@ fn print_usage(rows: &Value) {
             row["reasoning_tokens"].as_i64().unwrap_or(0),
             row["api_equivalent_usd"].as_f64().unwrap_or(0.0)
         );
+    }
+}
+
+fn print_reconcile(report: &Value, all: bool) {
+    println!(
+        "  {:<10} {:>12} {:>12} {:>9} {:>13} {:>11}",
+        "provider", "local", "synced", "pending", "on server", "difference"
+    );
+    let mut clean = true;
+    for row in report["providers"].as_array().into_iter().flatten() {
+        let difference = row["server_minus_synced"].as_i64().unwrap_or(0);
+        clean &= difference == 0;
+        println!(
+            "  {:<10} {:>12} {:>12} {:>9} {:>13} {:>11}",
+            row["provider"].as_str().unwrap_or("?"),
+            row["local_events"].as_i64().unwrap_or(0),
+            row["local_synced"].as_i64().unwrap_or(0),
+            row["pending"].as_i64().unwrap_or(0),
+            row["server_events"].as_i64().unwrap_or(0),
+            difference
+        );
+    }
+    let duplicates = report["duplicates_on_this_device"].as_array().map_or(0, Vec::len);
+    let cross = report["duplicates_across_devices"].as_array().map_or(0, Vec::len);
+    println!(
+        "Duplicate lines on the server: this device {}, shared across devices {}.",
+        if duplicates == 0 { "none".to_string() } else { format!("{duplicates} provider(s) affected") },
+        if cross == 0 { "none".to_string() } else { format!("{cross} provider(s)") }
+    );
+    if clean && duplicates == 0 {
+        println!("Server and local totals agree for every synced event.");
+    }
+    if all {
+        println!("All devices on the server:");
+        for row in report["all_devices"].as_array().into_iter().flatten() {
+            println!(
+                "  {:<28} {:<10} {:>9} events  last {}",
+                truncate(row["device_name"].as_str().unwrap_or("?"), 28),
+                row["provider_id"].as_str().unwrap_or("?"),
+                row["events"].as_i64().unwrap_or(0),
+                row["last_event"].as_str().unwrap_or("?")
+            );
+        }
     }
 }
 
