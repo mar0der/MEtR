@@ -77,8 +77,18 @@ costs reporting, not data).
    tauri crates optional. Workspace member `src-tauri/cli` (binary `metr`) depends on the core with
    `default-features = false`, so it builds without webkit and Mac/Windows builds are unchanged. CLI token in a 0600 file under
    `~/.config/metr/` when no Secret Service.
+1b. **One headless Linux build** (Petar 18:38): CLI + scan/sync, no GUI, same binary on the20th, the18th
+   and future boxes. Portable: check target glibc (the18th via Guardian); if older than the build host,
+   ship a static musl build (needs rustls instead of native-tls for HTTPS; `musl-tools` apt install → ask first).
+1c. **Scheduled, gentle sync** (Petar 18:38): `metr run` = one load-aware pass (skip/delay while
+   loadavg per core is high), incremental scan, idempotent sync, writes last run + counts to
+   `~/.local/state/metr/last-run.json` (shown by `metr status`, for Guardian health checks).
+   `metr install --schedule hourly|daily [--web] [--system]` writes systemd units:
+   `metr-sync.service` (oneshot, Nice=19, IOSchedulingClass=idle, CPUSchedulingPolicy=batch) +
+   `metr-sync.timer` (default hourly, RandomizedDelaySec, Persistent) + optional `metr-web.service`;
+   `metr uninstall` removes them. Timer preferred over a long-running daemon.
 2. **CLI** `metr`: `status` (incl. drift report), `usage [--since --until --provider --by day|model|project] --json`,
-   `scan`, `sync [--full]`, `login` (Petar types the password), `self-update`, `daemon`, `serve`.
+   `scan`, `sync [--full]`, `login` (Petar types the password), `run`, `install`/`uninstall`, `self-update`, `serve`.
 3. **Web UI**: read-only per-provider dashboard + JSON API. Binds explicit addresses only
    (127.0.0.1 + Tailscale IP via `tailscale ip -4`); refuses `0.0.0.0`/`::`.
 4. **Install on the20th**: `~/.local/bin/metr`, `systemd --user` `metr.service`. Sources: `~/.claude`

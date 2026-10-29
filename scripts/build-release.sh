@@ -33,6 +33,7 @@ fi
 # Sync version across all config files
 sed -i.bak -E "s/\"version\": *\"[^\"]+\"/\"version\": \"${VERSION}\"/" package.json && rm -f package.json.bak
 sed -i.bak -E "s/^version = \"[^\"]+\"/version = \"${VERSION}\"/" src-tauri/Cargo.toml && rm -f src-tauri/Cargo.toml.bak
+sed -i.bak -E "s/^version = \"[^\"]+\"/version = \"${VERSION}\"/" src-tauri/cli/Cargo.toml && rm -f src-tauri/cli/Cargo.toml.bak
 echo "Synced version ${VERSION} to package.json and Cargo.toml"
 
 npm run tauri:build

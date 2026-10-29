@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>METR</title>
+<style>
+  :root {
+    --bg: #f7f7f5; --panel: #ffffff; --text: #1d1d1b; --muted: #6b6b66; --line: #e3e2dd;
+    --anthropic: #c96442; --openai: #2f6f5e; --other: #7a7a74; --warn: #a15c00; --bad: #b3261e;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #161615; --panel: #20201e; --text: #ecebe6; --muted: #a09f98; --line: #34332f;
+      --anthropic: #e08a6a; --openai: #5fb39a; --other: #9a9a93; --warn: #e0a040; --bad: #f2867c;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 1040px; margin: 0 auto; padding: 24px 16px 48px; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  h2 { font-size: 15px; margin: 28px 0 10px; }
+  .muted { color: var(--muted); }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; }
+  .card .label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+  .card .value { font-size: 24px; font-variant-numeric: tabular-nums; margin-top: 4px; }
+  .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 6px; }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; overflow-x: auto; }
+  table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }
+  th, td { text-align: right; padding: 6px 8px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  th:first-child, td:first-child { text-align: left; }
+  th { color: var(--muted); font-weight: 500; font-size: 12px; }
+  .warn { color: var(--warn); } .bad { color: var(--bad); }
+  svg text { fill: var(--muted); font-size: 11px; }
+  .legend span { margin-right: 14px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>METR</h1>
+  <div id="meta" class="muted">Loading…</div>
+
+  <h2>Totals by provider</h2>
+  <div id="cards" class="cards"></div>
+
+  <h2>Last 30 days <span class="muted">(input + output tokens per UTC day)</span></h2>
+  <div class="panel"><div id="legend" class="legend muted"></div><div id="chart"></div></div>
+
+  <h2>By model, last 30 days</h2>
+  <div class="panel"><table id="models"></table></div>
+
+  <h2>Sources</h2>
+  <div class="panel"><table id="sources"></table></div>
+</main>
+<script>
+const COLORS = { anthropic: "var(--anthropic)", openai: "var(--openai)" };
+const NAMES = { anthropic: "Claude (Anthropic)", openai: "Codex (OpenAI)" };
+const color = p => COLORS[p] || "var(--other)";
+const name = p => NAMES[p] || p;
+const fmt = n => Number(n || 0).toLocaleString("en-US");
+const short = n => n >= 1e9 ? (n / 1e9).toFixed(2) + "B" : n >= 1e6 ? (n / 1e6).toFixed(1) + "M" : n >= 1e3 ? (n / 1e3).toFixed(0) + "k" : String(n);
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+async function get(path) {
+  const r = await fetch(path, { cache: "no-store" });
+  if (!r.ok) throw new Error(path + ": " + r.status);
+  return r.json();
+}
+
+function renderMeta(status) {
+  const s = status.sync || {};
+  const sync = s.logged_in
+    ? `device ${esc(s.device_name)} · last sync ${esc(s.last_sync_at || "never")} · ${fmt(s.pending_events)} pending`
+    : "not logged in (run metr login)";
+  const run = status.last_run;
+  const runText = run ? `last run ${esc(run.finished_at)}: ${esc(run.outcome)}` : "no scheduled run yet";
+  const runClass = run && run.outcome === "error" ? "bad" : "";
+  document.getElementById("meta").innerHTML =
+    `v${esc(status.version)} · ${sync} · <span class="${runClass}">${runText}</span>`;
+}
+
+function renderCards(totals) {
+  document.getElementById("cards").innerHTML = totals.map(t => `
+    <div class="card">
+      <div class="label"><span class="dot" style="background:${color(t.provider)}"></span>${esc(name(t.provider))}</div>
+      <div class="value">${short(t.input_tokens + t.output_tokens)}</div>
+      <div class="muted">${fmt(t.events)} calls · ${short(t.cached_input_tokens)} cached in · ${short(t.output_tokens)} out</div>
+      <div class="muted">API equivalent $${fmt(Math.round(t.api_equivalent_usd))}</div>
+    </div>`).join("") || `<div class="muted">No usage yet.</div>`;
+}
+
+function renderChart(rows, since) {
+  const days = [];
+  for (let d = new Date(since); days.length < 30; d.setUTCDate(d.getUTCDate() + 1)) days.push(d.toISOString().slice(0, 10));
+  const providers = [...new Set(rows.map(r => r.provider))];
+  const byDay = Object.fromEntries(days.map(d => [d, {}]));
+  rows.forEach(r => { if (byDay[r.group]) byDay[r.group][r.provider] = r.input_tokens + r.output_tokens; });
+  const max = Math.max(1, ...days.map(d => providers.reduce((sum, p) => sum + (byDay[d][p] || 0), 0)));
+  const W = 960, H = 220, pad = 34, bw = (W - pad) / days.length;
+  let bars = "";
+  days.forEach((d, i) => {
+    let y = H - 20;
+    providers.forEach(p => {
+      const v = byDay[d][p] || 0; if (!v) return;
+      const h = (v / max) * (H - 30);
+      y -= h;
+      bars += `<rect x="${pad + i * bw + 1}" y="${y}" width="${bw - 2}" height="${h}" fill="${color(p)}"><title>${d} ${esc(name(p))}: ${fmt(v)}</title></rect>`;
+    });
+    if (i % 5 === 0) bars += `<text x="${pad + i * bw}" y="${H - 4}">${d.slice(5)}</text>`;
+  });
+  bars += `<text x="0" y="12">${short(max)}</text>`;
+  document.getElementById("chart").innerHTML =
+    `<svg viewBox="0 0 ${W} ${H}" width="100%" role="img" aria-label="Daily tokens">${bars}</svg>`;
+  document.getElementById("legend").innerHTML =
+    providers.map(p => `<span><span class="dot" style="background:${color(p)}"></span>${esc(name(p))}</span>`).join("");
+}
+
+function renderModels(rows) {
+  rows.sort((a, b) => (b.input_tokens + b.output_tokens) - (a.input_tokens + a.output_tokens));
+  document.getElementById("models").innerHTML =
+    `<tr><th>Model</th><th>Provider</th><th>Calls</th><th>Input</th><th>Cached input</th><th>Output</th><th>API $</th></tr>` +
+    rows.map(r => `<tr><td>${esc(r.group)}</td><td>${esc(name(r.provider))}</td><td>${fmt(r.events)}</td>
+      <td>${fmt(r.input_tokens)}</td><td>${fmt(r.cached_input_tokens)}</td><td>${fmt(r.output_tokens)}</td>
+      <td>${fmt(Math.round(r.api_equivalent_usd))}</td></tr>`).join("");
+}
+
+function renderSources(sources) {
+  document.getElementById("sources").innerHTML =
+    `<tr><th>Folder</th><th>Provider</th><th>Last scan</th></tr>` +
+    sources.map(s => `<tr><td>${esc(s.path)}${s.drift ? ' <span class="warn">format drift</span>' : ""}</td>
+      <td>${esc(name(s.provider))}</td><td style="white-space:normal;text-align:left">${esc(s.last_scan_message || s.last_scan_status || "not scanned")}</td></tr>`).join("");
+}
+
+async function load() {
+  const since = new Date(Date.now() - 29 * 864e5).toISOString().slice(0, 10);
+  try {
+    const [status, daily, models] = await Promise.all([
+      get("/api/status"),
+      get(`/api/usage?by=day&since=${since}T00:00:00Z`),
+      get(`/api/usage?by=model&since=${since}T00:00:00Z`),
+    ]);
+    renderMeta(status);
+    renderCards(status.totals || []);
+    renderChart(daily, since);
+    renderModels(models);
+    renderSources(status.sources || []);
+  } catch (e) {
+    document.getElementById("meta").innerHTML = `<span class="bad">${esc(e.message)}</span>`;
+  }
+}
+load();
+setInterval(load, 5 * 60 * 1000);
+</script>
+</body>
+</html>

@@ -18,6 +18,14 @@ Done (tests: 30 pass + 2 ignored real-data smoke tests; baseline was 21):
 - Codex quota ~exhausted (acct1 98%, acct2 94% weekly) → review + test by Claude subagents, running now.
 Next: fold review/test findings, merge to main (src-tauri only, no backend deploy), then M2 (core crate split, Linux CLI/daemon, web UI) and the Mac/Windows release.
 
+## 2026-10-29 ~18:45 — M1 merged + released; M2 CLI in review
+- **M1 merged to main** (`6ee544c`) after review, test, and a re-review: zstd rollouts, every Codex home, dedupe by raw line, re-emit cleanup by hash (also repairs old rows wherever they live), format-drift report, `.claude-accounts` symlink test, 48 tests. Real data on the20th: scanner = independent count exactly (13,507 events on stable files).
+- **Release 26.41.0 tagged** (`v26.41.0`) for Mac/Windows. CI run: https://github.com/mar0der/MEtR/actions/runs/40893433131. Watch: the previous release (26.40.2) built fine but its publish job failed at "Connect to Tailscale" (GitHub secret / Tailscale auth key), so it likely never reached the update server.
+- **Petar 18:26** single Claude account: no multi-account code in METR; a `CLAUDE_CONFIG_DIR` that is only an alias of `~/.claude` is dropped; Mac cleanup steps below for the Guardian.
+- **Petar 18:29** definition of done + **18:38** headless schedule folded into PLAN.md (M2 1b/1c, M3).
+- **M2 on `feat/linux-cli`** (`2feb608`): Tauri behind an `app` feature (desktop unchanged), `metr` CLI: status/scan/usage/sync/login/logout, `run` (load-aware one-shot), `install`/`uninstall` (systemd timer hourly|daily, Nice 19, idle IO; optional web UI service), `serve` (127.0.0.1 + Tailscale only, Host-header check), `self-update` (builds latest tag from source). Review + test running (Claude subagents; Codex quota exhausted).
+Next: fold findings → merge → install on the20th (timer + web UI) → Petar runs `! metr login --user <name>` → provide the18th build + steps to the Guardian → M3.
+
 ## Mac cleanup: retire ~/.claude-accounts (for Guardian to run on the Mac, Petar approving)
 Petar decision 18:26: one Claude account now; METR scans only the real `~/.claude`. Do not run step 4 until steps 1–3 are clean.
 1. **Read-only checks**

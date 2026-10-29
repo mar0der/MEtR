@@ -24,3 +24,18 @@ Confirmed fine: hash stability, byte line reader offsets (= BufRead::lines), inc
 - RR3 (low) session-id fix did not repair stored rows → FIX: re-parse updates conversation_id on existing Codex rows; orphan conversations are removed by the startup cleanup.
 - RR4 (low) manual add of a ~/.claude symlink alias fell back to the generic parser → FIX: raw CLAUDE_CONFIG_DIR still counts in is_configured_claude_path.
 - RR5 (low, accepted) a generic source over a Codex folder can now hold a second copy of a line the Codex source also stores; not a supported setup.
+
+## 2026-10-29 — branch feat/linux-cli (Claude subagent reviewer)
+Desktop move verified clean (35 commands identical, build/feature/workspace paths unchanged for CI).
+- C1 (med) self-update compared against cli/Cargo.toml version → FIX: `metr_lib::VERSION` (core version, bumped by releases); release script bumps cli too.
+- C2 (med) concurrent writers can hit "database is locked" → FIX: exclusive lock file for writing commands + IMMEDIATE scan transactions.
+- C3 (med, root) predictable /tmp build dir in self-update → FIX: fresh 0700 dir under ~/.cache/metr (create, not create_all).
+- C4 (med) slow client hangs web UI → FIX: own std HTTP/1.0 server, 10 s read/write timeouts, 32-connection cap, close after each response (tiny_http dropped).
+- C5 (med) desktop app + CLI on one machine double count (two devices) → FIX: `login`/`install` refuse when the Linux desktop DB exists (`--allow-with-desktop` to override).
+- C6 (low-med) `[Sync]` logs on stdout break `--json` → FIX: stderr.
+- C7 (low-med) constantly busy server never syncs → FIX: run anyway (still niced) when the last ok run is older than `--force-after-hours` (24).
+- C8 (low) root running a user-writable binary; no hardening → FIX: `--system` requires root-owned, non-writable binary path; system units sandboxed (NoNewPrivileges, ProtectSystem=strict, PrivateTmp, ReadWritePaths = METR dirs; web: ProtectHome=read-only).
+- C9 (low) any 100.64/10 address accepted → FIX: must be one of `tailscale ip`.
+- C10 (low) maintenance never called → FIX: after login and each run.
+- C11 (low) the18th: `--system` scans root's home only → open question for Guardian (which users run Codex there).
+- C12 (low) stale web unit on reinstall, `%` in path, non-atomic token write, CLI/desktop binary name collision → FIXED (`metr-cli` build name, installed as `metr`). `--locked` kept: release commits include Cargo.lock.
