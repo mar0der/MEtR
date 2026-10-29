@@ -12,7 +12,8 @@ use serde_json::Value;
 use std::io::{BufRead, IsTerminal};
 
 const DEFAULT_SERVER: &str = "https://metr.petarpetkov.com";
-const DEFAULT_PORT: u16 = 8765;
+// 8765 is taken by llama-server on the20th.
+const DEFAULT_PORT: u16 = 8790;
 
 #[derive(Parser)]
 #[command(
