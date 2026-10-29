@@ -15,10 +15,11 @@ class RepriceUsageTest extends TestCase
 {
     use RefreshDatabase;
 
+    private ?Device $device = null;
+
     private function event(string $model, ?float $cost, int $unknown = 0): UsageEvent
     {
-        static $device = null;
-        $device ??= Device::factory()->create(['user_id' => User::factory()->create()->id]);
+        $device = $this->device ??= Device::factory()->create(['user_id' => User::factory()->create()->id]);
 
         return UsageEvent::factory()->create([
             'user_id' => $device->user_id,
