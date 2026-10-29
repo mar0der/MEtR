@@ -3023,8 +3023,16 @@ fn is_configured_claude_path(path: &Path) -> bool {
         return false;
     };
     let configured_dir = std::env::var("CLAUDE_CONFIG_DIR").ok();
+    // The raw setting counts too: it may be a symlink alias of ~/.claude
+    // that claude_source_paths drops.
+    let configured = configured_dir
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|raw| absolute_from_home(&home, raw));
     claude_source_paths(&home, configured_dir.as_deref())
         .iter()
+        .chain(configured.iter())
         .any(|root| path == root || path.starts_with(root))
 }
 
@@ -3578,10 +3586,10 @@ fn scan_source(conn: &Connection, source: &Source, full_scan: bool) -> Result<us
             drift.unreadable_files += 1;
             drift.note_sample(entry.path());
         }
-        let produced_hashes: HashSet<String> =
-            events.iter().map(|e| e.raw_record_hash.clone()).collect();
+
         // One transaction per file: far fewer WAL commits, and a failure rolls back only this file.
         let tx = conn.unchecked_transaction().map_err(to_string)?;
+        remove_codex_reemit_rows(&tx, &source.provider_id, &file_drift.reemit_hashes)?;
         for event in events {
             if insert_event(&tx, source, entry.path(), &modified, &source_hash, event, custom_root.as_deref())? {
                 imported += 1;
@@ -3591,9 +3599,6 @@ fn scan_source(conn: &Connection, source: &Source, full_scan: bool) -> Result<us
             // Not marked indexed, so the rest is read on the next scan.
             tx.commit().map_err(to_string)?;
             continue;
-        }
-        if source.parser_id == "codex" {
-            remove_stale_codex_rows(&tx, entry.path(), &produced_hashes)?;
         }
         upsert_indexed_file(
             &tx,
@@ -3674,30 +3679,20 @@ fn scan_source(conn: &Connection, source: &Source, full_scan: bool) -> Result<us
     Ok(imported)
 }
 
-/// Drops rows a complete re-parse of this rollout (or its uncompressed twin)
-/// no longer produces, e.g. token_count re-emits counted by older versions.
-fn remove_stale_codex_rows(
+/// Deletes rows older versions stored for Codex token_count re-emits
+/// (unchanged totals), wherever the rollout lived when it was first scanned.
+fn remove_codex_reemit_rows(
     conn: &Connection,
-    path: &Path,
-    produced_hashes: &HashSet<String>,
+    provider_id: &str,
+    reemit_hashes: &[String],
 ) -> Result<(), String> {
-    let real = path.to_string_lossy().to_string();
-    let logical = logical_path(path).to_string_lossy().to_string();
-    let rows: Vec<(String, String)> = conn
-        .prepare(
-            "SELECT id, raw_record_hash FROM usage_events
-             WHERE parser_id = 'codex' AND source_file_path IN (?1, ?2)",
+    for raw_hash in reemit_hashes {
+        conn.execute(
+            "DELETE FROM usage_events
+             WHERE provider_id = ?1 AND raw_record_hash = ?2 AND parser_id = 'codex'",
+            params![provider_id, raw_hash],
         )
-        .map_err(to_string)?
-        .query_map(params![real, logical], |r| Ok((r.get(0)?, r.get(1)?)))
-        .map_err(to_string)?
-        .collect::<Result<_, _>>()
         .map_err(to_string)?;
-    for (id, raw_hash) in rows {
-        if !produced_hashes.contains(&raw_hash) {
-            conn.execute("DELETE FROM usage_events WHERE id = ?1", params![id])
-                .map_err(to_string)?;
-        }
     }
     Ok(())
 }
@@ -3934,6 +3929,8 @@ struct FileDrift {
     /// Reading stopped early; the file is parsed again on the next scan.
     #[serde(skip)]
     incomplete: bool,
+    #[serde(skip)]
+    reemit_hashes: Vec<String>,
 }
 
 impl FileDrift {
@@ -4077,6 +4074,7 @@ fn parse_line_into_events(
         let parsed = if source.parser_id == "codex" {
             codex_context.observe(&value);
             if codex_context.repeats_last_total(&value) {
+                codex_context.reemit_hashes.push(hash(trimmed));
                 return;
             }
             parse_codex_value(source, path, &value, offset, trimmed, codex_context)
@@ -4102,6 +4100,8 @@ struct CodexParseContext {
     unknown_record_types: BTreeSet<String>,
     token_counts: usize,
     usage_records: usize,
+    /// Raw hashes of skipped re-emits; older versions stored them as events.
+    reemit_hashes: Vec<String>,
 }
 
 /// Top-level `type` values seen in Codex rollouts. Anything else means the
@@ -4137,6 +4137,7 @@ impl CodexParseContext {
             unknown_record_types: self.unknown_record_types.clone(),
             usage_records_without_token_count: self.usage_records > 0 && self.token_counts == 0,
             incomplete: false,
+            reemit_hashes: self.reemit_hashes.clone(),
         }
     }
 
@@ -4643,6 +4644,14 @@ fn insert_event(
             ],
         )
         .map_err(to_string)?;
+    if changed == 0 && source.parser_id == "codex" {
+        // Older versions took the session id from item ids.
+        conn.execute(
+            "UPDATE usage_events SET conversation_id = ?1 WHERE id = ?2 AND conversation_id IS NOT ?1",
+            params![conversation_id, id],
+        )
+        .map_err(to_string)?;
+    }
     if changed == 0 {
         // Already stored: a re-parse may still bring the 1-hour cache write split.
         conn.execute(
@@ -6688,18 +6697,22 @@ mod codex_tests {
         copy_fixture(&file, ".jsonl");
         let source = codex_source(&home);
         scan_source(&conn, &source, false).unwrap();
-        // Older parser stored the token_count re-emit as its own row.
+        // Older parser stored the token_count re-emit as its own row, back when
+        // the rollout lived elsewhere.
+        let text = fs::read_to_string(fixture(".jsonl")).unwrap();
+        let reemit_line = text.lines().find(|l| l.contains("\"ordinal\":7")).unwrap();
         conn.execute(
             "INSERT INTO usage_events (id, provider_id, source_id, parser_id, parser_version, timestamp,
                input_tokens, output_tokens, pricing_match_confidence, source_file_path,
                source_file_modified_at, source_hash, raw_record_hash, confidence, warnings_json,
                created_at, updated_at)
              SELECT 'old-reemit', provider_id, source_id, parser_id, '0.1.11', timestamp,
-               input_tokens, output_tokens, pricing_match_confidence, source_file_path,
-               source_file_modified_at, source_hash, 'hash-of-reemit', confidence, warnings_json,
+               input_tokens, output_tokens, pricing_match_confidence,
+               'old/sessions/' || source_file_path,
+               source_file_modified_at, source_hash, ?1, confidence, warnings_json,
                created_at, updated_at
              FROM usage_events LIMIT 1",
-            [],
+            params![hash(reemit_line.trim())],
         )
         .unwrap();
         conn.execute("UPDATE indexed_files SET parser_version = '0.1.11'", []).unwrap();
@@ -6707,6 +6720,26 @@ mod codex_tests {
         // The version bump makes the next incremental scan re-parse the file.
         scan_source(&conn, &source, false).unwrap();
         assert_eq!(token_rows(&conn).len(), 2);
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn zst_twin_reparse_keeps_rows_of_the_longer_plain_file() {
+        let conn = conn();
+        let home = temp_root("codex-twins");
+        let plain = home.join("sessions").join(ROLLOUT);
+        let mut text = fs::read_to_string(fixture(".jsonl")).unwrap();
+        // The plain twin has one more turn than the compressed copy.
+        text.push_str(&text.lines().nth(9).unwrap().replace("25000", "26000").replace("09.100Z", "20.000Z"));
+        text.push('\n');
+        fs::create_dir_all(plain.parent().unwrap()).unwrap();
+        fs::write(&plain, &text).unwrap();
+        copy_fixture(&plain.with_extension("jsonl.zst"), ".jsonl.zst");
+        let source = codex_source(&home);
+        for _ in 0..2 {
+            scan_source(&conn, &source, true).unwrap();
+            assert_eq!(token_rows(&conn).len(), 3);
+        }
         fs::remove_dir_all(home).unwrap();
     }
 
