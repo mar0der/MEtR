@@ -19,6 +19,19 @@ Inputs: PO brief (`~/Developer/_po/metr-po.md`), Guardian sweep (Oct 29) + adden
    (127.0.0.1 and Tailscale only).
 6. **GitHub:** Guardian will add the deploy key; keep committing locally until then.
 
+## Definition of done (Petar, Oct 29 18:29 Dubai)
+A correct, **deduplicated total of ALL Claude (Anthropic) and Codex (OpenAI) usage across every
+machine**, with optimized scanning and app → server sync, proven by a **reconciliation report per
+machine and per provider** (files found, events, tokens locally vs what the server holds; zero
+double counts).
+
+| Machine | Sources | How |
+|---|---|---|
+| the20th | `~/.claude`, `~/.codex`, `~/.codex-acct2` (+ `~/.codex-accounts/*`) | Linux CLI/daemon (M2) |
+| the18th (server) | `/root/.codex` (254 session files, codex CLI at `/usr/local/bin/codex`), no Claude | Same Linux build, run as root (root-readable scan), syncing to local metr-sync. **Guardian installs; PO provides build + steps.** |
+| Mac | `~/.claude` (single account), Codex incl. `.zst` + Codex app DBs if they hold usage | Desktop release (M1 fixes) |
+| Windows | later, via Windows-side agent sweep (Guardian drafts email for Petar) | Desktop release |
+
 ## Goals
 - **(a)** Own METR development on the20th.
 - **(b)** Linux edition: headless daemon (`systemd --user`) + CLI (`metr usage|sync|status|self-update`)
@@ -31,9 +44,10 @@ Inputs: PO brief (`~/Developer/_po/metr-po.md`), Guardian sweep (Oct 29) + adden
 |---|------|---------|--------|
 | A | **Codex `.zst` rollouts** | Mac: 255 `*.jsonl.zst` + 2 `*.jsonl` in sessions, 6 `.zst` in archived. METR reads no `.zst`. Mac openai events 31k (Aug) → 9.6k (Sep) → 639 (Oct). None on the20th yet. | Decode `.jsonl.zst` (zstd crate, streaming). The local event id hashes the **file path**, so `x.jsonl` vs `x.jsonl.zst` would duplicate locally: normalize identity path (strip `.zst`, treat sessions ↔ archived_sessions as the same file), reconcile by `raw_record_hash`. The server already dedupes per device on `source_event_hash` (raw line hash). |
 | 1 | **Codex homes** | the20th: `~/.codex` (296 jsonl), `~/.codex-acct2` (138), `~/.codex-accounts/acct2` (full home, 1 jsonl); `acct1` holds only auth. `CODEX_HOME` ignored. | Discover `~/.codex`, `$CODEX_HOME`, `~/.codex-*`, `~/.codex-accounts/*` that look like a Codex home (`sessions/` or `state_5.sqlite`). Scan only `sessions/`, `archived_sessions/`, `handoffs/` in them. All map to provider `openai`. |
+| A2 | **Codex format drift already** | Since 2026-10-27 rollouts also contain `token_usage_record` (per `response_id`, `usage`/`turn_token_usage`/`thread_token_usage`). Totals equal token_count within 0.01%. New key `cache_write_input_tokens` (0 today). | Keep token_count as source; read `cache_write_input_tokens`. Drift check flags rollouts that have token_usage_record but no token_count (then switch). |
 | 3 | Codex handoffs | Inside `~/.codex`, depth OK, not skipped. | Fixture test (plain + `.zst`). |
 | 2 | Codex app threads without a rollout | the20th: every thread has its rollout. `thread_history_1` items hold no tokens; only `state_5.threads.tokens_used` (total). Mac "missing" rollouts are most likely the `.zst` files. | Re-check Mac after A ships. Only if still short: low-confidence total-only fallback from `threads.tokens_used` (read-only sqlite). |
-| 6 | Mac `~/.claude-accounts/account-{1,2,3}/projects` → symlinks to `~/.claude/projects` | Scanner follows `projects` symlink only inside its own root; request-id dedupe exists. | Regression test: account dirs as extra sources never double count (canonical-path dedupe). |
+| 6 | Mac `~/.claude-accounts/account-{1,2,3}/projects` → symlinks to `~/.claude/projects` (**18:26 decision: one Claude account; retire `.claude-accounts`; scan only real `~/.claude`**) | Scanner follows `projects` symlink only inside its own root; request-id dedupe exists. | Regression test: account dirs as extra sources never double count (canonical-path dedupe). |
 | B | Claude desktop app (Mac) `local-agent-mode-sessions` | jsonl with `usage` records (11–16/file), not scanned. | Anthropic source; needs structure-only sample from Guardian for a fixture. Lower priority than A/1. |
 | G | **Grok Bot** (Mac desktop app) | Unknown. | Research via Guardian (asked in outbox): app support dirs, logs, sqlite; structure only. Decide scanner work only on evidence. |
 | E | Device alias holds API-key-like string | needs-petar (STATUS.md). | Never print it. |
@@ -59,8 +73,9 @@ costs reporting, not data).
    Codex Oct counts should jump, no duplicates. Then decide item 2.
 
 ### M2 — the20th tracked: Linux CLI/daemon + web UI
-1. **Core crate split** (mechanical): workspace `crates/metr-core` (db, scanner, parsers, pricing,
-   sync client) shared by `src-tauri` and `crates/metr-cli`. CLI token in a 0600 file under
+1. **Shared core** (mechanical): Tauri commands and `run()` behind an `app` cargo feature (default on);
+   tauri crates optional. Workspace member `src-tauri/cli` (binary `metr`) depends on the core with
+   `default-features = false`, so it builds without webkit and Mac/Windows builds are unchanged. CLI token in a 0600 file under
    `~/.config/metr/` when no Secret Service.
 2. **CLI** `metr`: `status` (incl. drift report), `usage [--since --until --provider --by day|model|project] --json`,
    `scan`, `sync [--full]`, `login` (Petar types the password), `self-update`, `daemon`, `serve`.
@@ -68,11 +83,29 @@ costs reporting, not data).
    (127.0.0.1 + Tailscale IP via `tailscale ip -4`); refuses `0.0.0.0`/`::`.
 4. **Install on the20th**: `~/.local/bin/metr`, `systemd --user` `metr.service`. Sources: `~/.claude`
    + all Codex homes. Device `linux-the20th`. Verify server receives events; Mac + Windows keep syncing.
-5. **Linux self-update**: release.yml builds the signed `metr-cli-linux-x86_64` tarball; server
-   UpdateController serves target `linux-cli` (additive; Mac/Windows untouched).
+4b. **the18th**: release build + install steps for the Guardian (root, `/root/.codex`, system or root
+   user unit, sync to the local metr-sync URL; web UI off or localhost-only).
+5. **Linux self-update:** stage 1 `metr self-update` rebuilds from the local git checkout and swaps the
+   binary atomically (the20th). Stage 2 (later): signed tarball via release.yml + server target
+   `linux-cli` (needs the18th's `/usr/local/sbin/metr-release-publish` wrapper changed: Guardian).
 6. Review + test before deploy.
 
-### M3 — Follow-ups
+### M3 — Fast scan + sync, reconciliation (definition of done)
+1. **Incremental scan by offset:** append-only JSONL (Claude, plain Codex) resumes at the last parsed
+   byte offset when the file only grew (prefix check), with the Codex parse context (session, cwd,
+   model, last total) saved per file. No full rescans in normal operation; `.zst` files are immutable,
+   parsed once.
+2. **Sync:** larger batches, idempotent event ids (already: server dedupes on request/message/raw hash),
+   retry with backoff on 429/5xx, resume after failure without resending synced rows.
+3. **Reconciliation report:** `metr reconcile` (CLI) and a desktop view: per provider, files found,
+   events, input/output/cache tokens locally vs server totals for this device; flags mismatches and any
+   duplicate identities. Needs an additive read-only server endpoint
+   (`GET /api/v1/sync/summary`, per device + provider), on a branch, reviewed, deploy verified.
+4. Cross-machine report (server side): per device × provider totals, plus a duplicate-identity check
+   (same raw hash from two devices = expected only for copied logs).
+5. Run on all 4 machines; publish the report (STATUS.md + artifact for Petar).
+
+### M4 — Follow-ups
 - Claude desktop `local-agent-mode-sessions` (B) once sample arrives.
 - Grok Bot scanner, only if research finds local token data.
 - Codex sqlite fallback (2) only if the Mac re-sweep still shows a gap.

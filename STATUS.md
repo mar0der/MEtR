@@ -4,6 +4,34 @@
 - PLAN.md written (incl. Guardian addendum A–G).
 - 17:05 Petar decisions folded in: Codex tracking first (zstd, all Codex homes, format-drift check), per-provider only (no account attribution), Cursor dropped, Grok Bot research via Guardian. Push works (deploy key active, pushed 95ca2e2). Next: M1.1 baseline `cargo test`, then zstd.
 
+## 2026-10-29 evening — M1 in progress (branch `fix/codex-zstd-homes`)
+Done (tests: 30 pass + 2 ignored real-data smoke tests; baseline was 21):
+- **zstd:** `*.jsonl.zst` rollouts are stream-decoded (zstd crate, long windows accepted). Real 60 MB rollout recompressed with `--long=31`: identical events (58/58).
+- **Codex homes:** discovers `~/.codex`, `$CODEX_HOME`, `~/.codex-*`, `~/.codex-accounts/*` (only folders with sessions/archived_sessions/handoffs; `acct1` = auth only is skipped). Auto-registered at startup and on rescan unless an existing source already covers the folder. Inside a Codex home only those 3 rollout folders are scanned.
+- **Dedupe:** Codex events reconcile on (provider, raw line hash) across files, so compression, archiving and overlapping homes add no events; startup cleanup removes existing local Codex copies. New local index `idx_usage_events_provider_raw_hash` (additive). Server already dedupes on the same hash.
+- **Overcount fix:** Codex re-emits token_count with unchanged totals (28 of 13,674 lines on the20th, ~0.2%); those repeats are now skipped (fix-forward, see BUGS.md).
+- **Real-data check on the20th:** scanner vs independent Python count on stable files: 13,362 events, identical input/output sums. All 3 homes: 13,678 events.
+- **Format drift seen already:** rollouts since 2026-10-27 also carry a new `token_usage_record` (per response_id). Totals match token_count within 0.01%; we keep token_count as source of truth (no double counting). Drift check (M1.4) must alert if token_count disappears.
+- **18:18 Petar go-ahead:** continue through milestones without waiting; ask only for destructive/risky actions.
+- **M1.4 format-drift check done** (`0f0f625`): per source, the scanner reports unknown Codex record types, rollouts with usage only in token_usage_record, unreadable files (e.g. corrupt .zst), unscanned file types in rollout folders (e.g. `.jsonl.gz`), and token data outside sessions/archived_sessions/handoffs. Shown as "Format drift: …" in the source's status; kept per file so incremental scans keep reporting it. `fixtures/codex/<format>/expected.json` per known format. First real catch: new record type `inter_agent_communication_metadata` (no usage; now known). the20th homes: no drift.
+- **M1.5 done** (`eeaa63d`): `.claude-accounts/account-N/projects` symlinks are not double counted (test; no code change needed).
+- Codex quota ~exhausted (acct1 98%, acct2 94% weekly) → review + test by Claude subagents, running now.
+Next: fold review/test findings, merge to main (src-tauri only, no backend deploy), then M2 (core crate split, Linux CLI/daemon, web UI) and the Mac/Windows release.
+
+## Mac cleanup: retire ~/.claude-accounts (for Guardian to run on the Mac, Petar approving)
+Petar decision 18:26: one Claude account now; METR scans only the real `~/.claude`. Do not run step 4 until steps 1–3 are clean.
+1. **Read-only checks**
+   - `ls -la ~/.claude-accounts/ ~/.claude-accounts/*/`
+   - `for d in ~/.claude-accounts/account-*; do echo "$d -> $(readlink "$d/projects")"; done` (expect each → `~/.claude/projects`)
+   - `find ~/.claude-accounts -type f -name '*.jsonl' | wc -l` (expect 0; if >0, list paths only and stop, PO decides whether to move them into `~/.claude/projects` first)
+   - What still points at them: `env | grep -i claude_config`; `launchctl getenv CLAUDE_CONFIG_DIR`; `grep -n 'claude-accounts\|CLAUDE_CONFIG_DIR' ~/.zshrc ~/.zprofile ~/.bash_profile ~/.bashrc 2>/dev/null`; `grep -rln 'claude-accounts' ~/bin ~/.local/bin ~/Library/LaunchAgents 2>/dev/null`
+   - METR sources pointing there (read-only): `sqlite3 -readonly ~/Library/Application\ Support/com.petarpetkov.metr/metr.db "SELECT path, enabled FROM log_sources WHERE path LIKE '%claude-accounts%'"` (adjust the app-data folder name if different)
+2. Report the results to the PO (paths and counts only).
+3. If anything sets `CLAUDE_CONFIG_DIR` to an account dir: remove that line (Petar approves the exact edit) and open a new shell.
+4. **Remove (reversible):** `mv ~/.claude-accounts ~/.Trash/claude-accounts-$(date +%Y%m%d)`. In METR → Sources, remove any source under `.claude-accounts`. Do not touch `~/.claude`.
+5. Optional, by Petar by hand: delete the old per-account "Claude Code-credentials…" items in Keychain Access (no scripting).
+6. Verify: METR → Rescan; Claude totals for the last 30 days unchanged (the account folders only held symlinks to `~/.claude/projects`).
+
 ## needs-petar
 - **Device alias leak:** server device `windows-DESKTOP-PG7TRK4` (last seen Oct 9) has an API-key-like string as its alias. Proposal: clear that alias (single-row UPDATE, non-destructive). Please rotate that Kimi key. Not printed anywhere.
 - **Linux device login:** `metr login` on the20th needs your METR password typed by you (`! metr login`) when M1 install is ready.
