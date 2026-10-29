@@ -27,6 +27,8 @@ const MAX_SCAN_FILES_PER_SOURCE: usize = 50_000;
 const MAX_SOURCE_TOTAL_BYTES: u64 = 5 * 1024 * 1024 * 1024; // 5 GB
 const MAX_LINE_LENGTH: usize = 1_048_576; // 1 MB
 const MAX_JSON_DEPTH: usize = 64;
+/// App and CLI version (the CLI reports and self-updates against this).
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 const PARSER_VERSION: &str = "0.1.12";
 const KEYRING_SERVICE: &str = "com.petarpetkov.metr.sync";
 const KEYRING_USERNAME: &str = "auth_token";
@@ -1130,7 +1132,7 @@ where
         )
         .unwrap_or(0);
 
-    println!("[Sync] Starting sync. Pending events: {}, force_all: {}", total_pending, force_all);
+    eprintln!("[Sync] Starting sync. Pending events: {}, force_all: {}", total_pending, force_all);
 
     let mut total_uploaded = 0usize;
     let mut batch_count = 0usize;
@@ -1282,13 +1284,13 @@ where
 
             total_uploaded += events.len();
             batch_count += 1;
-            println!("[Sync] Batch {} uploaded successfully ({} events). Total: {}/{}", batch_count, events.len(), total_uploaded, total_pending);
+            eprintln!("[Sync] Batch {} uploaded successfully ({} events). Total: {}/{}", batch_count, events.len(), total_uploaded, total_pending);
             progress(total_uploaded, total_pending);
         } else {
             let status = resp.status();
             let body = resp.text().unwrap_or_default();
             let error_msg = format!("Batch {} failed (HTTP {}): {}", batch_count + 1, status, body);
-            println!("[Sync] {}", error_msg);
+            eprintln!("[Sync] {}", error_msg);
             errors.push(error_msg);
             let failed_at = now();
             for event in &events {
@@ -1313,9 +1315,9 @@ where
     .map_err(to_string)?;
 
     if !errors.is_empty() {
-        println!("[Sync] Completed with errors: {:?}", errors);
+        eprintln!("[Sync] Completed with errors: {:?}", errors);
     } else {
-        println!("[Sync] Completed successfully. Uploaded {} events in {} batches.", total_uploaded, batch_count);
+        eprintln!("[Sync] Completed successfully. Uploaded {} events in {} batches.", total_uploaded, batch_count);
     }
 
     Ok(SyncResult {
@@ -1465,7 +1467,7 @@ fn pull_pricing_from_server(conn: &Connection) -> Result<usize, String> {
         .count();
 
     if removed > 0 {
-        println!("[Pricing] Removed {} unused server prices from local catalog", removed);
+        eprintln!("[Pricing] Removed {} unused server prices from local catalog", removed);
     }
 
     // Every caller (manual pull, login, sync) needs costs repriced with the pulled catalog.
@@ -2511,7 +2513,10 @@ fn scan_source(conn: &Connection, source: &Source, full_scan: bool) -> Result<us
         }
 
         // One transaction per file: far fewer WAL commits, and a failure rolls back only this file.
-        let tx = conn.unchecked_transaction().map_err(to_string)?;
+        // IMMEDIATE takes the write lock up front, so a concurrent writer waits on
+        // the busy timeout instead of failing mid-transaction.
+        let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)
+            .map_err(to_string)?;
         remove_codex_reemit_rows(&tx, &source.provider_id, &file_drift.reemit_hashes)?;
         for event in events {
             if insert_event(&tx, source, entry.path(), &modified, &source_hash, event, custom_root.as_deref())? {

@@ -12,6 +12,8 @@ pub struct Paths {
     pub token: PathBuf,
     /// Last scheduled run, for health checks.
     pub last_run: PathBuf,
+    /// Held while a command writes the database (scan, sync, run, login).
+    pub lock: PathBuf,
 }
 
 impl Paths {
@@ -25,6 +27,7 @@ impl Paths {
             db: data.join("metr").join("metr.db"),
             token: config.join("metr").join("token"),
             last_run: state.join("metr").join("last-run.json"),
+            lock: state.join("metr").join("metr.lock"),
         })
     }
 }
@@ -191,7 +194,7 @@ pub fn usage(conn: &Connection, query: &UsageQuery) -> Result<Vec<Value>, String
         GroupBy::Total => "'total'",
         GroupBy::Day => "substr(u.timestamp, 1, 10)",
         GroupBy::Model => "COALESCE(u.model, 'unknown')",
-        GroupBy::Project => "COALESCE(p.custom_name, p.display_name, p.path, 'unknown')",
+        GroupBy::Project => "COALESCE(pm.custom_name, p.display_name, p.path, 'unknown')",
         GroupBy::Provider => "u.provider_id",
     };
     let sql = format!(
@@ -202,6 +205,7 @@ pub fn usage(conn: &Connection, query: &UsageQuery) -> Result<Vec<Value>, String
                 MIN(u.timestamp), MAX(u.timestamp)
          FROM usage_events u
          LEFT JOIN projects p ON p.id = u.project_id
+         LEFT JOIN project_management pm ON pm.id = p.id
          WHERE (?1 IS NULL OR u.timestamp >= ?1)
            AND (?2 IS NULL OR u.timestamp < ?2)
            AND (?3 IS NULL OR u.provider_id = ?3)
@@ -231,17 +235,44 @@ pub fn usage(conn: &Connection, query: &UsageQuery) -> Result<Vec<Value>, String
     rows.collect::<Result<Vec<_>, _>>().map_err(to_string)
 }
 
+/// Turns a user date bound into the stored timestamp form: `YYYY-MM-DD`
+/// (UTC midnight) or RFC 3339 with any offset, converted to UTC. The result
+/// has no zone suffix, so it sorts correctly against stored timestamps that
+/// end in `Z`, `.123Z` or `+00:00`.
+pub fn parse_bound(value: &str) -> Result<String, String> {
+    let value = value.trim();
+    let utc = if let Ok(date) = NaiveDate::parse_from_str(value, "%Y-%m-%d") {
+        date.and_hms_opt(0, 0, 0).expect("midnight").and_utc()
+    } else {
+        chrono::DateTime::parse_from_rfc3339(value)
+            .map_err(|_| format!("invalid date '{value}' (use YYYY-MM-DD or RFC 3339)"))?
+            .with_timezone(&Utc)
+    };
+    Ok(utc.format("%Y-%m-%dT%H:%M:%S").to_string())
+}
+
+/// Linux desktop app database. Running the app and the CLI on one machine
+/// would register two devices and count the same logs twice.
+pub fn desktop_app_database() -> Option<PathBuf> {
+    let path = dirs::data_dir()?.join("com.metr.local").join("metr.db");
+    path.is_file().then_some(path)
+}
+
 /// Dashboard data for the local web UI.
 pub fn dashboard(conn: &Connection) -> Result<Value, String> {
     serde_json::to_value(dashboard_summary(conn)?).map_err(to_string)
 }
 
-/// Writes `contents` to `path` readable only by the owner.
+/// Writes `contents` to `path` readable only by the owner, replacing it
+/// atomically so a concurrent reader never sees a half-written file.
 pub fn write_private_file(path: &Path, contents: &str) -> Result<(), String> {
     use std::io::Write;
     if let Some(dir) = path.parent() {
         fs::create_dir_all(dir).map_err(|e| format!("Cannot create {}: {e}", dir.display()))?;
     }
+    let final_path = path;
+    let staged = path.with_extension(format!("tmp-{}", std::process::id()));
+    let path = staged.as_path();
     let mut options = fs::OpenOptions::new();
     options.write(true).create(true).truncate(true);
     #[cfg(unix)]
@@ -257,7 +288,9 @@ pub fn write_private_file(path: &Path, contents: &str) -> Result<(), String> {
         use std::os::unix::fs::PermissionsExt;
         file.set_permissions(fs::Permissions::from_mode(0o600)).map_err(to_string)?;
     }
-    file.write_all(contents.as_bytes()).map_err(to_string)
+    file.write_all(contents.as_bytes()).map_err(to_string)?;
+    file.sync_all().map_err(to_string)?;
+    fs::rename(path, final_path).map_err(to_string)
 }
 
 #[cfg(test)]
@@ -270,6 +303,7 @@ mod tests {
             db: root.join("data/metr.db"),
             token: root.join("config/token"),
             last_run: root.join("state/last-run.json"),
+            lock: root.join("state/metr.lock"),
         };
         (root, paths)
     }
@@ -302,7 +336,26 @@ mod tests {
         )
         .unwrap();
         assert!(none.is_empty());
+        let by_project =
+            usage(&conn, &UsageQuery { group_by: GroupBy::Project, ..UsageQuery::default() }).unwrap();
+        assert_eq!(by_project.len(), 1);
+        assert_eq!(by_project[0]["group"], "fixture-app");
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn bounds_are_converted_to_utc_and_validated() {
+        assert_eq!(parse_bound("2026-10-29").unwrap(), "2026-10-29T00:00:00");
+        assert_eq!(parse_bound("2026-10-28T01:00:00+02:00").unwrap(), "2026-10-27T23:00:00");
+        assert_eq!(parse_bound("2026-10-28T01:00:00Z").unwrap(), "2026-10-28T01:00:00");
+        for bad in ["notadate", "2026-13-01", "2026-10-28T25:00:00Z", ""] {
+            assert!(parse_bound(bad).is_err(), "{bad}");
+        }
+        // Stored forms sort on the right side of a bound at the same second.
+        let bound = parse_bound("2026-10-29").unwrap();
+        for stored in ["2026-10-29T00:00:00Z", "2026-10-29T00:00:00.000Z", "2026-10-29T00:00:00+00:00"] {
+            assert!(stored > bound.as_str(), "{stored}");
+        }
     }
 
     #[cfg(unix)]

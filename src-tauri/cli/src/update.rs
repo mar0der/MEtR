@@ -1,6 +1,7 @@
 //! `metr self-update`: build the newest tagged release from source.
-//! Downloads the release source to a temporary folder, builds with cargo at
-//! low priority, swaps the binary atomically, and deletes the temp folder.
+//! Downloads the release source into a fresh private folder under
+//! ~/.cache/metr, builds with cargo at low priority, swaps the binary
+//! atomically, and deletes the folder.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -41,14 +42,14 @@ fn run(command: &mut Command, what: &str) -> Result<(), String> {
 }
 
 pub fn self_update(force: bool, restart: Option<&str>, system: bool) -> Result<(), String> {
-    let current = parse_version(env!("CARGO_PKG_VERSION")).ok_or("bad own version")?;
+    let current = parse_version(metr_lib::VERSION).ok_or("bad own version")?;
     let client = reqwest::blocking::Client::builder()
-        .user_agent(concat!("metr-cli/", env!("CARGO_PKG_VERSION")))
+        .user_agent(format!("metr-cli/{}", metr_lib::VERSION))
         .build()
         .map_err(|e| e.to_string())?;
     let (tag, latest) = latest_tag(&client)?;
     if latest <= current && !force {
-        println!("Up to date ({}).", env!("CARGO_PKG_VERSION"));
+        println!("Up to date ({}).", metr_lib::VERSION);
         return Ok(());
     }
     if Command::new("cargo").arg("--version").output().is_err() {
@@ -57,7 +58,7 @@ pub fn self_update(force: bool, restart: Option<&str>, system: bool) -> Result<(
     let exe = std::env::current_exe()
         .and_then(|p| p.canonicalize())
         .map_err(|e| format!("cannot find the metr binary: {e}"))?;
-    let work = std::env::temp_dir().join(format!("metr-update-{}", std::process::id()));
+    let work = private_work_dir()?;
     let result = build_and_install(&client, &tag, &work, &exe);
     let _ = std::fs::remove_dir_all(&work);
     result?;
@@ -73,13 +74,40 @@ pub fn self_update(force: bool, restart: Option<&str>, system: bool) -> Result<(
     Ok(())
 }
 
+/// A new folder only this user can enter. Not /tmp: a predictable path there
+/// lets another user swap the build output, and builds can fill a tmpfs.
+fn private_work_dir() -> Result<PathBuf, String> {
+    let cache = std::env::var_os("XDG_CACHE_HOME")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))
+        .ok_or("HOME is not set")?
+        .join("metr");
+    std::fs::create_dir_all(&cache).map_err(|e| format!("{}: {e}", cache.display()))?;
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or_default();
+    let work = cache.join(format!("update-{}-{nonce}", std::process::id()));
+    let mut builder = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    // create, not create_all: fails if the folder already exists.
+    builder
+        .create(&work)
+        .map_err(|e| format!("{}: {e}", work.display()))?;
+    Ok(work)
+}
+
 fn build_and_install(
     client: &reqwest::blocking::Client,
     tag: &str,
     work: &Path,
     exe: &Path,
 ) -> Result<(), String> {
-    std::fs::create_dir_all(work).map_err(|e| e.to_string())?;
     let archive = work.join("source.tar.gz");
     println!("Downloading {tag}...");
     let bytes = client
@@ -122,7 +150,7 @@ fn build_and_install(
             .env("CARGO_TARGET_DIR", work.join("target")),
         "cargo build",
     )?;
-    let built: PathBuf = work.join("target/release/metr");
+    let built: PathBuf = work.join("target/release/metr-cli");
     run(
         Command::new(&built).arg("--version"),
         "checking the new binary",

@@ -17,7 +17,7 @@ const DEFAULT_PORT: u16 = 8765;
 #[derive(Parser)]
 #[command(
     name = "metr",
-    version,
+    version = metr_lib::VERSION,
     about = "Track Claude Code and Codex token usage"
 )]
 struct Cli {
@@ -77,6 +77,9 @@ enum Command {
         /// Read the password from the first line of stdin (for scripted installs).
         #[arg(long)]
         password_stdin: bool,
+        /// Log in even though the METR desktop app also tracks this machine.
+        #[arg(long)]
+        allow_with_desktop: bool,
     },
     /// Log this device out and forget the token.
     Logout,
@@ -89,6 +92,10 @@ enum Command {
         /// How long to wait for the load to drop before skipping (minutes).
         #[arg(long, default_value_t = 15)]
         max_wait_minutes: u64,
+        /// Run anyway (still at low priority) when the last successful run is
+        /// older than this, so a constantly busy server still syncs.
+        #[arg(long, default_value_t = 24)]
+        force_after_hours: u64,
         #[arg(long)]
         json: bool,
     },
@@ -103,6 +110,9 @@ enum Command {
         /// Install system units in /etc/systemd/system (root), not --user units.
         #[arg(long)]
         system: bool,
+        /// Install even though the METR desktop app also tracks this machine.
+        #[arg(long)]
+        allow_with_desktop: bool,
     },
     /// Stop and remove the systemd units `metr install` created.
     Uninstall {
@@ -150,6 +160,12 @@ fn run(command: Command) -> Result<(), String> {
     }
     let paths = Paths::default_paths()?;
     let conn = headless::open(&paths)?;
+    // Commands that write the database run one at a time (timer vs. manual).
+    let _lock = if command.writes() {
+        Some(lock(&paths)?)
+    } else {
+        None
+    };
     match command {
         Command::Status { json } => {
             let mut status = headless::status(&conn, &paths)?;
@@ -169,9 +185,16 @@ fn run(command: Command) -> Result<(), String> {
             by,
             json,
         } => {
+            let since = since.as_deref().map(headless::parse_bound).transpose()?;
+            let until = until.as_deref().map(headless::parse_bound).transpose()?;
+            if let (Some(since), Some(until)) = (&since, &until) {
+                if since >= until {
+                    return Err("--since must be before --until".to_string());
+                }
+            }
             let query = UsageQuery {
-                since: since.map(normalize_date),
-                until: until.map(normalize_date),
+                since,
+                until,
                 provider,
                 group_by: by,
             };
@@ -196,7 +219,9 @@ fn run(command: Command) -> Result<(), String> {
             user,
             device,
             password_stdin,
+            allow_with_desktop,
         } => {
+            refuse_with_desktop(allow_with_desktop)?;
             let password = read_password(password_stdin)?;
             let device = device.or_else(default_device_name);
             let status = headless::login(&conn, &server, &user, &password, device)?;
@@ -206,7 +231,8 @@ fn run(command: Command) -> Result<(), String> {
                 status["server_url"].as_str().unwrap_or(&server),
                 status["device_name"].as_str().unwrap_or("?")
             );
-            Ok(())
+            // Login pulls server prices; refresh the API-equivalent costs.
+            headless::maintenance(&conn)
         }
         Command::Logout => {
             headless::logout_device(&conn)?;
@@ -220,16 +246,29 @@ fn run(command: Command) -> Result<(), String> {
         Command::Run {
             max_load_per_core,
             max_wait_minutes,
+            force_after_hours,
             json,
         } => {
-            let result = schedule::run_once(&conn, &paths, max_load_per_core, max_wait_minutes)?;
+            if !max_load_per_core.is_finite() || max_load_per_core <= 0.0 {
+                return Err("--max-load-per-core must be a positive number".to_string());
+            }
+            let limits = schedule::Limits {
+                max_load_per_core,
+                max_wait_minutes,
+                force_after_hours,
+            };
+            let result = schedule::run_once(&conn, &paths, &limits)?;
             print_or(json, &result, |r| println!("{}", schedule::summary(r)))
         }
         Command::Install {
             schedule,
             web,
             system,
-        } => schedule::install(schedule, web, system),
+            allow_with_desktop,
+        } => {
+            refuse_with_desktop(allow_with_desktop)?;
+            schedule::install(schedule, web, system)
+        }
         Command::Uninstall { system } => schedule::uninstall(system),
         Command::SelfUpdate { .. } => unreachable!(),
     }
@@ -304,17 +343,28 @@ fn print_usage(rows: &Value) {
         return;
     }
     println!(
-        "  {:<24} {:<10} {:>8} {:>15} {:>15} {:>12} {:>11} {:>10}",
-        "group", "provider", "events", "input", "cached input", "output", "reasoning", "api usd"
+        "  {:<24} {:<10} {:>8} {:>15} {:>15} {:>13} {:>12} {:>11} {:>10}",
+        "group",
+        "provider",
+        "events",
+        "input",
+        "cached input",
+        "cache r/w",
+        "output",
+        "reasoning",
+        "api usd"
     );
     for row in rows {
+        let cache_rw = row["cache_read_tokens"].as_i64().unwrap_or(0)
+            + row["cache_write_tokens"].as_i64().unwrap_or(0);
         println!(
-            "  {:<24} {:<10} {:>8} {:>15} {:>15} {:>12} {:>11} {:>10.2}",
+            "  {:<24} {:<10} {:>8} {:>15} {:>15} {:>13} {:>12} {:>11} {:>10.2}",
             truncate(row["group"].as_str().unwrap_or("?"), 24),
             row["provider"].as_str().unwrap_or("?"),
             row["events"].as_i64().unwrap_or(0),
             row["input_tokens"].as_i64().unwrap_or(0),
             row["cached_input_tokens"].as_i64().unwrap_or(0),
+            cache_rw,
             row["output_tokens"].as_i64().unwrap_or(0),
             row["reasoning_tokens"].as_i64().unwrap_or(0),
             row["api_equivalent_usd"].as_f64().unwrap_or(0.0)
@@ -332,12 +382,43 @@ fn truncate(text: &str, max: usize) -> String {
     }
 }
 
-/// `2026-10-29` → `2026-10-29T00:00:00Z`, so it compares with stored timestamps.
-fn normalize_date(value: String) -> String {
-    if value.len() == 10 {
-        format!("{value}T00:00:00Z")
-    } else {
-        value
+impl Command {
+    fn writes(&self) -> bool {
+        matches!(
+            self,
+            Command::Scan { .. }
+                | Command::Sync { .. }
+                | Command::Run { .. }
+                | Command::Login { .. }
+                | Command::Logout
+        )
+    }
+}
+
+/// Exclusive lock for database writers; waits for a running pass to finish.
+fn lock(paths: &Paths) -> Result<std::fs::File, String> {
+    if let Some(dir) = paths.lock.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    }
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&paths.lock)
+        .map_err(|e| format!("{}: {e}", paths.lock.display()))?;
+    file.lock()
+        .map_err(|e| format!("cannot lock {}: {e}", paths.lock.display()))?;
+    Ok(file)
+}
+
+fn refuse_with_desktop(allowed: bool) -> Result<(), String> {
+    match headless::desktop_app_database() {
+        Some(db) if !allowed => Err(format!(
+            "the METR desktop app already tracks this machine ({}); running both would count usage twice. \
+             Use one of them, or pass --allow-with-desktop.",
+            db.display()
+        )),
+        _ => Ok(()),
     }
 }
 
