@@ -19,7 +19,7 @@ class RepriceUsage extends Command
         {--provider= : Only this provider}
         {--model= : Only this model (exact name as stored on events)}
         {--only-missing : Only events without a cost}
-        {--changed-since= : Models whose price rows were created at or after this time, plus all events without a cost}
+        {--changed-since= : Models whose price rows were added or changed at or after this time, plus all events without a cost}
         {--dry-run : Show what would change, write nothing}';
 
     protected $description = 'Reprice stored usage events with the current model prices';
@@ -33,34 +33,37 @@ class RepriceUsage extends Command
             return self::SUCCESS;
         }
 
+        if ($this->option('only-missing') && $this->option('changed-since') !== null) {
+            $this->error('Use either --only-missing or --changed-since (which already includes events without a cost).');
+
+            return self::FAILURE;
+        }
+
         $before = $this->totals();
+        // Dry run computes the changes without writing, so no rows are locked.
         $dryRun = (bool) $this->option('dry-run');
-        if ($dryRun) {
-            DB::beginTransaction();
-        }
-
         $rows = [];
-        try {
-            foreach ($pairs as [$providerId, $model, $onlyMissing]) {
-                $written = $reprice->handle($providerId, $model, $onlyMissing);
-                $rows[] = [$providerId, $model, $written];
-            }
-            $after = $this->totals();
-        } finally {
-            if ($dryRun) {
-                DB::rollBack();
-            }
+        $delta = 0.0;
+        foreach ($pairs as [$providerId, $model, $onlyMissing]) {
+            $written = $reprice->handle($providerId, $model, $onlyMissing, $dryRun);
+            $delta += $reprice->lastCostDelta;
+            $rows[] = [$providerId, $model, $written];
         }
+        $after = $dryRun ? null : $this->totals();
 
-        $this->table(['provider', 'model', 'events changed'], array_filter($rows, fn ($row) => $row[2] > 0));
-        $this->line(sprintf(
-            '%sTotal cost %.2f -> %.2f USD; events without a cost %d -> %d.',
-            $dryRun ? '[dry run] ' : '',
-            $before['cost'],
-            $after['cost'],
-            $before['missing'],
-            $after['missing'],
-        ));
+        $this->table(['provider', 'model', $dryRun ? 'events that would change' : 'events changed'], array_filter($rows, fn ($row) => $row[2] > 0));
+        if ($dryRun) {
+            $this->line(sprintf('[dry run] Total cost %.2f -> %.2f USD (nothing written).', $before['cost'], $before['cost'] + $delta));
+            $this->line('Events without a cost now (before repricing): '.$before['missing']);
+        } else {
+            $this->line(sprintf(
+                'Total cost %.2f -> %.2f USD; events without a cost %d -> %d.',
+                $before['cost'],
+                $after['cost'],
+                $before['missing'],
+                $after['missing'],
+            ));
+        }
         $this->reportStillMissing();
 
         return self::SUCCESS;
@@ -88,10 +91,10 @@ class RepriceUsage extends Command
                 ->map(fn ($row) => [$row->provider_id, $row->model, $onlyMissing]);
         }
 
-        // Names (model + aliases) of price rows created since the given time.
+        // Names (model + aliases) of price rows added or changed (incl. aliases) since then.
         $changed = [];
         ModelPrice::query()
-            ->where('created_at', '>=', Carbon::parse($changedSince))
+            ->where('updated_at', '>=', Carbon::parse($changedSince))
             ->get(['provider_id', 'model', 'aliases_json'])
             ->each(function (ModelPrice $price) use (&$changed) {
                 $changed[$price->provider_id][strtolower($price->model)] = true;
@@ -104,11 +107,13 @@ class RepriceUsage extends Command
 
         $all = (clone $query)->distinct()->get(['provider_id', 'model']);
         $missing = (clone $query)->whereNull('official_api_cost_usd')->distinct()->get(['provider_id', 'model'])
-            ->mapWithKeys(fn ($row) => [$row->provider_id."\0".$row->model => true]);
+            // Lowercased: MySQL compares names case-insensitively, so DISTINCT may
+            // return a different spelling here than in $all.
+            ->mapWithKeys(fn ($row) => [$row->provider_id."\0".strtolower($row->model) => true]);
 
         return $all
             ->filter(fn ($row) => isset($changed[$row->provider_id][strtolower($row->model)])
-                || isset($missing[$row->provider_id."\0".$row->model]))
+                || isset($missing[$row->provider_id."\0".strtolower($row->model)]))
             ->map(fn ($row) => [
                 $row->provider_id,
                 $row->model,

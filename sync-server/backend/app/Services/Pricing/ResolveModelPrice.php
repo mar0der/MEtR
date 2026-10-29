@@ -63,6 +63,9 @@ class ResolveModelPrice
         $prices = ModelPrice::query()
             ->where('provider_id', $providerId)
             ->orderByDesc('effective_from')
+            // Same start date (catalog rows all start 2025-01-01): newest row wins.
+            ->orderByDesc('created_at')
+            ->orderByDesc('id')
             ->get();
 
         foreach ($prices as $price) {

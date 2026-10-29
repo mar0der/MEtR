@@ -52,3 +52,11 @@ Cost math matches the client in every case checked; nothing breaks before the mi
 - P1 (med) before the migration, events priced with the 1-hour split but stored without it → a later repricing lowers them → FIX: until the column exists, price without the split (stored tokens and cost stay consistent). Auto-migrate on deploy NOT added (policy: migrations need Petar's OK).
 - P2 (med) existing server rows only get the split after a full resync per device → in STATUS needs-petar / handover.
 - P3 (low) client repriced twice per run → FIX: rely on the reprice inside the price pull.
+
+## 2026-10-29 — branch feat/reprice-command (Claude subagent)
+Fine: isDirty with decimal:10, chunkById + whereNull paging, price cache per run, UTC timestamps, web price edit path.
+- R1 (med-low) case-insensitive MySQL DISTINCT could drop unpriced mixed-case models from the nightly run → FIX: lowercased keys.
+- R2 (med) --dry-run wrote and rolled back, holding row locks that can stall syncs → FIX: dry run computes without writing.
+- R3 (med, pre-existing) same effective_from on old/new price rows → resolver could pick the old price → FIX: tie-break newest created_at, id.
+- R4 (low) alias-only changes missed → FIX: --changed-since uses updated_at.
+- minor: --only-missing + --changed-since now rejected; dry-run report labels "before".

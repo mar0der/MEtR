@@ -80,4 +80,12 @@ class RepriceUsageTest extends TestCase
         $this->artisan('metr:prices:reprice')->assertSuccessful();
         $this->assertEquals($repricedAt, $stable->fresh()->updated_at);
     }
+
+    public function test_only_missing_and_changed_since_cannot_be_combined(): void
+    {
+        Provider::factory()->create(['id' => 'openai', 'display_name' => 'OpenAI']);
+        $this->event('gpt-new', null);
+        $this->artisan('metr:prices:reprice', ['--only-missing' => true, '--changed-since' => '2026-01-01'])
+            ->assertFailed();
+    }
 }
