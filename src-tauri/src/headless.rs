@@ -94,7 +94,7 @@ pub fn sync(conn: &Connection, full: bool) -> Result<Value, String> {
     if get_sync_token(conn)?.is_none() {
         return Err("Not logged in. Run `metr login` first.".to_string());
     }
-    let result = perform_sync(conn, full, |_, _| {})?;
+    let result = perform_sync(conn, full, SyncPatience::WaitForServer, |_, _| {})?;
     serde_json::to_value(result).map_err(to_string)
 }
 
@@ -256,6 +256,111 @@ pub fn parse_bound(value: &str) -> Result<String, String> {
 pub fn desktop_app_database() -> Option<PathBuf> {
     let path = dirs::data_dir()?.join("com.metr.local").join("metr.db");
     path.is_file().then_some(path)
+}
+
+/// Compares this device's local events with what the server holds for it,
+/// per provider, and passes on the server's duplicate checks.
+pub fn reconcile(conn: &Connection) -> Result<Value, String> {
+    let token = get_sync_token(conn)?.ok_or("Not logged in. Run `metr login` first.")?;
+    let (server_url, device_uuid): (String, Option<String>) = conn
+        .query_row("SELECT server_url, device_uuid FROM sync_config WHERE id = 1", [], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })
+        .map_err(to_string)?;
+    let device_uuid = device_uuid.ok_or("This device has not synced yet. Run `metr sync` first.")?;
+
+    let mut local: BTreeMap<String, Value> = BTreeMap::new();
+    let mut stmt = conn
+        .prepare(
+            "SELECT provider_id, COUNT(*), SUM(synced_at IS NOT NULL), SUM(input_tokens),
+                    SUM(output_tokens), SUM(cached_input_tokens), SUM(cache_read_tokens)
+             FROM usage_events
+             -- The server skips events whose token fields sum to zero.
+             WHERE input_tokens + output_tokens + cached_input_tokens + cache_write_tokens
+                   + cache_write_1h_tokens + cache_read_tokens + reasoning_tokens
+                   + tool_tokens + unknown_tokens > 0
+             GROUP BY provider_id",
+        )
+        .map_err(to_string)?;
+    let rows = stmt
+        .query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                json!({
+                    "events": r.get::<_, i64>(1)?,
+                    "synced_events": r.get::<_, i64>(2)?,
+                    "input_tokens": r.get::<_, i64>(3)?,
+                    "output_tokens": r.get::<_, i64>(4)?,
+                    "cached_input_tokens": r.get::<_, i64>(5)?,
+                    "cache_read_tokens": r.get::<_, i64>(6)?,
+                }),
+            ))
+        })
+        .map_err(to_string)?;
+    for row in rows {
+        let (provider, totals) = row.map_err(to_string)?;
+        local.insert(provider, totals);
+    }
+
+    let server: Value = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(120))
+        .build()
+        .map_err(to_string)?
+        .get(format!("{}/api/v1/sync/reconcile", server_url.trim_end_matches('/')))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Accept", "application/json")
+        .send()
+        .and_then(|r| r.error_for_status())
+        .map_err(|e| format!("Server reconcile failed: {e}"))?
+        .json()
+        .map_err(|e| format!("Invalid reconcile response: {e}"))?;
+
+    let empty = Vec::new();
+    let server_rows = server["totals"].as_array().unwrap_or(&empty);
+    let mine: Vec<&Value> = server_rows.iter().filter(|row| row["device_uuid"] == json!(device_uuid)).collect();
+    let mut providers: BTreeSet<String> = local.keys().cloned().collect();
+    providers.extend(mine.iter().filter_map(|row| row["provider_id"].as_str().map(str::to_string)));
+    let mut rows = Vec::new();
+    for provider in providers {
+        let here = local.get(&provider).cloned().unwrap_or_else(|| json!({}));
+        let there = mine
+            .iter()
+            .find(|row| row["provider_id"] == json!(provider))
+            .map(|row| (*row).clone())
+            .unwrap_or_else(|| json!({}));
+        let get = |v: &Value, key: &str| v[key].as_i64().unwrap_or(0);
+        let synced = get(&here, "synced_events");
+        let on_server = get(&there, "events");
+        rows.push(json!({
+            "provider": provider,
+            "local_events": get(&here, "events"),
+            "local_synced": synced,
+            "pending": get(&here, "events") - synced,
+            "server_events": on_server,
+            // Positive: the server holds rows this device no longer has locally
+            // (e.g. re-emits removed after an upgrade); negative: missing uploads.
+            "server_minus_synced": on_server - synced,
+            "local_input_tokens": get(&here, "input_tokens"),
+            "server_input_tokens": get(&there, "input_tokens"),
+            "local_output_tokens": get(&here, "output_tokens"),
+            "server_output_tokens": get(&there, "output_tokens"),
+        }));
+    }
+    let id_of_mine = mine.first().map(|row| row["device_id"].clone());
+    let same_device: Vec<Value> = server["duplicates"]["same_device"]
+        .as_array()
+        .unwrap_or(&empty)
+        .iter()
+        .filter(|row| Some(&row["device_id"]) == id_of_mine.as_ref())
+        .cloned()
+        .collect();
+    Ok(json!({
+        "device_uuid": device_uuid,
+        "providers": rows,
+        "duplicates_on_this_device": same_device,
+        "duplicates_across_devices": server["duplicates"]["cross_device"],
+        "all_devices": server_rows,
+    }))
 }
 
 /// Dashboard data for the local web UI.

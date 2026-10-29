@@ -7,6 +7,7 @@ use App\Http\Controllers\Api\V1\DeviceController;
 use App\Http\Controllers\Api\V1\PricingController;
 use App\Http\Controllers\Api\V1\ProjectController;
 use App\Http\Controllers\Api\V1\ProviderAccountController;
+use App\Http\Controllers\Api\V1\ReconcileController;
 use App\Http\Controllers\Api\V1\SubscriptionController;
 use App\Http\Controllers\Api\V1\SyncController;
 use App\Http\Controllers\Api\V1\UpdateController;
@@ -36,6 +37,7 @@ Route::prefix('v1')->group(function () {
             Route::get('/dashboard/by-project', [DashboardController::class, 'byProject']);
             Route::get('/dashboard/by-provider-account', [DashboardController::class, 'byProviderAccount']);
             Route::get('/dashboard/by-model', [DashboardController::class, 'byModel']);
+            Route::get('/sync/reconcile', [ReconcileController::class, 'index']);
         });
 
         Route::apiResource('provider-accounts', ProviderAccountController::class)->only(['index', 'store', 'update', 'destroy']);

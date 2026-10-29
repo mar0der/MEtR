@@ -33,6 +33,12 @@ Next: fold findings → merge → install on the20th (timer + web UI) → Petar 
 - **the18th:** package `src-tauri/target/dist/metr-26.41.0-linux-x86_64.tar.gz` (+ .sha256) and steps in `docs/linux-cli.md` handed to the Guardian (outbox 20261029-1915).
 Next: M3 (incremental scan by offset, sync batching/retry, reconciliation endpoint + `metr reconcile`).
 
+## 2026-10-29 ~19:15 — M3 in review (branch `feat/reconcile-endpoint`)
+- **Incremental scan** (`92431b6`): growing logs resume at the last complete line (byte + line offset + parser state + 4 KB head hash); rewritten/compressed files parse from the start. Real data on the20th: incremental = fresh full scan exactly (13,948 Claude / 14,135 Codex calls); unchanged rescan ~0.1 s.
+- **Sync** (`86ffd30`): 250-event batches, retries on network errors/5xx (backoff) and 429 (Retry-After), so a first upload rides out the 60 req/min limit.
+- **Reconcile** (`040a708`): server `GET /api/v1/sync/reconcile` (read-only: per device × provider totals + duplicate checks) and `metr reconcile`. Backend change → merge auto-deploys; after merge I verify login, sync from the20th, dashboard, and that the Mac/Windows devices keep syncing.
+- Backend test suite: new tests pass; 9 pre-existing SQLite-only failures noted in BUGS.md.
+
 ## Mac cleanup: retire ~/.claude-accounts (for Guardian to run on the Mac, Petar approving)
 Petar decision 18:26: one Claude account now; METR scans only the real `~/.claude`. Do not run step 4 until steps 1–3 are clean.
 1. **Read-only checks**

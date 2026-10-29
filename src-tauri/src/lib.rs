@@ -9,7 +9,7 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::error::Error;
 use std::fs;
-use std::io::{BufRead, BufReader, Read};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -1020,7 +1020,90 @@ fn dashboard_summary(conn: &Connection) -> Result<DashboardSummary, String> {
     })
 }
 
-fn perform_sync<F>(conn: &Connection, force_all: bool, mut progress: F) -> Result<SyncResult, String>
+/// How long a sync may wait on the server.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum SyncPatience {
+    /// Desktop app: it holds the database lock while syncing, so stop at the
+    /// first 429/5xx (as before) and retry network errors only briefly.
+    ReturnQuickly,
+    /// Headless timer: nobody waits on it, so ride out rate limits.
+    WaitForServer,
+}
+
+/// Posts one batch. Patient mode retries network errors and 5xx with backoff,
+/// and 429 after the server's Retry-After (capped), up to 5 attempts; quick
+/// mode retries only network errors, 3 attempts. Other HTTP errors are
+/// returned to the caller. The server dedupes, so retrying a batch that did
+/// arrive is harmless.
+fn post_with_retry(
+    client: &reqwest::blocking::Client,
+    base_url: &str,
+    auth_header: &str,
+    payload: &Value,
+    event_count: usize,
+    payload_bytes: usize,
+    patience: SyncPatience,
+) -> Result<reqwest::blocking::Response, String> {
+    let patient = patience == SyncPatience::WaitForServer;
+    let attempts: u32 = if patient { 5 } else { 3 };
+    let mut last_error = String::new();
+    for attempt in 0..attempts {
+        let backoff = if patient {
+            Duration::from_secs(2u64.pow(attempt + 1).min(30))
+        } else {
+            Duration::from_secs(2u64.pow(attempt))
+        };
+        match client
+            .post(format!("{}/api/v1/sync/events", base_url))
+            .header("Authorization", auth_header)
+            .header("Accept", "application/json")
+            .json(payload)
+            .send()
+        {
+            Ok(resp) if patient && resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS => {
+                let wait = resp
+                    .headers()
+                    .get(reqwest::header::RETRY_AFTER)
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|v| v.trim().parse::<u64>().ok())
+                    .unwrap_or(30)
+                    .clamp(1, 120);
+                last_error = format!("Rate limited by the server (HTTP 429), waited {wait} s");
+                eprintln!("[Sync] {last_error}");
+                std::thread::sleep(Duration::from_secs(wait));
+                continue;
+            }
+            Ok(resp) if patient && resp.status().is_server_error() && attempt + 1 < attempts => {
+                last_error = format!("Server error (HTTP {})", resp.status());
+                eprintln!("[Sync] {last_error}, retrying");
+            }
+            Ok(resp) => return Ok(resp),
+            Err(e) => {
+                last_error = format!(
+                    "Sync request failed ({} events, ~{} bytes, attempt {}): {}",
+                    event_count,
+                    payload_bytes,
+                    attempt + 1,
+                    e
+                );
+                if let Some(source) = e.source() {
+                    last_error.push_str(&format!(" | caused by: {}", source));
+                }
+            }
+        }
+        if attempt + 1 < attempts {
+            std::thread::sleep(backoff);
+        }
+    }
+    Err(last_error)
+}
+
+fn perform_sync<F>(
+    conn: &Connection,
+    force_all: bool,
+    patience: SyncPatience,
+    mut progress: F,
+) -> Result<SyncResult, String>
 where
     F: FnMut(usize, usize),
 {
@@ -1154,7 +1237,7 @@ where
                  LEFT JOIN conversations c ON c.id = u.conversation_id
                  WHERE u.synced_at IS NULL
                  ORDER BY u.timestamp ASC
-                 LIMIT 100",
+                 LIMIT 250",
             )
             .map_err(to_string)?;
 
@@ -1222,44 +1305,15 @@ where
             "events": events,
         });
         let payload_bytes = serde_json::to_string(&payload).unwrap_or_default().len();
-        let mut response = None;
-        let mut last_transport_error = None;
-
-        for attempt in 0..3 {
-            match client
-                .post(format!("{}/api/v1/sync/events", base_url))
-                .header("Authorization", &auth_header)
-                .header("Accept", "application/json")
-                .json(&payload)
-                .send()
-            {
-                Ok(resp) => {
-                    response = Some(resp);
-                    break;
-                }
-                Err(e) => {
-                    let mut detail = format!(
-                        "Sync request failed ({} events, ~{} bytes, attempt {}): {}",
-                        events.len(),
-                        payload_bytes,
-                        attempt + 1,
-                        e
-                    );
-                    if let Some(source) = e.source() {
-                        detail.push_str(&format!(" | caused by: {}", source));
-                    }
-                    last_transport_error = Some(detail);
-                    if attempt < 2 {
-                        std::thread::sleep(Duration::from_secs(2u64.pow(attempt as u32)));
-                    }
-                }
-            }
-        }
-
-        let resp = response.ok_or_else(|| {
-            last_transport_error
-                .unwrap_or_else(|| "Sync request failed without a transport error".to_string())
-        })?;
+        let resp = post_with_retry(
+            &client,
+            base_url,
+            &auth_header,
+            &payload,
+            events.len(),
+            payload_bytes,
+            patience,
+        )?;
 
         if resp.status().is_success() {
             let now = now();
@@ -1272,8 +1326,9 @@ where
                 })
                 .collect();
 
+            let tx = conn.unchecked_transaction().map_err(to_string)?;
             for id in event_ids {
-                conn.execute(
+                tx.execute(
                     "UPDATE usage_events
                      SET synced_at = ?1, sync_batch_id = ?2, sync_error = NULL, updated_at = ?1
                      WHERE id = ?3",
@@ -1281,6 +1336,7 @@ where
                 )
                 .map_err(to_string)?;
             }
+            tx.commit().map_err(to_string)?;
 
             total_uploaded += events.len();
             batch_count += 1;
@@ -1754,6 +1810,8 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     )?;
     add_column_if_missing(conn, "usage_events", "synced_at", "TEXT")?;
     add_column_if_missing(conn, "indexed_files", "drift_json", "TEXT")?;
+    add_column_if_missing(conn, "indexed_files", "parse_state", "TEXT")?;
+    add_column_if_missing(conn, "indexed_files", "head_hash", "TEXT")?;
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS dismissed_source_paths (
            path_key TEXT PRIMARY KEY,
@@ -2497,7 +2555,13 @@ fn scan_source(conn: &Connection, source: &Source, full_scan: bool) -> Result<us
             metadata.len(),
             modified
         ));
-        let (events, file_drift) = match parse_file_with_drift(source, entry.path()) {
+        let resume = if full_scan {
+            None
+        } else {
+            load_resume_point(conn, source, entry.path(), metadata.len())?
+        };
+        let ParsedFile { events, drift: file_drift, resume } =
+            match parse_file_with_drift(source, entry.path(), resume) {
             Ok(parsed) => parsed,
             Err(_) => {
                 if source.parser_id == "codex" {
@@ -2538,10 +2602,13 @@ fn scan_source(conn: &Connection, source: &Source, full_scan: bool) -> Result<us
             Some("Indexed successfully."),
         )?;
         tx.execute(
-            "UPDATE indexed_files SET drift_json = ?1 WHERE source_id = ?2 AND path = ?3",
+            "UPDATE indexed_files SET drift_json = ?1, parse_state = ?2, head_hash = ?3
+             WHERE source_id = ?4 AND path = ?5",
             params![
                 (!file_drift.is_clean())
                     .then(|| serde_json::to_string(&file_drift).unwrap_or_default()),
+                resume.and_then(|r| serde_json::to_string(&r).ok()),
+                file_head_hash(entry.path()),
                 source.id,
                 entry.path().to_string_lossy()
             ],
@@ -2766,18 +2833,58 @@ fn parse_content(source: &Source, path: &Path, content: &str) -> Vec<ParsedEvent
 
 #[cfg(test)]
 fn parse_file_streaming(source: &Source, path: &Path) -> Result<Vec<ParsedEvent>, String> {
-    parse_file_with_drift(source, path).map(|(events, _)| events)
+    parse_file_with_drift(source, path, None).map(|parsed| parsed.events)
+}
+
+/// Where an append-only log was fully parsed up to, so the next scan reads
+/// only what was added (`indexed_files.parse_state`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct ResumePoint {
+    /// File position after the last complete line (for seeking).
+    byte_offset: u64,
+    /// `source_offset` of the next line; lines without `\r` counted, so it
+    /// differs from `byte_offset` for CRLF files and keeps event ids stable.
+    line_offset: i64,
+    codex: CodexParseContext,
+    generic: GenericParseContext,
+}
+
+struct ParsedFile {
+    events: Vec<ParsedEvent>,
+    drift: FileDrift,
+    /// None when the file cannot be resumed (compressed or read error).
+    resume: Option<ResumePoint>,
 }
 
 fn parse_file_with_drift(
     source: &Source,
     path: &Path,
-) -> Result<(Vec<ParsedEvent>, FileDrift), String> {
-    let file = fs::File::open(path).map_err(to_string)?;
+    resume: Option<ResumePoint>,
+) -> Result<ParsedFile, String> {
+    let mut file = fs::File::open(path).map_err(to_string)?;
     let metadata = file.metadata().map_err(to_string)?;
     let compressed = is_zstd_file(path);
     let logical = logical_path(path);
     let path = logical.as_path();
+    // Only append-only JSONL logs can be resumed; whole-JSON files (Gemini,
+    // Cline, Continue) are rewritten in place and must be parsed whole.
+    let resumable = !compressed
+        && matches!(source.parser_id.as_str(), "codex" | "claude")
+        && path
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("jsonl"));
+    let resume = resume.filter(|r| resumable && r.byte_offset <= metadata.len());
+    let resumed = resume.as_ref().is_some_and(|r| r.byte_offset > 0);
+    let ResumePoint {
+        byte_offset: mut byte_pos,
+        line_offset: mut offset,
+        codex: mut codex_context,
+        generic: mut generic_context,
+    } = resume.unwrap_or_default();
+    if resumed {
+        file.seek(SeekFrom::Start(byte_pos)).map_err(to_string)?;
+    }
     let reader: Box<dyn BufRead> = if compressed {
         let mut decoder = zstd::stream::read::Decoder::new(file).map_err(to_string)?;
         // Accept frames written with long-distance matching (window up to 2 GB).
@@ -2787,9 +2894,7 @@ fn parse_file_with_drift(
         Box::new(BufReader::new(file))
     };
     let mut events = Vec::new();
-    let mut offset = 0i64;
-    let mut codex_context = CodexParseContext::default();
-    let mut generic_context = GenericParseContext::default();
+    let mut snapshot: Option<ResumePoint> = None;
 
     let mut reader = reader;
     let mut buf = Vec::new();
@@ -2805,6 +2910,17 @@ fn parse_file_with_drift(
                 break;
             }
         }
+        if !buf.ends_with(b"\n") {
+            // A last line without newline may still be growing: resume before
+            // it, with the state from before it, so it is read again whole.
+            snapshot = Some(ResumePoint {
+                byte_offset: byte_pos,
+                line_offset: offset,
+                codex: codex_context.clone(),
+                generic: generic_context.clone(),
+            });
+        }
+        byte_pos += buf.len() as u64;
         // Same offsets as `BufRead::lines`: the line without `\n` / `\r\n`.
         let mut bytes = buf.as_slice();
         bytes = bytes.strip_suffix(b"\n").unwrap_or(bytes);
@@ -2833,6 +2949,7 @@ fn parse_file_with_drift(
     // single JSON object/array. Files larger than 100 MB are not read into memory.
     // Codex rollouts are always JSONL; other JSON in a Codex home is not usage.
     if events.is_empty()
+        && !resumed
         && !compressed
         && source.parser_id != "codex"
         && metadata.len() <= 100 * 1024 * 1024
@@ -2844,7 +2961,54 @@ fn parse_file_with_drift(
 
     let mut drift = codex_context.drift();
     drift.incomplete = incomplete;
-    Ok((events, drift))
+    let resume = (resumable && !incomplete).then(|| {
+        snapshot.unwrap_or(ResumePoint {
+            byte_offset: byte_pos,
+            line_offset: offset,
+            codex: codex_context,
+            generic: generic_context,
+        })
+    });
+    Ok(ParsedFile { events, drift, resume })
+}
+
+/// Fingerprint of a file's first 4 KB: an appended log keeps it, a
+/// rewritten one does not.
+fn file_head_hash(path: &Path) -> Option<String> {
+    let mut head = Vec::new();
+    fs::File::open(path).ok()?.take(4096).read_to_end(&mut head).ok()?;
+    Some(format!("{:x}", Sha256::digest(&head)))
+}
+
+/// The saved resume point, if the file only grew since it was indexed with
+/// this parser version.
+fn load_resume_point(
+    conn: &Connection,
+    source: &Source,
+    path: &Path,
+    size_bytes: u64,
+) -> Result<Option<ResumePoint>, String> {
+    let row: Option<(Option<String>, Option<String>, i64, String)> = conn
+        .query_row(
+            "SELECT parse_state, head_hash, size_bytes, parser_version FROM indexed_files
+             WHERE source_id = ?1 AND path = ?2",
+            params![source.id, path.to_string_lossy()],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .optional()
+        .map_err(to_string)?;
+    let Some((Some(state), Some(head_hash), indexed_size, parser_version)) = row else {
+        return Ok(None);
+    };
+    if parser_version != PARSER_VERSION
+        || (indexed_size as u64) > size_bytes
+        || file_head_hash(path).as_deref() != Some(head_hash.as_str())
+    {
+        return Ok(None);
+    }
+    Ok(serde_json::from_str::<ResumePoint>(&state)
+        .ok()
+        .filter(|resume| resume.byte_offset <= size_bytes))
 }
 
 /// Per-file format observations, kept in `indexed_files.drift_json`.
@@ -3019,7 +3183,7 @@ fn normalize_json_line(line: &str) -> &str {
     line.trim().trim_start_matches('\u{feff}').trim_start()
 }
 
-#[derive(Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct CodexParseContext {
     cwd: Option<String>,
     session_id: Option<String>,
@@ -3029,6 +3193,7 @@ struct CodexParseContext {
     token_counts: usize,
     usage_records: usize,
     /// Raw hashes of skipped re-emits; older versions stored them as events.
+    #[serde(skip)]
     reemit_hashes: Vec<String>,
 }
 
@@ -3109,7 +3274,7 @@ fn update_codex_context(context: &mut CodexParseContext, value: &Value) {
     }
 }
 
-#[derive(Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct GenericParseContext {
     cwd: Option<String>,
     session_id: Option<String>,
@@ -4720,6 +4885,42 @@ mod tests {
         );
     }
 
+    #[test]
+    fn sync_post_retries_rate_limits_and_server_errors() {
+        use std::io::Write;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let replies = [
+                "HTTP/1.1 429 Too Many Requests\r\nRetry-After: 1\r\nContent-Length: 0\r\n\r\n",
+                "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n",
+                "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}",
+            ];
+            for reply in replies {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut buf = [0u8; 65536];
+                let _ = std::io::Read::read(&mut stream, &mut buf);
+                stream.write_all(reply.as_bytes()).unwrap();
+            }
+        });
+        let client = reqwest::blocking::Client::new();
+        let started = std::time::Instant::now();
+        let resp = post_with_retry(
+            &client,
+            &format!("http://{address}"),
+            "Bearer test",
+            &json!({"events": []}),
+            0,
+            0,
+            SyncPatience::WaitForServer,
+        )
+        .unwrap();
+        assert!(resp.status().is_success());
+        // 1 s Retry-After + 4 s backoff after the 503 (attempt 2).
+        assert!(started.elapsed() >= std::time::Duration::from_secs(5));
+        server.join().unwrap();
+    }
+
     #[cfg(unix)]
     #[test]
     fn claude_config_dir_alias_of_dot_claude_is_dropped() {
@@ -5439,7 +5640,7 @@ mod codex_tests {
                     continue;
                 }
                 rollouts += 1;
-                let (events, drift) = parse_file_with_drift(&source, &file).unwrap();
+                let ParsedFile { events, drift, .. } = parse_file_with_drift(&source, &file, None).unwrap();
                 let sum = |f: fn(&ParsedEvent) -> i64| events.iter().map(f).sum::<i64>();
                 assert_eq!(events.len(), expected.events, "{name}");
                 assert_eq!(sum(|e| e.input_tokens), expected.input_tokens, "{name}");
@@ -5550,7 +5751,8 @@ mod codex_tests {
         let file = home.join("sessions").join(ROLLOUT);
         fs::create_dir_all(file.parent().unwrap()).unwrap();
         fs::write(&file, bytes).unwrap();
-        let (events, drift) = parse_file_with_drift(&codex_source(&home), &file).unwrap();
+        let ParsedFile { events, drift, .. } =
+            parse_file_with_drift(&codex_source(&home), &file, None).unwrap();
         assert_eq!(events.len(), 2);
         assert!(!drift.incomplete);
         fs::remove_dir_all(home).unwrap();
@@ -5744,6 +5946,151 @@ mod codex_tests {
         assert_eq!(path_key(Path::new("/no/such/dir/")), path_key(Path::new("/no/such/dir")));
         assert!(key_contains("/a/b", "/a/b/c"));
         assert!(!key_contains("/a/b", "/a/bc"));
+    }
+
+    fn fixture_lines() -> Vec<String> {
+        fs::read_to_string(fixture(".jsonl")).unwrap().lines().map(str::to_string).collect()
+    }
+
+    fn event_ids(conn: &Connection) -> Vec<(String, Option<i64>)> {
+        // Path-independent identity: the runs below use different folders.
+        conn.prepare("SELECT raw_record_hash, source_offset FROM usage_events ORDER BY source_offset")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    }
+
+    fn resume_offset(conn: &Connection) -> u64 {
+        let state: String = conn
+            .query_row("SELECT parse_state FROM indexed_files", [], |r| r.get(0))
+            .unwrap();
+        serde_json::from_str::<ResumePoint>(&state).unwrap().byte_offset
+    }
+
+    /// Scans a file grown in steps and returns the stored events, so it can be
+    /// compared with one full scan of the final file.
+    fn grow_and_scan(name: &str, steps: &[String], line_end: &str) -> (Vec<(String, Option<i64>)>, usize) {
+        let conn = conn();
+        let home = temp_root(name);
+        let file = home.join("sessions").join(ROLLOUT);
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        let source = codex_source(&home);
+        let mut text = String::new();
+        for step in steps {
+            text.push_str(&step.replace('\n', line_end));
+            fs::write(&file, &text).unwrap();
+            scan_source(&conn, &source, false).unwrap();
+        }
+        let ids = event_ids(&conn);
+        let rows = token_rows(&conn).len();
+        fs::remove_dir_all(home).unwrap();
+        (ids, rows)
+    }
+
+    #[test]
+    fn appended_lines_are_read_incrementally_with_full_scan_ids() {
+        let lines = fixture_lines();
+        let all = lines.join("\n") + "\n";
+        for line_end in ["\n", "\r\n"] {
+            let full = grow_and_scan("codex-full", &[all.clone()], line_end);
+            // Grow in three steps, the middle one ending inside a line (no newline yet).
+            let cut = all.find("\"ordinal\":9").unwrap();
+            let steps = vec![
+                lines[..7].join("\n") + "\n",
+                all[lines[..7].join("\n").len() + 1..cut].to_string(),
+                all[cut..].to_string(),
+            ];
+            let grown = grow_and_scan("codex-grow", &steps, line_end);
+            assert_eq!(grown, full, "line end {line_end:?}");
+            assert_eq!(grown.1, 2);
+        }
+    }
+
+    #[test]
+    fn unterminated_token_count_is_not_mistaken_for_a_reemit() {
+        // The second usage line arrives without its newline first.
+        let lines = fixture_lines();
+        let reemit_free: Vec<&String> = lines.iter().filter(|l| !l.contains("\"ordinal\":7")).collect();
+        let head = reemit_free[..reemit_free.len() - 2].iter().map(|l| format!("{l}\n")).collect::<String>();
+        let usage = reemit_free[reemit_free.len() - 2].to_string();
+        let tail = format!("\n{}\n", reemit_free[reemit_free.len() - 1]);
+        let (_, rows) = grow_and_scan("codex-tail", &[head + &usage, tail], "\n");
+        assert_eq!(rows, 2);
+    }
+
+    #[test]
+    fn growing_whole_json_files_are_reparsed_not_resumed() {
+        // Gemini/Cline style: one pretty-printed JSON document rewritten in place.
+        let conn = conn();
+        let root = temp_root("whole-json");
+        let file = root.join("chats").join("session-1.json");
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        let message = |id: &str, input: i64| {
+            json!({"id": id, "timestamp": "2026-10-29T10:00:00Z", "model": "gemini-3-pro",
+                   "usage": {"input_tokens": input, "output_tokens": 1}})
+        };
+        let mut source = codex_source(&root);
+        source.parser_id = "gemini".to_string();
+        source.provider_id = "google".to_string();
+        let input_sum = |conn: &Connection| -> i64 {
+            conn.query_row("SELECT COALESCE(SUM(input_tokens), 0) FROM usage_events", [], |r| r.get(0))
+                .unwrap()
+        };
+        let pad = "x".repeat(5000); // keep the first 4 KB identical across rewrites
+        let doc = |messages: Vec<Value>| {
+            serde_json::to_string_pretty(&json!({"padding": pad, "messages": messages})).unwrap()
+        };
+        fs::write(&file, doc(vec![message("m1", 100)])).unwrap();
+        scan_source(&conn, &source, false).unwrap();
+        let first = input_sum(&conn);
+        assert!(first >= 100, "{first}");
+        fs::write(&file, doc(vec![message("m1", 100), message("m2", 1000)])).unwrap();
+        scan_source(&conn, &source, false).unwrap();
+        assert!(input_sum(&conn) >= first + 1000, "second message must be imported");
+        let state: Option<String> = conn
+            .query_row("SELECT parse_state FROM indexed_files", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(state, None, "whole-JSON files keep no resume point");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn rewritten_files_are_parsed_from_the_start() {
+        let conn = conn();
+        let home = temp_root("codex-rewrite");
+        let file = home.join("sessions").join(ROLLOUT);
+        copy_fixture(&file, ".jsonl");
+        let source = codex_source(&home);
+        scan_source(&conn, &source, false).unwrap();
+        let full_length = fs::metadata(&file).unwrap().len();
+        assert_eq!(resume_offset(&conn), full_length);
+        // Same size or larger but different first bytes: not an append.
+        let text = fs::read_to_string(&file).unwrap().replace("fixture-app", "fixture-apq");
+        fs::write(&file, text + "\n").unwrap();
+        assert!(load_resume_point(&conn, &source, &file, full_length + 1).unwrap().is_none());
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn drift_is_kept_across_incremental_scans() {
+        let conn = conn();
+        let home = temp_root("codex-grow-drift");
+        let file = home.join("sessions").join(ROLLOUT);
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        let source = registered_codex_source(&conn, &home);
+        let lines = fixture_lines();
+        fs::write(&file, format!("{}\n{{\"type\":\"brand_new\"}}\n", lines[..3].join("\n"))).unwrap();
+        scan_source(&conn, &source, false).unwrap();
+        let mut more = fs::read_to_string(&file).unwrap();
+        more.push_str(&(lines[3..].join("\n") + "\n"));
+        fs::write(&file, more).unwrap();
+        scan_source(&conn, &source, false).unwrap();
+        let report = drift_of(&conn, &source).0.unwrap();
+        assert_eq!(report.unknown_record_types.get("brand_new"), Some(&1));
+        assert_eq!(token_rows(&conn).len(), 2);
+        fs::remove_dir_all(home).unwrap();
     }
 
     /// Smoke check against this machine's real Codex homes (prints counts only):

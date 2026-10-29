@@ -39,3 +39,10 @@ Desktop move verified clean (35 commands identical, build/feature/workspace path
 - C10 (low) maintenance never called → FIX: after login and each run.
 - C11 (low) the18th: `--system` scans root's home only → open question for Guardian (which users run Codex there).
 - C12 (low) stale web unit on reinstall, `%` in path, non-atomic token write, CLI/desktop binary name collision → FIXED (`metr-cli` build name, installed as `metr`). `--locked` kept: release commits include Cargo.lock.
+
+## 2026-10-29 — branch feat/reconcile-endpoint (incremental scan, sync retry, reconcile; Claude subagent)
+Confirmed sound: Codex/Claude resume (state, re-emit hashes, CRLF offsets, zst never resumed), retry idempotency, reconcile endpoint (ONLY_FULL_GROUP_BY-safe, user-scoped, auth + throttle, no migrations).
+- M1 (high) whole-JSON sources (Gemini, Cline, Continue) stopped importing after the first scan (resume point saved, fallback skipped) → FIX: resume only codex/claude `.jsonl`; fallback whenever parsing starts at byte 0; regression test.
+- M2 (med) desktop sync held the DB lock through 429/backoff sleeps (minutes) → FIX: `SyncPatience::ReturnQuickly` for the desktop (stop at 429/5xx as before, short network retries); CLI timer keeps `WaitForServer`.
+- M3 (low) `metr reconcile` counted zero-token events the server skips → FIX: same zero-token filter locally.
+- Not new: one rejected event blocks later batches (now 250 per batch) → noted for M4.
