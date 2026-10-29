@@ -13,6 +13,7 @@ use App\Services\Projects\ResolveProject;
 use Carbon\Carbon;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Schema;
 
 class IngestUsageEvents
 {
@@ -191,7 +192,6 @@ class IngestUsageEvents
             'output_tokens' => $tokens['output'] ?? 0,
             'cached_input_tokens' => $tokens['cached_input'] ?? 0,
             'cache_write_tokens' => $tokens['cache_write'] ?? 0,
-            'cache_write_1h_tokens' => min($tokens['cache_write_1h'] ?? 0, $tokens['cache_write'] ?? 0),
             'cache_read_tokens' => $tokens['cache_read'] ?? 0,
             'reasoning_tokens' => $tokens['reasoning'] ?? 0,
             'tool_tokens' => $tokens['tool'] ?? 0,
@@ -204,6 +204,12 @@ class IngestUsageEvents
             'client_updated_at' => isset($event['client_updated_at']) ? Carbon::parse($event['client_updated_at']) : null,
             'updated_at' => now(),
         ];
+
+        // Written only once the column exists: deploys do not run migrations,
+        // so the code must work before `php artisan migrate` adds it.
+        if (self::hasOneHourColumn()) {
+            $payload['cache_write_1h_tokens'] = min($tokens['cache_write_1h'] ?? 0, $tokens['cache_write'] ?? 0);
+        }
 
         if ($existing) {
             $existing->update($payload);
@@ -254,5 +260,12 @@ class IngestUsageEvents
             'started_at' => $timestamp,
             'last_seen_at' => $timestamp,
         ]);
+    }
+
+    private static ?bool $oneHourColumn = null;
+
+    public static function hasOneHourColumn(): bool
+    {
+        return self::$oneHourColumn ??= Schema::hasColumn('usage_events', 'cache_write_1h_tokens');
     }
 }

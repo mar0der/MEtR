@@ -58,4 +58,33 @@ class CacheWriteOneHourTest extends TestCase
         $this->assertSame(400_000, $event->cache_write_1h_tokens);
         $this->assertEqualsWithDelta(3.75 + 4.00, (float) $event->official_api_cost_usd, 1e-6);
     }
+
+    public function test_uploads_work_before_the_migration_adds_the_column(): void
+    {
+        \Illuminate\Support\Facades\Schema::table('usage_events', fn ($table) => $table->dropColumn('cache_write_1h_tokens'));
+        $flag = new \ReflectionProperty(\App\Services\Sync\IngestUsageEvents::class, 'oneHourColumn');
+        $flag->setValue(null, null);
+        try {
+            Provider::factory()->create(['id' => 'anthropic', 'display_name' => 'Anthropic']);
+            $user = User::factory()->create();
+            Device::factory()->create(['user_id' => $user->id, 'device_uuid' => 'd1']);
+            $this->actingAs($user)->postJson('/api/v1/sync/events', [
+                'device_uuid' => 'd1',
+                'client_batch_id' => 'b-1',
+                'events' => [[
+                    'source_event_id' => 'evt-1',
+                    'source_event_hash' => 'hash-1',
+                    'provider_id' => 'anthropic',
+                    'timestamp' => '2026-10-29T10:00:00Z',
+                    'model' => 'claude-opus-5-5',
+                    'tokens' => ['input' => 1, 'output' => 1, 'cached_input' => 0, 'cache_write' => 10,
+                        'cache_write_1h' => 5, 'cache_read' => 0, 'reasoning' => 0, 'tool' => 0, 'unknown' => 0],
+                    'warnings' => [],
+                ]],
+            ])->assertOk();
+            $this->assertSame(1, UsageEvent::count());
+        } finally {
+            $flag->setValue(null, null);
+        }
+    }
 }
