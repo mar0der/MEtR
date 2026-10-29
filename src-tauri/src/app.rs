@@ -325,41 +325,7 @@ async fn rescan_source(state: State<'_, AppState>, source_id: String) -> Result<
 async fn get_dashboard_summary(state: State<'_, AppState>) -> Result<DashboardSummary, String> {
     run_blocking(state, move |state| {
         let conn = state.db.blocking_lock();
-        let mut providers = query_provider_summaries(&conn)?;
-        let top_projects = query_top_projects(&conn)?;
-        let (recent_sessions, _) = query_recent_sessions(&conn, None, 0, 30)?;
-
-        let today = Local::now().date_naive();
-        let month_start = NaiveDate::from_ymd_opt(today.year(), today.month(), 1)
-            .unwrap_or(today);
-        let sub_costs = subscription_cost_for_period(&conn, month_start, today, None)?;
-
-        let mut subscriptions_total = 0.0;
-        let mut api_equivalent_total = 0.0;
-        for provider in &mut providers {
-            let sub = sub_costs.by_provider.get(&provider.provider_id).copied().unwrap_or(0.0);
-            provider.subscription_amount = sub;
-            provider.net_savings_vs_api = provider.api_equivalent_cost - sub;
-            subscriptions_total += sub;
-            api_equivalent_total += provider.api_equivalent_cost;
-        }
-
-        let totals = sum_usage(&providers);
-        let break_even_progress = if subscriptions_total > 0.0 {
-            Some(api_equivalent_total / subscriptions_total)
-        } else {
-            None
-        };
-        Ok(DashboardSummary {
-            providers,
-            totals,
-            subscriptions_total,
-            api_equivalent_total,
-            net_savings_vs_api: api_equivalent_total - subscriptions_total,
-            break_even_progress,
-            top_projects,
-            recent_sessions,
-        })
+        dashboard_summary(&conn)
     })
     .await
 }
@@ -858,57 +824,7 @@ async fn login_sync(state: State<'_, AppState>, input: LoginInput) -> Result<Syn
     let db = state.db.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let conn = db.blocking_lock();
-        ensure_sync_config(&conn)?;
-
-        let device_name = format!(
-            "{}-{}",
-            std::env::consts::OS,
-            whoami::fallible::hostname().unwrap_or_else(|_| "unknown".to_string())
-        );
-
-        let (validated, _warning) = validate_server_url(&input.server_url)?;
-
-        let client = reqwest::blocking::Client::new();
-        let url = format!("{}/api/v1/auth/login", validated.trim_end_matches('/'));
-        let resp = client
-            .post(&url)
-            .json(&serde_json::json!({
-                "login": input.login,
-                "password": input.password,
-                "device_name": device_name,
-            }))
-            .send()
-            .map_err(|e| format!("Login request failed: {}", e))?;
-
-        if !resp.status().is_success() {
-            let body = resp.text().unwrap_or_default();
-            return Err(format!("Login failed: {}", body));
-        }
-
-        let data: Value = resp
-            .json()
-            .map_err(|e| format!("Invalid login response: {}", e))?;
-        let token = data
-            .get("token")
-            .and_then(|t| t.as_str())
-            .ok_or("No token in login response")?;
-        let username = data
-            .get("user")
-            .and_then(|u| u.get("username"))
-            .and_then(|u| u.as_str())
-            .unwrap_or(&input.login)
-            .to_string();
-
-        let now = now();
-        conn.execute(
-            "UPDATE sync_config SET server_url = ?1, auth_token = NULL, username = ?2, device_name = ?3, sync_enabled = 1, updated_at = ?4 WHERE id = 1",
-            params![validated, username, device_name, now],
-        )
-        .map_err(to_string)?;
-        set_sync_token(&conn, token)?;
-        let _ = pull_pricing_from_server(&conn);
-
-        get_sync_config(&conn)
+        login_with_password(&conn, &input, None)
     })
     .await
     .map_err(|e| e.to_string())?
@@ -918,35 +834,7 @@ async fn login_sync(state: State<'_, AppState>, input: LoginInput) -> Result<Syn
 async fn logout_sync(state: State<'_, AppState>) -> Result<SyncStatus, String> {
     run_blocking(state, move |state| {
         let conn = state.db.blocking_lock();
-        ensure_sync_config(&conn)?;
-
-        let server_url: String = conn
-            .query_row(
-                "SELECT server_url FROM sync_config WHERE id = 1",
-                [],
-                |r| r.get(0),
-            )
-            .map_err(to_string)?;
-        if let Some(token) = get_sync_token(&conn)? {
-            let _ = reqwest::blocking::Client::new()
-                .post(format!(
-                    "{}/api/v1/auth/logout",
-                    server_url.trim_end_matches('/')
-                ))
-                .header("Authorization", format!("Bearer {}", token))
-                .header("Accept", "application/json")
-                .send();
-        }
-
-        delete_sync_token(&conn)?;
-        let now = now();
-        conn.execute(
-            "UPDATE sync_config SET auth_token = NULL, username = NULL, user_id = NULL, last_sync_at = NULL, sync_enabled = 0, updated_at = ?1 WHERE id = 1",
-            params![now],
-        )
-        .map_err(to_string)?;
-
-        get_sync_config(&conn)
+        logout(&conn)
     })
     .await
 }

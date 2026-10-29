@@ -4,7 +4,7 @@
 use chrono::{Datelike, Local, NaiveDate, TimeZone, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::error::Error;
@@ -19,6 +19,7 @@ use walkdir::WalkDir;
 
 #[cfg(feature = "app")]
 mod app;
+pub mod headless;
 #[cfg(feature = "app")]
 pub use app::run;
 
@@ -692,7 +693,19 @@ fn keyring_entry() -> Result<keyring::Entry, keyring::Error> {
     keyring::Entry::new(KEYRING_SERVICE, KEYRING_USERNAME)
 }
 
+/// When set (headless CLI/daemon), the sync token lives in this 0600 file
+/// instead of the OS keychain, which servers usually do not have.
+static TOKEN_FILE: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
 fn get_sync_token(_conn: &Connection) -> Result<Option<String>, String> {
+    if let Some(path) = TOKEN_FILE.get() {
+        return match fs::read_to_string(path) {
+            Ok(token) if token.trim().is_empty() => Ok(None),
+            Ok(token) => Ok(Some(token.trim().to_string())),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(format!("Failed to read sync token file: {e}")),
+        };
+    }
     match keyring_entry() {
         Ok(entry) => match entry.get_password() {
             Ok(token) if token.is_empty() => Ok(None),
@@ -705,6 +718,9 @@ fn get_sync_token(_conn: &Connection) -> Result<Option<String>, String> {
 }
 
 fn set_sync_token(_conn: &Connection, token: &str) -> Result<(), String> {
+    if let Some(path) = TOKEN_FILE.get() {
+        return headless::write_private_file(path, token);
+    }
     let entry = keyring_entry().map_err(|e| format!("Failed to access keychain: {}", e))?;
     entry
         .set_password(token)
@@ -712,6 +728,14 @@ fn set_sync_token(_conn: &Connection, token: &str) -> Result<(), String> {
 }
 
 fn delete_sync_token(_conn: &Connection) -> Result<(), String> {
+    if let Some(path) = TOKEN_FILE.get() {
+        return match fs::remove_file(path) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                Err(format!("Failed to delete sync token file: {e}"))
+            }
+            _ => Ok(()),
+        };
+    }
     match keyring_entry() {
         Ok(entry) => match entry.delete_credential() {
             Ok(()) => Ok(()),
@@ -858,6 +882,139 @@ fn get_sync_config(conn: &Connection) -> Result<SyncStatus, String> {
         last_sync_error: row.5,
         sync_enabled: row.4,
         project_root: row.7,
+    })
+}
+
+/// Logs in to the sync server and stores the token. `device_name` defaults
+/// to `<os>-<hostname>`.
+fn login_with_password(
+    conn: &Connection,
+    input: &LoginInput,
+    device_name: Option<String>,
+) -> Result<SyncStatus, String> {
+    ensure_sync_config(conn)?;
+
+    let device_name = device_name.unwrap_or_else(|| {
+        format!(
+            "{}-{}",
+            std::env::consts::OS,
+            whoami::fallible::hostname().unwrap_or_else(|_| "unknown".to_string())
+        )
+    });
+
+    let (validated, _warning) = validate_server_url(&input.server_url)?;
+
+    let client = reqwest::blocking::Client::new();
+    let url = format!("{}/api/v1/auth/login", validated.trim_end_matches('/'));
+    let resp = client
+        .post(&url)
+        .json(&serde_json::json!({
+            "login": input.login,
+            "password": input.password,
+            "device_name": device_name,
+        }))
+        .send()
+        .map_err(|e| format!("Login request failed: {}", e))?;
+
+    if !resp.status().is_success() {
+        let body = resp.text().unwrap_or_default();
+        return Err(format!("Login failed: {}", body));
+    }
+
+    let data: Value = resp
+        .json()
+        .map_err(|e| format!("Invalid login response: {}", e))?;
+    let token = data
+        .get("token")
+        .and_then(|t| t.as_str())
+        .ok_or("No token in login response")?;
+    let username = data
+        .get("user")
+        .and_then(|u| u.get("username"))
+        .and_then(|u| u.as_str())
+        .unwrap_or(&input.login)
+        .to_string();
+
+    let now = now();
+    conn.execute(
+        "UPDATE sync_config SET server_url = ?1, auth_token = NULL, username = ?2, device_name = ?3, sync_enabled = 1, updated_at = ?4 WHERE id = 1",
+        params![validated, username, device_name, now],
+    )
+    .map_err(to_string)?;
+    set_sync_token(conn, token)?;
+    let _ = pull_pricing_from_server(conn);
+
+    get_sync_config(conn)
+}
+
+/// Revokes the token on the server (best effort) and forgets it locally.
+fn logout(conn: &Connection) -> Result<SyncStatus, String> {
+    ensure_sync_config(conn)?;
+
+    let server_url: String = conn
+        .query_row(
+            "SELECT server_url FROM sync_config WHERE id = 1",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(to_string)?;
+    if let Some(token) = get_sync_token(conn)? {
+        let _ = reqwest::blocking::Client::new()
+            .post(format!(
+                "{}/api/v1/auth/logout",
+                server_url.trim_end_matches('/')
+            ))
+            .header("Authorization", format!("Bearer {}", token))
+            .header("Accept", "application/json")
+            .send();
+    }
+
+    delete_sync_token(conn)?;
+    let now = now();
+    conn.execute(
+        "UPDATE sync_config SET auth_token = NULL, username = NULL, user_id = NULL, last_sync_at = NULL, sync_enabled = 0, updated_at = ?1 WHERE id = 1",
+        params![now],
+    )
+    .map_err(to_string)?;
+
+    get_sync_config(conn)
+}
+
+fn dashboard_summary(conn: &Connection) -> Result<DashboardSummary, String> {
+    let mut providers = query_provider_summaries(conn)?;
+    let top_projects = query_top_projects(conn)?;
+    let (recent_sessions, _) = query_recent_sessions(conn, None, 0, 30)?;
+
+    let today = Local::now().date_naive();
+    let month_start = NaiveDate::from_ymd_opt(today.year(), today.month(), 1)
+        .unwrap_or(today);
+    let sub_costs = subscription_cost_for_period(conn, month_start, today, None)?;
+
+    let mut subscriptions_total = 0.0;
+    let mut api_equivalent_total = 0.0;
+    for provider in &mut providers {
+        let sub = sub_costs.by_provider.get(&provider.provider_id).copied().unwrap_or(0.0);
+        provider.subscription_amount = sub;
+        provider.net_savings_vs_api = provider.api_equivalent_cost - sub;
+        subscriptions_total += sub;
+        api_equivalent_total += provider.api_equivalent_cost;
+    }
+
+    let totals = sum_usage(&providers);
+    let break_even_progress = if subscriptions_total > 0.0 {
+        Some(api_equivalent_total / subscriptions_total)
+    } else {
+        None
+    };
+    Ok(DashboardSummary {
+        providers,
+        totals,
+        subscriptions_total,
+        api_equivalent_total,
+        net_savings_vs_api: api_equivalent_total - subscriptions_total,
+        break_even_progress,
+        top_projects,
+        recent_sessions,
     })
 }
 
