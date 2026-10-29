@@ -43,6 +43,14 @@ Next: M3 (incremental scan by offset, sync batching/retry, reconciliation endpoi
 - M3 review fixed (whole-JSON resume regression, desktop sync stays quick under rate limits, reconcile zero-token filter); merged to main. Incremental = full scan on real data again.
 - **Deploy Backend failed at "Setup SSH"** (runner cannot reach DEPLOY_HOST over Tailscale) → production unchanged and healthy; reconcile endpoint not live yet. Same root cause as the release publish failure. Details + re-run steps in outbox `20261029-1910-release-blocked.md` (Guardian/Petar: Tailscale/secrets are off-limits for me).
 
+## 2026-10-29 ~19:35 — handover state
+- **the20th** runs the M3 CLI (`~/.local/bin/metr`, portable build): hourly timer + web UI on 127.0.0.1:8790 and 100.115.64.43:8790. Waiting for Petar's `! metr login --user <name>`; then `metr sync` uploads ~28k events (rides out the 60 req/min limit) and `metr reconcile` checks them (needs the reconcile endpoint deployed).
+- **the18th package**: `~/Developer/_po/metr/outbox/files/metr-26.41.0-linux-x86_64.tar.gz` (+ .sha256), steps in outbox `20261029-1915-the18th-install.md` / `docs/linux-cli.md`.
+- **Blocked on CI→deploy-host route**: release 26.41.0 (Mac/Windows) and the backend deploy (reconcile endpoint). Re-run steps in outbox `20261029-1910-release-blocked.md`.
+- **Waiting on Guardian**: Grok Bot local-usage research (structure only), Claude desktop `local-agent-mode-sessions` sample, Mac `.claude-accounts` cleanup run, Windows sweep, the18th users/glibc.
+- **Cleanup done**: removed src-tauri/target (16.2 GB), sync-server/backend/vendor (83 MB), node_modules (177 MB), dist, scratch tools; merged branches deleted; no worktrees. Kept: zig 0.13 in `~/.local/opt/zig-linux-x86_64-0.13.0` and `cargo-zigbuild` in `~/.cargo/bin` (needed by `scripts/build-linux-cli.sh`).
+- **Next (M4 / follow-ups)**: one rejected event blocks later sync batches (quarantine bad events); per-machine reconciliation report once all 4 machines sync; Claude desktop agent sessions; Codex sqlite fallback only if the Mac re-sweep still shows a gap.
+
 ## Mac cleanup: retire ~/.claude-accounts (for Guardian to run on the Mac, Petar approving)
 Petar decision 18:26: one Claude account now; METR scans only the real `~/.claude`. Do not run step 4 until steps 1–3 are clean.
 1. **Read-only checks**
