@@ -39,6 +39,10 @@ Next: M3 (incremental scan by offset, sync batching/retry, reconciliation endpoi
 - **Reconcile** (`040a708`): server `GET /api/v1/sync/reconcile` (read-only: per device × provider totals + duplicate checks) and `metr reconcile`. Backend change → merge auto-deploys; after merge I verify login, sync from the20th, dashboard, and that the Mac/Windows devices keep syncing.
 - Backend test suite: new tests pass; 9 pre-existing SQLite-only failures noted in BUGS.md.
 
+## 2026-10-29 ~19:25 — M3 merged (`dd79367`), backend deploy BLOCKED
+- M3 review fixed (whole-JSON resume regression, desktop sync stays quick under rate limits, reconcile zero-token filter); merged to main. Incremental = full scan on real data again.
+- **Deploy Backend failed at "Setup SSH"** (runner cannot reach DEPLOY_HOST over Tailscale) → production unchanged and healthy; reconcile endpoint not live yet. Same root cause as the release publish failure. Details + re-run steps in outbox `20261029-1910-release-blocked.md` (Guardian/Petar: Tailscale/secrets are off-limits for me).
+
 ## Mac cleanup: retire ~/.claude-accounts (for Guardian to run on the Mac, Petar approving)
 Petar decision 18:26: one Claude account now; METR scans only the real `~/.claude`. Do not run step 4 until steps 1–3 are clean.
 1. **Read-only checks**
@@ -54,5 +58,6 @@ Petar decision 18:26: one Claude account now; METR scans only the real `~/.claud
 6. Verify: METR → Rescan; Claude totals for the last 30 days unchanged (the account folders only held symlinks to `~/.claude/projects`).
 
 ## needs-petar
+- **CI cannot reach the deploy host** (blocks releases since 26.40.2 and backend deploys): fix the runner→the18th Tailscale route/secret, then re-run runs 40899903389 and 40893433131.
 - **Device alias leak:** server device `windows-DESKTOP-PG7TRK4` (last seen Oct 9) has an API-key-like string as its alias. Proposal: clear that alias (single-row UPDATE, non-destructive). Please rotate that Kimi key. Not printed anywhere.
 - **Linux device login (ready now):** type `! metr login --user <your METR username>` in the PO session (password prompt; device `linux-the20th`). Until then the20th scans hourly but does not upload.
