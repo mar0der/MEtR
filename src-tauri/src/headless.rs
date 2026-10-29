@@ -3,21 +3,28 @@
 
 use super::*;
 
+pub use rusqlite::Connection;
+
 /// Where the CLI keeps its database and token.
 #[derive(Debug, Clone)]
 pub struct Paths {
     pub db: PathBuf,
     pub token: PathBuf,
+    /// Last scheduled run, for health checks.
+    pub last_run: PathBuf,
 }
 
 impl Paths {
-    /// `~/.local/share/metr/metr.db` and `~/.config/metr/token` (XDG dirs).
+    /// `~/.local/share/metr/metr.db`, `~/.config/metr/token` and
+    /// `~/.local/state/metr/last-run.json` (XDG dirs).
     pub fn default_paths() -> Result<Self, String> {
         let data = dirs::data_dir().ok_or("No data directory (is HOME set?)")?;
         let config = dirs::config_dir().ok_or("No config directory (is HOME set?)")?;
+        let state = dirs::state_dir().unwrap_or_else(|| data.clone());
         Ok(Self {
             db: data.join("metr").join("metr.db"),
             token: config.join("metr").join("token"),
+            last_run: state.join("metr").join("last-run.json"),
         })
     }
 }
@@ -259,7 +266,11 @@ mod tests {
 
     fn temp_paths() -> (PathBuf, Paths) {
         let root = std::env::temp_dir().join(format!("metr-headless-{}", Uuid::new_v4()));
-        let paths = Paths { db: root.join("data/metr.db"), token: root.join("config/token") };
+        let paths = Paths {
+            db: root.join("data/metr.db"),
+            token: root.join("config/token"),
+            last_run: root.join("state/last-run.json"),
+        };
         (root, paths)
     }
 
