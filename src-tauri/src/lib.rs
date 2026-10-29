@@ -5448,6 +5448,39 @@ mod tests {
         std::fs::remove_dir_all(outside).unwrap();
     }
 
+    /// Mac account switcher: `~/.claude-accounts/account-N/projects` are
+    /// symlinks to `~/.claude/projects`. Scanning the account dirs (as
+    /// CLAUDE_CONFIG_DIR sources or one parent source) must not double count.
+    #[cfg(unix)]
+    #[test]
+    fn claude_account_symlinks_are_not_double_counted() {
+        let conn = scan_test_conn();
+        let home = scan_test_root("claude-accounts");
+        let main = home.join(".claude");
+        write_jsonl(&main.join("projects/-Users-petar-Developer-App/session.jsonl"), &["req-1", "req-2"]);
+        let accounts = home.join(".claude-accounts");
+        for n in 1..=3 {
+            let account = accounts.join(format!("account-{n}"));
+            std::fs::create_dir_all(&account).unwrap();
+            std::os::unix::fs::symlink(main.join("projects"), account.join("projects")).unwrap();
+        }
+        // Account 2 also keeps one transcript of its own.
+        write_jsonl(&accounts.join("account-2/transcripts/own.jsonl"), &["req-3", "req-1"]);
+
+        let mut roots = vec![main.clone(), accounts.clone()];
+        roots.extend((1..=3).map(|n| accounts.join(format!("account-{n}"))));
+        for (i, root) in roots.iter().enumerate() {
+            let mut source = claude_test_source();
+            source.id = format!("claude-{i}");
+            source.path = root.to_string_lossy().to_string();
+            scan_source(&conn, &source, true).unwrap();
+        }
+
+        let ids: Vec<String> = event_paths(&conn).into_iter().map(|(id, _)| id).collect();
+        assert_eq!(ids, ["req-1", "req-2", "req-3"]);
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
     fn claude_test_source() -> Source {
         Source {
             id: "claude-test".to_string(),
