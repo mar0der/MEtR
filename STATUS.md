@@ -79,6 +79,29 @@ Next: M3 (incremental scan by offset, sync batching/retry, reconciliation endpoi
 - Guardian runs the full reprice; `fix/prune-message` (`d475c3e`, cosmetic) merges after it.
 - Outbox: `_po/metr/outbox/20261030-0918-pricing-realism.md`.
 
+## 2026-10-30 ~13:25 — PARKED (Petar 13:14): idle until Petar evaluates subscriptions
+**Done (deployed, verified):** see the 10:45 entry. Pricing realism live (`7d32688`): no daily duplicate price rows, 30,915 duplicates pruned (backup kept), one shared price-job lock, 1-hour cache estimate (flagged, undoable) on the 3 devices that cannot resend. Outbox `20261030-0918-pricing-realism.md` says deployed; the full reprice is the Guardian's.
+
+**Prod snapshot at park (13:20 Dubai):** total $52,531.83, 11,967 events without a cost, 5,584 price rows. Devices last seen: linux-the18th 26.41.0 (today 09:08 UTC), linux-the20th 26.44.0 (08:16), windows-NX64-05258 **26.44.0** (07:05, updated), Mac `macos-Petars-MacBook-Air-2.local` still 26.40.2 (Oct 29 11:31).
+
+**Still wrong / open questions (meter updates + pricing):**
+1. **Unexplained drop since 10:45:** total went $53,084.72 → $52,531.83 (−$553) and unpriced events 11,829 → 11,967 (+138). Likely the Guardian's full reprice and/or NX64's first 26.44.0 sync. Not yet analysed; check per device × model before trusting the totals.
+2. **Mac + NX64 1-hour cache writes** still unreported unless a Full Rescan + Full Resync was done (~195k events, ~$29.8k Claude). Expected +$2.5–3k. NX64 is on 26.44.0 now; did it do a *full* resync? Mac not updated yet and not syncing since Oct 29.
+3. **Estimated 1-hour share** (90%, from the20th's logs) is applied to other machines' old events; their real share may differ (depends on subagent use).
+4. **Unpriced:** codex-auto-review (~9k events, DESKTOP-PG7TRK4, no public price — Petar to pick an alias model or leave unpriced); ~2.5k gpt-5.x/gpt-6 total-only events (old Codex format, cannot be split); gpt-reserve (no LiteLLM price); 31 anthropic events with no model; Cursor 'auto' (out of scope).
+5. **Not modeled:** Haiku >100k-prompt tier (3 events), Claude fast mode (none seen on the20th; check the Mac).
+6. **9 seeded price rows** (cursor/ollama/lmstudio/cloudflare) still have several open rows each; harmless, not cleaned.
+7. **Known low race (E5):** an ingest during a reprice can leave one event on an older price until the next reprice.
+8. **Price source = LiteLLM API list prices.** METR shows what the usage *would* cost at API rates, not what the subscriptions actually cost; that comparison is Petar's subscription evaluation.
+9. 9 pre-existing SQLite-only backend test failures (BUGS.md).
+
+**Next (only after Petar is back):**
+- Confirm the Guardian's reprice is finished, then merge `fix/prune-message` (`d475c3e`, cosmetic; auto-deploys) and verify site/sync/logs.
+- Analyse item 1; Mac update to 26.44.0 + Full Rescan/Resync on Mac and NX64.
+- M3.5 per-machine × provider reconciliation report ("son's MacBook Air" separate, totals with and without it).
+- M4: quarantine bad events, Claude desktop agent sessions, fast-mode support if seen.
+- Still waiting on Guardian: Grok Bot research, local-agent-mode-sessions sample, Mac `.claude-accounts` cleanup, Windows sweep.
+
 ## Mac cleanup: retire ~/.claude-accounts (for Guardian to run on the Mac, Petar approving)
 Petar decision 18:26: one Claude account now; METR scans only the real `~/.claude`. Do not run step 4 until steps 1–3 are clean.
 1. **Read-only checks**
