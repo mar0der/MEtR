@@ -65,7 +65,8 @@ class RepriceModelUsage
                         ? $this->calculateUsageCost->handle($price, $tokens, $event->provider_id, $estimate)
                         : ['cost' => null, 'pricing_match_confidence' => 'missing'];
 
-                    if ($estimateOneHour !== null) {
+                    // Rewritten only when the flag changes (MySQL re-formats stored JSON).
+                    if ($estimateOneHour !== null && $event->hasUnreportedOneHourSplit() !== $estimateOneHour) {
                         $event->warnings_json = UsageEvent::warningsWithUnreportedSplit($event->warnings_json, $estimateOneHour);
                     }
                     $event->fill([

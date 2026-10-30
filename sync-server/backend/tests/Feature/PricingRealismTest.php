@@ -58,6 +58,7 @@ class PricingRealismTest extends TestCase
         return Device::factory()->create([
             'user_id' => User::factory()->create()->id,
             'display_name' => $name,
+            'last_seen_at' => '2026-10-09 11:00:00',
         ]);
     }
 
@@ -168,6 +169,9 @@ class PricingRealismTest extends TestCase
         $this->artisan('metr:prices:estimate-1h-cache')->assertFailed();
         // Ids only: display names are not unique across users.
         $this->artisan('metr:prices:estimate-1h-cache', ['--device' => ['old-windows']])->assertFailed();
+        // A device that synced since the cutoff should resend instead.
+        $current->update(['last_seen_at' => '2026-10-30 08:00:00']);
+        $this->artisan('metr:prices:estimate-1h-cache', ['--device' => [$current->id]])->assertFailed();
 
         $this->artisan('metr:prices:estimate-1h-cache', ['--device' => [$old->id], '--dry-run' => true])
             ->expectsOutputToContain('+3.38')
@@ -229,6 +233,7 @@ class PricingRealismTest extends TestCase
         $event = UsageEvent::first();
         $this->assertTrue($event->hasUnreportedOneHourSplit());
         $this->assertSame(['client-warning', UsageEvent::ONE_HOUR_SPLIT_UNREPORTED], json_decode($event->warnings_json, true));
+        $this->assertSame('{"a":"x"}', UsageEvent::warningsWithUnreportedSplit('{"a":"x"}', false));
         $this->assertEqualsWithDelta(9.625, (float) $event->official_api_cost_usd, 1e-9);
 
         // Upgraded client whose old rows were never re-parsed: 0 keeps the estimate.

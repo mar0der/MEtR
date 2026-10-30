@@ -78,10 +78,11 @@ class UsageEvent extends Model
     /** warnings_json with the unreported-split warning added or removed. */
     public static function warningsWithUnreportedSplit(?string $json, bool $unreported): ?string
     {
-        $warnings = array_values(array_filter(
-            self::decodeWarnings($json),
-            fn ($warning) => $warning !== self::ONE_HOUR_SPLIT_UNREPORTED,
-        ));
+        $all = self::decodeWarnings($json);
+        $warnings = array_filter($all, fn ($warning) => $warning !== self::ONE_HOUR_SPLIT_UNREPORTED);
+        if (array_is_list($all)) {
+            $warnings = array_values($warnings);
+        }
         if ($unreported) {
             $warnings[] = self::ONE_HOUR_SPLIT_UNREPORTED;
         }
@@ -89,12 +90,12 @@ class UsageEvent extends Model
         return $warnings === [] ? null : json_encode($warnings);
     }
 
-    /** @return list<mixed> */
+    /** @return array<mixed> */
     private static function decodeWarnings(?string $json): array
     {
         $warnings = $json === null ? [] : json_decode($json, true);
 
-        return is_array($warnings) ? array_values($warnings) : [];
+        return is_array($warnings) ? $warnings : [];
     }
 
     public function user()

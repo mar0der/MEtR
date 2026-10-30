@@ -41,8 +41,16 @@ class EstimateOneHourCache extends Command
 
             return self::FAILURE;
         }
+        // A device that synced since the server kept the split may have re-sent
+        // real values (0 for 5-minute writes); it should Full Rescan + Full Resync.
+        $storedSince = Carbon::parse(config('metr.one_hour_split_stored_since'));
         foreach ($devices as $device) {
-            $this->line("Device {$device->id}: {$device->display_name}");
+            $this->line("Device {$device->id}: {$device->display_name}, last seen {$device->last_seen_at}");
+            if (! $this->option('undo') && $device->last_seen_at !== null && Carbon::parse($device->last_seen_at)->gte($storedSince)) {
+                $this->error("{$device->display_name} has synced since {$storedSince} UTC; let it Full Rescan + Full Resync instead.");
+
+                return self::FAILURE;
+            }
         }
 
         $job = fn () => $this->apply($reprice, $ids);
