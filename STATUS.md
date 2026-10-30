@@ -72,6 +72,13 @@ Next: M3 (incremental scan by offset, sync batching/retry, reconciliation endpoi
 - `metr:prices:reprice` (+ nightly after metr:prices:update); resolver tie-break fix. Reviewed + tested; waits for deploy. Run order in outbox `20261029-2030-reprice.md`.
 - the20th vs server: 29,452 = 29,452 events; cost gap $65.87 = Anthropic 1-hour writes (closes after deploy + migrate + full resync). codex-auto-review left unpriced (no published price, 4 events in Petar's account).
 
+## 2026-10-30 ~10:45 — pricing realism deployed (`7d32688`, Guardian 09:18)
+- Daily duplicate price rows fixed (rounding + tolerant compare, one open row per model); prod: 0 new rows on a manual run, 30,915 unused duplicates pruned after a backup (`/opt/metr-sync/backups/model_prices-20261030T061421Z-pre-pricing-realism.sql.gz`); total cost unchanged.
+- One shared lock for price jobs; scheduler `onOneServer()`.
+- 1-hour cache writes: the20th full resync → server = local exactly; estimate applied (flagged, undoable) to windows-DESKTOP-PG7TRK4, son's MacBook Air, Windows Desktop: +$66.83. Mac + NX64 need Full Rescan + Full Resync on 26.44.0 (Petar).
+- Guardian runs the full reprice; `fix/prune-message` (`d475c3e`, cosmetic) merges after it.
+- Outbox: `_po/metr/outbox/20261030-0918-pricing-realism.md`.
+
 ## Mac cleanup: retire ~/.claude-accounts (for Guardian to run on the Mac, Petar approving)
 Petar decision 18:26: one Claude account now; METR scans only the real `~/.claude`. Do not run step 4 until steps 1–3 are clean.
 1. **Read-only checks**
