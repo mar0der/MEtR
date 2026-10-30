@@ -9,12 +9,6 @@ class CalculateUsageCost
     /**
      * Calculate API-equivalent cost in USD.
      *
-     * @param  array<string, int>  $tokens
-     * @return array{cost: float|null, pricing_match_confidence: string}
-     */
-    /**
-     * Calculate API-equivalent cost in USD.
-     *
      * NOTE: Keep in sync with src-tauri/src/lib.rs calculate_cost()
      * Token semantics:
      *   - Anthropic/Claude: input_tokens is ALREADY uncached (cache_read/cache_write are separate)
@@ -23,8 +17,15 @@ class CalculateUsageCost
      * @param  array<string, int>  $tokens
      * @return array{cost: float|null, pricing_match_confidence: string}
      */
-    public function handle(ModelPrice $price, array $tokens, string $providerId = ''): array
+    public function handle(ModelPrice $price, array $tokens, string $providerId = '', bool $estimateOneHour = false): array
     {
+        // The client did not report how much of cache_write used the 1-hour TTL:
+        // assume the measured share (see config/metr.php) and say it is an estimate.
+        $estimated = $estimateOneHour && ($tokens['cache_write'] ?? 0) > 0 && ($tokens['cache_write_1h'] ?? 0) === 0;
+        if ($estimated) {
+            $tokens['cache_write_1h'] = (int) round($tokens['cache_write'] * config('metr.estimated_one_hour_cache_share', 0.9));
+        }
+
         $cost = 0.0;
         $missingRate = false;
 
@@ -68,7 +69,7 @@ class CalculateUsageCost
 
         return [
             'cost' => round($cost, 10),
-            'pricing_match_confidence' => 'exact',
+            'pricing_match_confidence' => $estimated ? 'estimated' : 'exact',
         ];
     }
 

@@ -47,9 +47,12 @@ class CacheWriteOneHourTest extends TestCase
             ]],
         ])->assertOk();
 
-        // An older client: no 1-hour split, all writes at the 5-minute rate.
+        // An older client sends no 1-hour split: 90% of writes are assumed 1-hour
+        // (900k x 10 + 100k x 6.25), marked as an estimate; tokens stay as sent.
         $upload($tokens);
-        $this->assertEqualsWithDelta(6.25, (float) UsageEvent::first()->official_api_cost_usd, 1e-6);
+        $this->assertEqualsWithDelta(9.625, (float) UsageEvent::first()->official_api_cost_usd, 1e-6);
+        $this->assertSame('estimated', UsageEvent::first()->pricing_match_confidence);
+        $this->assertSame(0, UsageEvent::first()->cache_write_1h_tokens);
 
         // Re-sent with 400k of the writes at 1-hour TTL: 600k x 6.25 + 400k x 10.
         $upload($tokens + ['cache_write_1h' => 400_000]);
@@ -57,6 +60,7 @@ class CacheWriteOneHourTest extends TestCase
         $this->assertSame(1, UsageEvent::count());
         $this->assertSame(400_000, $event->cache_write_1h_tokens);
         $this->assertEqualsWithDelta(3.75 + 4.00, (float) $event->official_api_cost_usd, 1e-6);
+        $this->assertSame('exact', $event->pricing_match_confidence);
     }
 
     public function test_uploads_work_before_the_migration_adds_the_column(): void

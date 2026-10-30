@@ -2,6 +2,7 @@
 
 namespace App\Console\Commands;
 
+use App\Console\PriceJobLock;
 use App\Models\ModelPrice;
 use App\Models\UsageEvent;
 use App\Services\Pricing\RepriceModelUsage;
@@ -25,6 +26,14 @@ class RepriceUsage extends Command
     protected $description = 'Reprice stored usage events with the current model prices';
 
     public function handle(RepriceModelUsage $reprice): int
+    {
+        // A dry run writes nothing, so it may run beside a price job.
+        return $this->option('dry-run')
+            ? $this->reprice($reprice)
+            : PriceJobLock::run($this, fn () => $this->reprice($reprice));
+    }
+
+    private function reprice(RepriceModelUsage $reprice): int
     {
         $pairs = $this->pairs();
         if ($pairs->isEmpty()) {

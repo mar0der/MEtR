@@ -79,8 +79,8 @@ class LiteLLmPricingSource extends AbstractPricingSource
             $prices[$model] = [
                 'provider_id' => $internalProvider,
                 'model' => $model,
-                'input_per_1m' => (float) $input * 1_000_000,
-                'output_per_1m' => (float) $output * 1_000_000,
+                'input_per_1m' => self::perMillion($input),
+                'output_per_1m' => self::perMillion($output),
                 'cached_input_per_1m' => $this->extractCachedInput($entry),
                 'cache_write_per_1m' => $this->extractCacheWrite($entry),
                 'cache_read_per_1m' => $this->extractCacheRead($entry),
@@ -90,6 +90,15 @@ class LiteLLmPricingSource extends AbstractPricingSource
         }
 
         return $prices;
+    }
+
+    /**
+     * LiteLLM gives USD per token; 3e-06 * 1e6 is 2.9999999999999996 in floats,
+     * which never equals the stored 3.0. Round to the stored precision.
+     */
+    public static function perMillion(mixed $perToken): float
+    {
+        return round((float) $perToken * 1_000_000, 6);
     }
 
     private function normalizeModelName(string $key, string $provider): string
@@ -113,21 +122,21 @@ class LiteLLmPricingSource extends AbstractPricingSource
     {
         $cached = $entry['cache_read_input_token_cost'] ?? $entry['cached_input_cost_per_token'] ?? null;
 
-        return $cached !== null ? (float) $cached * 1_000_000 : null;
+        return $cached !== null ? self::perMillion($cached) : null;
     }
 
     private function extractCacheWrite(array $entry): ?float
     {
         $cost = $entry['cache_creation_input_token_cost'] ?? null;
 
-        return $cost !== null ? (float) $cost * 1_000_000 : null;
+        return $cost !== null ? self::perMillion($cost) : null;
     }
 
     private function extractCacheRead(array $entry): ?float
     {
         $cost = $entry['cache_read_input_token_cost'] ?? null;
 
-        return $cost !== null ? (float) $cost * 1_000_000 : null;
+        return $cost !== null ? self::perMillion($cost) : null;
     }
 
     /**
