@@ -157,6 +157,17 @@ class IngestUsageEvents
             'pricing_match_confidence' => 'missing',
         ];
 
+        // Clients before 26.40 do not report the 1-hour cache write split. A
+        // client upgraded after its logs were parsed re-sends such events with
+        // 0, so a 0 for unchanged cache writes keeps an existing estimate.
+        $estimateOneHour = self::hasOneHourColumn()
+            && $providerId === 'anthropic'
+            && ($tokens['cache_write'] ?? 0) > 0
+            && (! array_key_exists('cache_write_1h', $tokens)
+                || ((int) ($tokens['cache_write_1h'] ?? 0) === 0
+                    && $existing?->hasUnreportedOneHourSplit()
+                    && (int) $existing->cache_write_tokens === (int) $tokens['cache_write']));
+
         if ($model) {
             $price = $this->resolveModelPrice->handle($providerId, $model, $timestamp);
             if ($price) {
@@ -165,7 +176,7 @@ class IngestUsageEvents
                 // Until the migration stores the 1-hour split, price without it,
                 // so a later repricing of the stored tokens gives the same cost.
                 $priced = self::hasOneHourColumn() ? $tokens : array_diff_key($tokens, ['cache_write_1h' => 0]);
-                $costData = $this->calculateUsageCost->handle($price, $priced, $providerId);
+                $costData = $this->calculateUsageCost->handle($price, $priced, $providerId, $estimateOneHour);
             } elseif (($tokens['unknown'] ?? 0) === 0 && isset($event['client_cost']['official_api_cost_usd'])) {
                 $costData = [
                     'cost' => (float) $event['client_cost']['official_api_cost_usd'],
@@ -202,7 +213,10 @@ class IngestUsageEvents
             'official_api_cost_usd' => $costData['cost'],
             'model_price_id' => $price?->id,
             'pricing_match_confidence' => $costData['pricing_match_confidence'],
-            'warnings_json' => ! empty($event['warnings']) ? json_encode($event['warnings']) : null,
+            'warnings_json' => UsageEvent::warningsWithUnreportedSplit(
+                ! empty($event['warnings']) ? json_encode($event['warnings']) : null,
+                $estimateOneHour,
+            ),
             'client_created_at' => isset($event['client_created_at']) ? Carbon::parse($event['client_created_at']) : null,
             'client_updated_at' => isset($event['client_updated_at']) ? Carbon::parse($event['client_updated_at']) : null,
             'updated_at' => now(),

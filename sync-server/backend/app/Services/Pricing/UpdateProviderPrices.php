@@ -30,7 +30,8 @@ class UpdateProviderPrices
     private function processPrices(PriceObservation $observation, string $providerId, array $parsedPrices, ?string $effectiveFrom = null): void
     {
         foreach ($parsedPrices as $model => $prices) {
-            $current = ModelPrice::where('provider_id', $providerId)
+            // Catalog rows all start 2025-01-01, so the newest row is the current one.
+            $open = ModelPrice::where('provider_id', $providerId)
                 ->where('model', $model)
                 ->whereNull('effective_to')
                 ->where('user_override', false)
@@ -38,22 +39,31 @@ class UpdateProviderPrices
                     $query->whereNull('catalog_version')
                         ->orWhere('catalog_version', '!=', 'user');
                 })
-                ->orderBy('effective_from', 'desc')
-                ->first();
+                ->orderByDesc('created_at')
+                ->orderByDesc('id')
+                ->get()
+                // MySQL matches names case-insensitively; another spelling is another model.
+                ->filter(fn (ModelPrice $price) => $price->model === $model)
+                ->values();
+            $current = $open->first();
 
-            $newValues = [
-                'input_per_1m' => $prices['input_per_1m'] ?? null,
-                'output_per_1m' => $prices['output_per_1m'] ?? null,
-                'cached_input_per_1m' => $prices['cached_input_per_1m'] ?? null,
-                'cache_write_per_1m' => $prices['cache_write_per_1m'] ?? null,
-                'cache_read_per_1m' => $prices['cache_read_per_1m'] ?? null,
-                'reasoning_per_1m' => $prices['reasoning_per_1m'] ?? null,
-                'tool_per_1m' => $prices['tool_per_1m'] ?? null,
-            ];
+            $newValues = [];
+            foreach (self::RATE_FIELDS as $field) {
+                $newValues[$field] = isset($prices[$field]) ? round((float) $prices[$field], 6) : null;
+            }
 
             $newAliases = isset($prices['aliases_json']) ? json_encode($prices['aliases_json']) : null;
 
-            if ($current && $this->pricesEqual($current, $newValues)) {
+            // Only one open catalog row per model; older open duplicates are closed.
+            // They never set a price (the newest row wins), so updated_at stays
+            // and metr:prices:reprice --changed-since does not pick them up.
+            if ($open->count() > 1) {
+                ModelPrice::whereIn('id', $open->slice(1)->pluck('id'))
+                    ->toBase()
+                    ->update(['effective_to' => $observation->fetched_at]);
+            }
+
+            if ($current && self::pricesEqual($current, $newValues)) {
                 // Prices unchanged — update aliases in place if they differ
                 $currentAliases = $current->aliases_json ?? '[]';
                 if ($newAliases !== null && $currentAliases !== $newAliases) {
@@ -92,22 +102,30 @@ class UpdateProviderPrices
         }
     }
 
-    private function pricesEqual(ModelPrice $current, array $new): bool
-    {
-        $fields = [
-            'input_per_1m',
-            'output_per_1m',
-            'cached_input_per_1m',
-            'cache_write_per_1m',
-            'cache_read_per_1m',
-            'reasoning_per_1m',
-            'tool_per_1m',
-        ];
+    public const RATE_FIELDS = [
+        'input_per_1m',
+        'output_per_1m',
+        'cached_input_per_1m',
+        'cache_write_per_1m',
+        'cache_read_per_1m',
+        'reasoning_per_1m',
+        'tool_per_1m',
+    ];
 
-        foreach ($fields as $field) {
-            $a = $current->$field !== null ? (float) $current->$field : null;
+    /** Rates are compared at the stored precision, with a float tolerance. */
+    public static function pricesEqual(ModelPrice $current, array $new): bool
+    {
+        foreach (self::RATE_FIELDS as $field) {
+            $a = $current->$field;
             $b = $new[$field] ?? null;
-            if ($a !== $b) {
+            if ($a === null || $b === null) {
+                if ($a !== $b) {
+                    return false;
+                }
+
+                continue;
+            }
+            if (abs(round((float) $a, 6) - round((float) $b, 6)) >= 1e-9) {
                 return false;
             }
         }

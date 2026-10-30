@@ -6,5 +6,10 @@
 - **Local double count when Codex archives/compresses a rollout** (event id hashed the file path). Fixed: raw-line reconciliation + one-time local cleanup. Server was already safe.
 - **Codex repeated token_count counted twice** (~0.2% overcount). Fixed forward; already-imported repeats stay in history (not worth a full reparse).
 
+## Fixed on `fix/pricing-realism` (2026-10-30)
+- **Daily duplicate price rows** (36.5k rows, ~440/day; float noise 3e-06*1e6 != 3.0 and "current" picked by effective_from only) → every nightly run repriced ~all 564k events (~2 h). Fixed: rounding + tolerant compare, newest open row is current, other open rows closed; `metr:prices:prune-duplicates` removes unused copies.
+- **Overlapping price jobs** (manual + scheduled run at once) → shared lock for update/reprice; `onOneServer()`.
+- **Claude 1-hour cache writes uploaded before 2026-10-30 03:00 priced at the 5-minute rate** (server column is new) → devices with logs: Full Rescan + Full Resync; devices without: `metr:prices:estimate-1h-cache` (90% 1-hour, flagged, undoable).
+
 ## Open
 - **Backend test suite has 9 pre-existing failures on SQLite** (found 2026-10-29 while adding the reconcile endpoint; not caused by it): DashboardTest ×3 (`GREATEST()` is MySQL-only, tests run on in-memory SQLite), RenewSubscriptionsTest ×3, SubscriptionsPageTest ×2, SyncTest::test_subscription_sync_is_idempotent (likely date-dependent). Production runs MySQL. Run with: `docker run --rm -v $PWD:/app -w /app -e CACHE_STORE=array php:8.4-cli php vendor/bin/phpunit` in sync-server/backend after `composer install`.

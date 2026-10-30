@@ -60,3 +60,14 @@ Fine: isDirty with decimal:10, chunkById + whereNull paging, price cache per run
 - R3 (med, pre-existing) same effective_from on old/new price rows → resolver could pick the old price → FIX: tie-break newest created_at, id.
 - R4 (low) alias-only changes missed → FIX: --changed-since uses updated_at.
 - minor: --only-missing + --changed-since now rejected; dry-run report labels "before".
+
+## 2026-10-30 — branch fix/pricing-realism (Claude subagent)
+Fine: lock (in-process reprice allowed, release in finally, Redis owner check), prune never changes a price, pricesEqual with decimal strings/NULLs, closing stale rows keeps history.
+- E1 (high) "estimated" kept only in pricing_match_confidence → lost after any missing/missing_price pass → FIX: flag in warnings_json (`cache_write_1h_unreported`), reprice reads the flag.
+- E2 (med) upgraded client re-sends never-reparsed rows with 1h=0 → estimate silently dropped → FIX: 0 with unchanged cache_write keeps an existing flag.
+- E3 (med) estimate --device matched display names across all users → FIX: ids only; only events stored before the split existed (config cutoff).
+- E4 (med) MySQL case-insensitive model match could close another spelling's row daily → FIX: exact match in PHP.
+- E5 (low) reprice vs ingest race → self-heals on the next reprice; not fixed.
+- E6 (low) prune crashed on NULL created_at → FIX: skip.
+- Extra: closing stale open rows no longer bumps updated_at (avoids one full reprice).
+- Re-review: E7 (med) estimate could hit events re-sent with real 0s after the cutoff (created_at does not move) → FIX: refuse devices seen since the cutoff (they resend instead). E8 (low) JSON re-formatting counted unchanged rows → FIX: rewrite only when the flag changes. E9 (low) object warnings lost keys → FIX: keep keys.

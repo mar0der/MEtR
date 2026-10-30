@@ -2,6 +2,7 @@
 
 namespace App\Console\Commands;
 
+use App\Console\PriceJobLock;
 use App\Services\Pricing\Sources\LiteLLmPricingSource;
 use App\Services\Pricing\UpdateProviderPrices;
 use Illuminate\Console\Command;
@@ -13,6 +14,11 @@ class UpdateModelPrices extends Command
     protected $description = 'Update model prices from external sources';
 
     public function handle(UpdateProviderPrices $updater): int
+    {
+        return PriceJobLock::run($this, fn () => $this->update($updater));
+    }
+
+    private function update(UpdateProviderPrices $updater): int
     {
         $source = $this->option('source');
         $dryRun = $this->option('dry-run');
@@ -31,7 +37,7 @@ class UpdateModelPrices extends Command
 
         $this->info('Fetching prices from LiteLLM...');
 
-        $pricingSource = new $sourceClass;
+        $pricingSource = $this->laravel->make($sourceClass);
         $observation = $pricingSource->observe();
 
         if ($forceReview) {

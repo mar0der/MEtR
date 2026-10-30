@@ -64,6 +64,40 @@ class UsageEvent extends Model
         'unknown_tokens' => 'integer',
     ];
 
+    /**
+     * Warning stored on a Claude event whose client did not report how much of
+     * cache_write used the 1-hour TTL; its cost uses the estimated share.
+     */
+    public const ONE_HOUR_SPLIT_UNREPORTED = 'cache_write_1h_unreported';
+
+    public function hasUnreportedOneHourSplit(): bool
+    {
+        return in_array(self::ONE_HOUR_SPLIT_UNREPORTED, self::decodeWarnings($this->warnings_json), true);
+    }
+
+    /** warnings_json with the unreported-split warning added or removed. */
+    public static function warningsWithUnreportedSplit(?string $json, bool $unreported): ?string
+    {
+        $all = self::decodeWarnings($json);
+        $warnings = array_filter($all, fn ($warning) => $warning !== self::ONE_HOUR_SPLIT_UNREPORTED);
+        if (array_is_list($all)) {
+            $warnings = array_values($warnings);
+        }
+        if ($unreported) {
+            $warnings[] = self::ONE_HOUR_SPLIT_UNREPORTED;
+        }
+
+        return $warnings === [] ? null : json_encode($warnings);
+    }
+
+    /** @return array<mixed> */
+    private static function decodeWarnings(?string $json): array
+    {
+        $warnings = $json === null ? [] : json_decode($json, true);
+
+        return is_array($warnings) ? $warnings : [];
+    }
+
     public function user()
     {
         return $this->belongsTo(User::class);
