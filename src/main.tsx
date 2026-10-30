@@ -194,6 +194,13 @@ type SyncStatus = {
   project_root: string | null;
 };
 
+type ScanResult = {
+  imported: number;
+  newest?: Record<string, string>;
+};
+
+const AUTO_SYNC_HEARTBEAT_MS = 60 * 60 * 1000;
+
 type SyncResult = {
   uploaded: number;
   batches: number;
@@ -281,6 +288,9 @@ function App() {
   activeTabRef.current = activeTab;
   sessionPageRef.current = sessionPage;
 
+  // True while a manual or automatic sync runs, so they never overlap.
+  const syncBusyRef = React.useRef(false);
+
   // Ref to guard against out-of-order fetchSessions responses
   const sessionRequestIdRef = React.useRef(0);
   const previousSessionTabRef = React.useRef(activeTab);
@@ -309,6 +319,39 @@ function App() {
       setPaginatedSessions(result);
     } catch (error) {
       setStatus(message(error));
+    }
+  };
+
+  // Uploads new calls without waiting for a Sync click. Runs only when logged in
+  // and there is something to send, or as an hourly heartbeat. Returns a short
+  // note for the status line ("" when it did not sync); sync_now also records
+  // errors in the Sync panel.
+  // Calls the server rejected keep a sync_error and wait for the hourly attempt,
+  // so one bad batch is not retried every 5 minutes.
+  const autoSync = async (): Promise<string> => {
+    if (syncBusyRef.current) return "";
+    let started = false;
+    try {
+      const sync = await api<SyncStatus>("get_sync_status");
+      if (!sync.logged_in || !sync.sync_enabled) return "";
+      const lastAttempt = sync.last_sync_attempt_at ? new Date(sync.last_sync_attempt_at).getTime() : 0;
+      const stale = Number.isNaN(lastAttempt) || Date.now() - lastAttempt > AUTO_SYNC_HEARTBEAT_MS;
+      if (sync.pending_events - sync.sync_error_count <= 0 && !stale) return "";
+      if (syncBusyRef.current) return "";
+      syncBusyRef.current = true;
+      started = true;
+      setSyncLoading(true);
+      const result = await api<SyncResult>("sync_now");
+      return result.errors.length > 0
+        ? ` Upload failed: ${result.errors[0]}`
+        : ` Uploaded ${result.uploaded} to the server.`;
+    } catch (error) {
+      return ` Upload failed: ${message(error)}`;
+    } finally {
+      if (started) {
+        syncBusyRef.current = false;
+        setSyncLoading(false);
+      }
     }
   };
 
@@ -423,6 +466,8 @@ function App() {
         running = true;
         try {
           await api("rescan_all");
+          const synced = await autoSync();
+          if (synced) setStatus(`Background sync:${synced}`);
           await refresh(false);
         } catch {
           // Keep background polling quiet in the UI.
@@ -526,8 +571,9 @@ function App() {
     setScanLoading(true);
     setStatus("Scanning new and changed files...");
     try {
-      const result = await api<{ imported: number }>("rescan_all");
-      setStatus(`Scan complete. Imported ${result.imported} new model call(s).`);
+      const result = await api<ScanResult>("rescan_all");
+      const synced = await autoSync();
+      setStatus(`Scan complete. Imported ${result.imported} new model call(s).${newestCallsText(result.newest)}${synced}`);
       await refresh(false);
     } catch (error) {
       setStatus(message(error));
@@ -541,8 +587,9 @@ function App() {
     setFullScanLoading(true);
     setStatus("Full rescan running...");
     try {
-      const result = await api<{ imported: number }>("rescan_all_full");
-      setStatus(`Full rescan complete. Imported ${result.imported} new model call(s).`);
+      const result = await api<ScanResult>("rescan_all_full");
+      const synced = await autoSync();
+      setStatus(`Full rescan complete. Imported ${result.imported} new model call(s).${newestCallsText(result.newest)}${synced}`);
       await refresh(false);
     } catch (error) {
       setStatus(message(error));
@@ -714,6 +761,8 @@ function App() {
   };
 
   const doSync = async () => {
+    if (syncBusyRef.current) return;
+    syncBusyRef.current = true;
     setSyncLoading(true);
     setStatus("Syncing...");
     try {
@@ -729,14 +778,17 @@ function App() {
     } catch (error) {
       setStatus(message(error));
     } finally {
+      syncBusyRef.current = false;
       setSyncLoading(false);
     }
   };
 
   const doFullResync = async () => {
+    if (syncBusyRef.current) return;
     if (!window.confirm("Full resync will re-upload local model calls to repair server-side project, model, and cost fields. Continue?")) {
       return;
     }
+    syncBusyRef.current = true;
     setSyncLoading(true);
     setStatus("Running full resync...");
     try {
@@ -752,6 +804,7 @@ function App() {
     } catch (error) {
       setStatus(message(error));
     } finally {
+      syncBusyRef.current = false;
       setSyncLoading(false);
     }
   };
@@ -1996,6 +2049,13 @@ function date(value: string | null) {
     timeStyle: "short",
     timeZone: DISPLAY_TIME_ZONE,
   }).format(parsed);
+}
+
+/** " Newest call: Claude Oct 29, 2026, 10:23 AM; …" so "imported 0" is not mistaken for a broken scan. */
+function newestCallsText(newest?: Record<string, string>) {
+  const entries = Object.entries(newest ?? {}).sort(([, a], [, b]) => (Date.parse(b) || 0) - (Date.parse(a) || 0));
+  if (entries.length === 0) return " No model calls found on this machine yet.";
+  return ` Newest call: ${entries.map(([provider, ts]) => `${providerLabel(provider)} ${date(ts)}`).join("; ")}.`;
 }
 
 function providerLabel(providerId: string) {

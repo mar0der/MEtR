@@ -71,3 +71,11 @@ Fine: lock (in-process reprice allowed, release in finally, Redis owner check), 
 - E6 (low) prune crashed on NULL created_at → FIX: skip.
 - Extra: closing stale open rows no longer bumps updated_at (avoids one full reprice).
 - Re-review: E7 (med) estimate could hit events re-sent with real 0s after the cutoff (created_at does not move) → FIX: refuse devices seen since the cutoff (they resend instead). E8 (low) JSON re-formatting counted unchanged rows → FIX: rewrite only when the flag changes. E9 (low) object warnings lost keys → FIX: keep keys.
+
+## 2026-10-30 — branch fix/desktop-auto-sync (Claude subagent)
+No blocking findings (no deadlock: sync_now drops its first lock before the blocking task; server dedupes re-sent calls).
+- A1 (med) background sync's progress events left a stuck "Syncing…" status → FIX: background sync sets a final status line.
+- A2 (med) background upload holds the DB lock with Sync buttons still enabled → FIX: one shared busy flag; Sync buttons disabled while any sync runs; auto-sync skips if a sync is running.
+- A3 (low) a rejected batch (sync_error) would retry every 5 min → FIX: auto-sync counts only pending calls without sync_error; errored ones wait for the hourly attempt.
+- A4 (low) newest-call sort by string → FIX: sort by Date.parse.
+- A5 (low) records without timestamp show scan time as newest → noted in BUGS.md (display only).

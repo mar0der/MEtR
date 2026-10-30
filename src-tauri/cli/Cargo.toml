@@ -1,6 +1,6 @@
 [package]
 name = "metr-cli"
-version = "26.44.0"
+version = "26.44.1"
 description = "METR command line and daemon for Linux dev machines and servers"
 authors = ["MEtR"]
 edition = "2021"
