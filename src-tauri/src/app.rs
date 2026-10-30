@@ -286,7 +286,10 @@ async fn rescan_all(state: State<'_, AppState>) -> Result<Value, String> {
         for source in sources.into_iter().filter(|s| s.enabled) {
             imported += scan_source(&conn, &source, false)?;
         }
-        Ok::<_, String>(serde_json::json!({ "imported": imported }))
+        Ok::<_, String>(serde_json::json!({
+            "imported": imported,
+            "newest": newest_call_per_provider(&conn)?,
+        }))
     })
     .await
     .map_err(|e| e.to_string())?
@@ -304,7 +307,10 @@ async fn rescan_all_full(state: State<'_, AppState>) -> Result<Value, String> {
         for source in sources.into_iter().filter(|s| s.enabled) {
             imported += scan_source(&conn, &source, true)?;
         }
-        Ok::<_, String>(serde_json::json!({ "imported": imported }))
+        Ok::<_, String>(serde_json::json!({
+            "imported": imported,
+            "newest": newest_call_per_provider(&conn)?,
+        }))
     })
     .await
     .map_err(|e| e.to_string())?

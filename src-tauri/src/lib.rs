@@ -2727,6 +2727,25 @@ fn collect_indexed_drift(
     Ok(())
 }
 
+/// Timestamp of the newest model call per provider, so a scan that imports
+/// nothing can show whether the logs simply have no newer calls.
+fn newest_call_per_provider(conn: &Connection) -> Result<Value, String> {
+    let mut stmt = conn
+        .prepare("SELECT provider_id, MAX(timestamp) FROM usage_events GROUP BY provider_id")
+        .map_err(to_string)?;
+    let rows = stmt
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)))
+        .map_err(to_string)?;
+    let mut newest = serde_json::Map::new();
+    for row in rows {
+        let (provider_id, timestamp) = row.map_err(to_string)?;
+        if let Some(timestamp) = timestamp {
+            newest.insert(provider_id, Value::String(timestamp));
+        }
+    }
+    Ok(Value::Object(newest))
+}
+
 fn indexed_file_is_current(
     conn: &Connection,
     source: &Source,
@@ -4449,6 +4468,31 @@ mod tests {
                 json!({"provider_id": "p", "model": "unpriced", "event_count": 2}),
                 json!({"provider_id": "p", "model": "Unpriced", "event_count": 1}),
             ]
+        );
+    }
+
+    #[test]
+    fn newest_call_per_provider_reports_latest_timestamp() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+        assert_eq!(newest_call_per_provider(&conn).unwrap(), json!({}));
+        for (id, provider, ts) in [
+            ("a1", "anthropic", "2026-10-29T06:23:22.716Z"),
+            ("a2", "anthropic", "2026-10-28T09:00:00.000Z"),
+            ("o1", "openai", "2026-10-14T06:43:08.347Z"),
+        ] {
+            conn.execute(
+                "INSERT INTO usage_events (id, provider_id, source_id, parser_id, parser_version, timestamp, model,
+                   pricing_match_confidence, source_file_path, source_file_modified_at, source_hash, raw_record_hash,
+                   confidence, created_at, updated_at)
+                 VALUES (?1, ?2, 's', 'p', '1', ?3, 'm', 'exact', 'f', 'now', ?1, ?1, 'high', 'now', 'now')",
+                params![id, provider, ts],
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            newest_call_per_provider(&conn).unwrap(),
+            json!({ "anthropic": "2026-10-29T06:23:22.716Z", "openai": "2026-10-14T06:43:08.347Z" })
         );
     }
 
