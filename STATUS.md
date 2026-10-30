@@ -79,6 +79,27 @@ Next: M3 (incremental scan by offset, sync batching/retry, reconciliation endpoi
 - Guardian runs the full reprice; `fix/prune-message` (`d475c3e`, cosmetic) merges after it.
 - Outbox: `_po/metr/outbox/20261030-0918-pricing-realism.md`.
 
+## 2026-10-30 ~14:00 — "26.44.0 uploads no new calls" (Petar 13:17) → 26.44.1 merged, then PARKED
+**Evidence** (outbox `20261030-1317-no-new-calls.md`):
+- **Mac** (checked directly, read-only via `macbuild` = Petars-MacBook-Air-2.local; app 26.44.0, logged in): the scanner is complete.
+  - The newest timestamp in any `~/.claude/projects` log is 2026-10-29 06:23:22 UTC, the same call already in the local DB. 54 files changed since then, but only with lines that have no timestamp or usage (new `cost-state` record).
+  - The newest real Codex usage is Oct 14. Two threads resumed Oct 28 only repeated their totals.
+  - No other Claude or Codex logs were written on the Mac since Oct 29.
+  - The app has not *attempted* a sync since Oct 29 11:31 UTC, and 0 calls are waiting.
+  - => no new calls were made on this Mac. *Guess, not verified:* recent work ran on the20th, in claude.ai, or on another machine.
+- **NX64** (not reachable from the20th; server data only): it registered at 07:05 UTC today on 26.44.0 with 0 calls waiting, so no batch was sent. Calls from a Full Rescan after that would wait locally for a Sync click.
+- **Real defect** (all desktop versions): the app uploads only on a Sync click; Rescan and Full Rescan never upload, and "Imported 0" can't be told apart from a broken scanner.
+
+**Fix:** desktop **26.44.1** (`8f8ac64`, merged to main).
+- Auto-sync after the 5-minute and manual scans, and an hourly heartbeat.
+- The scan result names the newest call per provider and what was uploaded.
+- 56 Rust tests pass and `tsc` is clean. A subagent reviewed it: no blocking findings; A1–A4 fixed, A5 noted.
+- **Not tagged.** Tag `v26.44.1` to release (Guardian/Petar).
+
+**Petar:**
+- **Mac:** nothing is broken. Optionally test with one Claude Code prompt, then Rescan, then Sync. Full Resync once for the 1-hour pricing.
+- **NX64:** press Sync and read the result. If it shows 0 but Claude Code or Codex was used there after Oct 29 14:49 Dubai, tell me where it runs (WSL is not scanned).
+
 ## 2026-10-30 ~13:25 — PARKED (Petar 13:14): idle until Petar evaluates subscriptions
 **Done (deployed, verified):** see the 10:45 entry. Pricing realism live (`7d32688`): no daily duplicate price rows, 30,915 duplicates pruned (backup kept), one shared price-job lock, 1-hour cache estimate (flagged, undoable) on the 3 devices that cannot resend. Outbox `20261030-0918-pricing-realism.md` says deployed; the full reprice is the Guardian's.
 
@@ -86,7 +107,7 @@ Next: M3 (incremental scan by offset, sync batching/retry, reconciliation endpoi
 
 **Still wrong / open questions (meter updates + pricing):**
 1. **Unexplained drop since 10:45:** total went $53,084.72 → $52,531.83 (−$553) and unpriced events 11,829 → 11,967 (+138). Likely the Guardian's full reprice and/or NX64's first 26.44.0 sync. Not yet analysed; check per device × model before trusting the totals.
-2. **Mac + NX64 1-hour cache writes** still unreported unless a Full Rescan + Full Resync was done (~195k events, ~$29.8k Claude). Expected +$2.5–3k. NX64 is on 26.44.0 now; did it do a *full* resync? Mac not updated yet and not syncing since Oct 29.
+2. **Mac + NX64 1-hour cache writes** still unreported until each presses **Full Resync** (both are on 26.44.0; ~195k events, ~$29.8k Claude). Estimate (not measured): +$2.5–3k.
 3. **Estimated 1-hour share** (90%, from the20th's logs) is applied to other machines' old events; their real share may differ (depends on subagent use).
 4. **Unpriced:** codex-auto-review (~9k events, DESKTOP-PG7TRK4, no public price — Petar to pick an alias model or leave unpriced); ~2.5k gpt-5.x/gpt-6 total-only events (old Codex format, cannot be split); gpt-reserve (no LiteLLM price); 31 anthropic events with no model; Cursor 'auto' (out of scope).
 5. **Not modeled:** Haiku >100k-prompt tier (3 events), Claude fast mode (none seen on the20th; check the Mac).
@@ -96,6 +117,7 @@ Next: M3 (incremental scan by offset, sync batching/retry, reconciliation endpoi
 9. 9 pre-existing SQLite-only backend test failures (BUGS.md).
 
 **Next (only after Petar is back):**
+- Release 26.44.1 (tag), then NX64 + Mac verify uploads arrive without a Sync click.
 - Confirm the Guardian's reprice is finished, then merge `fix/prune-message` (`d475c3e`, cosmetic; auto-deploys) and verify site/sync/logs.
 - Analyse item 1; Mac update to 26.44.0 + Full Rescan/Resync on Mac and NX64.
 - M3.5 per-machine × provider reconciliation report ("son's MacBook Air" separate, totals with and without it).
